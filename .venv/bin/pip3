@@ -1,4 +1,4 @@
-#!/Users/jacobgardner/Documents/projects/omni-poster/.venv/bin/python3.12
+#!/Users/jacobgardner/Documents/projects/omni-poster/.venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys
