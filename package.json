@@ -1,0 +1,20 @@
+{
+  "dependencies": {
+    "axios": "^1.10.0",
+    "date-fns": "^4.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.12",
+    "@types/react": "^19.1.8",
+    "html-webpack-plugin": "^5.6.3",
+    "react-app-rewired": "^2.2.1"
+  },
+  "scripts": {
+    "start": "react-app-rewired start",
+    "build": "react-app-rewired build",
+    "test": "react-app-rewired test",
+    "eject": "react-scripts eject"
+  }
+}

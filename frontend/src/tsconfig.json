@@ -1,0 +1,11 @@
+{
+    "compilerOptions": {
+      "baseUrl": "src",
+      "target": "es5",
+      "lib": [
+        "dom",
+        "es5"
+      ],
+    },
+    "include": ["src"]
+  }

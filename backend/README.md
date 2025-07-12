@@ -38,3 +38,7 @@ pip install -r requirements.txt
 $ deactivate
 
 #COnfigure editor
+
+# start the live server
+
+fastapi dev main.py
