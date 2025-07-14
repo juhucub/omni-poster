@@ -1,10 +1,5 @@
 import React, { useState } from 'react';
 import MediaUploader   from './components/MediaUploader.tsx';
-import VideoPreview    from './components/VideoPreview.tsx';
-import MetadataForm    from './components/MetaDataForm.tsx';
-import PlatformSelector from './components/PlatformSelector.tsx';
-import SchedulePicker  from './components/SchedulePicker.tsx';
-import UploadHistoryTable from './components/UploadHistoryTable.tsx';
 import AuthPage from './components/AuthPage.tsx';
 import { useAuth }     from './context/AuthContext.tsx';
 
@@ -28,6 +23,10 @@ const App: React.FC = () => {
     }
   };
 
+  const handleLogout = () => {
+    logout();
+  }
+  /*
   // Final schedule submission
   const handleSubmitAll = async () => {
     if (!projectId || !metadata || platforms.length === 0 || !scheduledTime) return;
@@ -46,7 +45,7 @@ const App: React.FC = () => {
     } catch (e) {
       console.error(e);
     }
-  };
+  }; */
 
   if (!isAuthenticated) {
     return (
@@ -58,7 +57,20 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-100 p-6">
-      <header>…logout button…</header>
+       <header className="flex justify-end mb-6">
+        <button onClick={() => {
+          logout();
+          // if you need to reset any workflow state, do it here
+          setProjectId(null);
+          //setMetadata(null);
+          //setPlatforms([]);
+          //setScheduledTime(null);
+          setWorkflowStep('upload');
+        }}>
+          Logout
+        </button>
+      </header>
+
       <main className="max-w-4xl mx-auto space-y-8">
         {workflowStep === 'upload' && <MediaUploader onUploadSuccess={id => { setProjectId(id); next(); }} />}
 
@@ -90,7 +102,7 @@ const App: React.FC = () => {
 
         <section>
           <h2>Upload History</h2>
-          <UploadHistoryTable />
+         
         </section>
       </main>
     </div>

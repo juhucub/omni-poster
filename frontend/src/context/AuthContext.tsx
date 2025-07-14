@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo } from 'react';
 import axios, { AxiosInstance } from 'axios';
 
 // Define shape of auth context
@@ -66,17 +66,19 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, apiClient 
 
   // On mount, optionally fetch current user profile
   useEffect(() => {
-    if (accessToken) {
+    if (!accessToken) {
+      setUser(null);
+      return;
+    }
       client
         .get('/auth/me')
-        .then((res) => setUser(res.data))
+        .then(res => setUser(res.data))
         .catch(() => {
           // Token invalid or expired
           setAccessToken(null);
           localStorage.removeItem('access_token');
         });
-    }
-  }, [accessToken, client]);
+    }, [accessToken]);
 
   /**
    * Authenticate user and store token.

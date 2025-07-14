@@ -21,6 +21,7 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess }) => {
     const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [loader, setLoading] = useState<boolean>(false);
+    
     useContext(AuthContext);
     //validate a selcted file against allowed types and size
     const validateFile = (file: File, allowedTypes: string[]) => {
