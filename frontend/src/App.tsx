@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import MediaUploader   from './components/MediaUploader.tsx';
-import AuthPage from './components/AuthPage.tsx';
+import MediaUploader   from './pages/MediaUploader.tsx';
+import AuthPage from './pages/AuthPage.tsx';
 import { useAuth }     from './context/AuthContext.tsx';
 
 const App: React.FC = () => {
