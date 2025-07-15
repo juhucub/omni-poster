@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import MediaUploader   from './pages/MediaUploader.tsx';
 import AuthPage from './pages/AuthPage.tsx';
 import { useAuth }     from './context/AuthContext.tsx';
+import Dashboard from './pages/Dashboard.tsx';
 
 const App: React.FC = () => {
   const { isAuthenticated, login, logout } = useAuth();
@@ -60,51 +61,15 @@ const App: React.FC = () => {
        <header className="flex justify-end mb-6">
         <button onClick={() => {
           logout();
-          // if you need to reset any workflow state, do it here
           setProjectId(null);
-          //setMetadata(null);
-          //setPlatforms([]);
-          //setScheduledTime(null);
-          setWorkflowStep('upload');
         }}>
           Logout
         </button>
       </header>
 
-      <main className="max-w-4xl mx-auto space-y-8">
-        {workflowStep === 'upload' && <MediaUploader onUploadSuccess={id => { setProjectId(id); next(); }} />}
-
-        {workflowStep === 'preview' && projectId && (
-          <VideoPreview projectId={projectId} onReady={() => next()} />
-        )}
-
-        {workflowStep === 'meta' && projectId && (
-          <MetadataForm projectId={projectId} onComplete={data => { setMetadata(data); next(); }} />
-        )}
-
-        {workflowStep === 'platform' && (
-          <PlatformSelector initialSelected={platforms} onChange={sel => setPlatforms(sel)} />
-        )}
-
-        {workflowStep === 'schedule' && (
-          <SchedulePicker
-            onSchedule={iso => { setScheduledTime(iso); /* keep on this step until submit */ }}
-          />
-        )}
-
-        {workflowStep === 'schedule' && scheduledTime && (
-          <button onClick={handleSubmitAll} className="btn">Schedule Upload</button>
-        )}
-
-        {workflowStep === 'done' && (
-          <div className="text-green-700">Scheduled! <button onClick={() => window.location.reload()}>Start over</button></div>
-        )}
-
-        <section>
-          <h2>Upload History</h2>
-         
-        </section>
-      </main>
+      <main>
+        <Dashboard />
+      </ main>
     </div>
   );
 };
