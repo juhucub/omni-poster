@@ -3,6 +3,8 @@ import Sidebar from '../components/Sidebar';
 import Header from '../components/Header';
 import Summary from '../components/Summary';
 import Promo from '../components/Promo';
+import Metrics from '../components/Metrix';
+import Statistics from '../components/Statistics';
 
 const Dashboard = () => {
   return (
@@ -11,11 +13,13 @@ const Dashboard = () => {
       <main className="flex-1 p-6 space-y-6">
         <Header />
         <Summary />
-
+        <Metrics />
+        <Statistics />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          
+         { /* <Uploads />
+          <Scheduled /> */ }
         </div>
-       <Promo />
+        <Promo />
       </main>
     </div>
   );
