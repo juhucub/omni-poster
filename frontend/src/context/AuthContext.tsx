@@ -44,12 +44,16 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, apiClient 
   // Determine auth status
   const isAuthenticated = Boolean(accessToken);
 
-  // Use passed axios instance or default
-  const client = axios.create({
-                              baseURL: process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000',
-                              withCredentials: true,
-                            });
-
+   // memoize client so interceptors don't get re-registered on every render
+   const client = useMemo<AxiosInstance>(
+    () =>
+      axios.create({
+        baseURL:
+          process.env.REACT_APP_API_URL || "http://127.0.0.1:8000",
+        withCredentials: true,
+      }),
+    []
+  );
 
   // Attach interceptor to include Authorization header
   useEffect(() => {
@@ -78,7 +82,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, apiClient 
           setAccessToken(null);
           localStorage.removeItem('access_token');
         });
-    }, [accessToken]);
+    }, [accessToken, client]);
 
   /**
    * Authenticate user and store token.
