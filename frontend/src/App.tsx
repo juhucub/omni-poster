@@ -4,6 +4,7 @@ import { useAuth }     from './context/AuthContext.tsx';
 import MediaUploader   from './pages/MediaUploader.tsx';
 import AuthPage from './pages/AuthPage.tsx';
 import Dashboard from './pages/Dashboard.tsx';
+import AccountManager from './pages/AccountManager.tsx';
 
 const App: React.FC = () => {
   const { isAuthenticated, logout } = useAuth();
@@ -60,6 +61,15 @@ const App: React.FC = () => {
                 : <Navigate to="/login" replace />
             }
           />
+
+          <Route
+            path="/accounts"
+            element={isAuthenticated
+              ? <AccountManager />
+              : <Navigate to="/login" replace />
+            }
+          />
+
 
           {/* Redirect root and all unknown routes */}
           <Route

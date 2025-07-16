@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { listAccounts, deleteAccount, reconnectAccount } from '../api/accounts';
-import { AccountCard } from './AccountCard';
-import { GoalForm } from './GoalForm';
+import { listAccounts, deleteAccount, reconnectAccount, AccountOut } from '../api/accounts.ts';
+import { AccountCard } from './AccountCard.tsx';
+import { GoalForm } from './GoalForm.tsx';
 
 export const AccountList: React.FC = () => {
   const [accounts, setAccounts] = useState<AccountOut[]>([]);

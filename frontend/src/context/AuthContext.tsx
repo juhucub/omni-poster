@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo } from 'react';
 import axios, { AxiosInstance } from 'axios';
+import type { TokenResponse, MeResponse } from '../api/models'; 
 
 // Define shape of auth context
 interface AuthContextType {
@@ -45,15 +46,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, apiClient 
   const isAuthenticated = Boolean(accessToken);
 
    // memoize client so interceptors don't get re-registered on every render
-   const client = useMemo<AxiosInstance>(
-    () =>
-      axios.create({
-        baseURL:
-          process.env.REACT_APP_API_URL || "http://127.0.0.1:8000",
-        withCredentials: true,
-      }),
-    []
-  );
+   const client = useMemo(() => 
+   axios.create({
+     baseURL: process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000',
+     withCredentials: true,
+   }),
+ [],);
+ 
 
   // Attach interceptor to include Authorization header
   useEffect(() => {
@@ -90,7 +89,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, apiClient 
   const login = async (username: string, password: string) => {
     try {
       const response = await client.post('/auth/login', { username, password });
-      const token = response.data.access_token;
+      const token = response.data.access_token as string;
       // Persist token in memory and localStorage
       setAccessToken(token);
       localStorage.setItem('access_token', token);
@@ -106,7 +105,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, apiClient 
   const register = async (username: string, password: string) => {
     // calls FastAPI /auth/register (cookie + token)
     const resp = await client.post<TokenResponse>('/auth/register', { username, password });
-    const token = resp.data.access_token;
+    const token = resp.data.access_token as string;
     setAccessToken(token);
     localStorage.setItem('access_token', token);
     // now fetch profile
@@ -122,7 +121,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, apiClient 
     setUser(null);
     localStorage.removeItem('access_token');
     // Optionally notify backend
-    client.post('/auth/logout').catch(() => {});
+    //client.post('/auth/logout').catch(() => {});
   };
 
   /**
