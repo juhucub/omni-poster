@@ -3,6 +3,7 @@ import {BrowserRouter, Routes, Route, Navigate} from 'react-router-dom';
 import { useAuth }     from './context/AuthContext.tsx';
 import MediaUploader   from './pages/MediaUploader.tsx';
 import AuthPage from './pages/AuthPage.tsx';
+import LandingPage from './pages/LandingPage.tsx';
 import Dashboard from './pages/Dashboard.tsx';
 import AccountManager from './pages/AccountManager.tsx';
 
@@ -40,7 +41,7 @@ const App: React.FC = () => {
             path="/dashboard"
             element={
               isAuthenticated
-                ? <Dashboard />
+                ? <LandingPage />
                 : <Navigate to="/login" replace />
             }
           />
