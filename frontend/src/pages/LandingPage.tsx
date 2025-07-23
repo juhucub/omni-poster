@@ -3,14 +3,20 @@ import {useTheme} from '../hooks/useTheme.tsx';
 import { useInViewFadeIn } from '../hooks/useInViewFadeIn.tsx';
 import Hero from '../components/Hero.tsx';
 import StatsGrid from '../components/StatsSection.tsx';
+import { FeaturesGrid } from '../components/FeatureGrid.tsx';
+import { useScrollClamp } from '../hooks/useScrollClamp.tsx';
+
 import {
     FiHeart,
     FiCheckCircle,
     FiMail,
     FiRefreshCw,
+    FiStar,
+    FiZap,
+    FiSmile,
+    FiClock,
   } from 'react-icons/fi'
-  import FeatureCard from '../components/FeatureCard.tsx';
-import { useScrollClamp } from '../hooks/useScrollClamp.tsx';
+
 
 const stats: StatsGrid[] = [
     { value: '3K+', label: 'Videos launched monthly', description: 'Hands-free posting to every channel' },
@@ -18,81 +24,6 @@ const stats: StatsGrid[] = [
     { value: '5M+', label: 'Views delivered', description: 'Expanding reach with every upload' },
     { value: '24/7', label: 'Always-on scheduling', description: 'Your content, never off the clock' },
   ]
-
-
-interface RawFeature {
-    icon: React.ReactNode
-    title: string
-    description: string
-    initialAngle: number     // e.g. -3
-    maxDelta: number         // e.g. +6  (so final = initial + maxDelta)
-  }
-
-  const features: RawFeature[] = [
-    {
-      icon: <FiHeart size={24} aria-hidden />,
-      title: 'Safe accounts, easy scheduling',
-      description:
-        'Connect your social accounts securely. Schedule posts, track uploads, and keep your content calendar organized—never miss a moment.',
-      initialAngle: -3,
-      maxDelta: 6,
-    },
-    {
-      icon: <FiCheckCircle size={24} aria-hidden />,
-      title: 'One-click uploads, everywhere you post',
-      description:
-        'Publish to YouTube, TikTok, and Instagram all at once. Our tool adapts to each platform’s quirks, so you don’t have to sweat the details.',
-      initialAngle: 1,
-      maxDelta: -4,
-    },
-    {
-      icon: <FiMail size={24} aria-hidden />,
-      title: 'AI-powered metadata for more reach',
-      description:
-        'Get smart suggestions for titles, tags, and hashtags that help your content get discovered. Let AI handle the details so you can focus on your message.',
-      initialAngle: -2,
-      maxDelta: 5,
-    },
-    {
-      icon: <FiRefreshCw size={24} aria-hidden />,
-      title: 'Automate content, schedule, and grow',
-      description:
-        'Take control of your content workflow—create, schedule, and publish across every platform from one place. No more tab-hopping or missed deadlines, just smooth, stress-free posting.',
-      initialAngle: 2,
-      maxDelta: -6,
-    },
-  ]
-  
-  export const FeaturesGrid: React.FC = () => (
-    <section className="relative bg-[#0f172a] py-24 overflow-hidden">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 justify-center">
-        {features.map((feat) => (
-          <RotatingCard key={feat.title} {...feat} />
-        ))}
-      </div>
-    </section>
-  )
-
-  /** breaks out one card with dynamic scroll-based rotation */
-  function RotatingCard({ icon, title, description, initialAngle, maxDelta }: RawFeature) {
-    const ref = useRef<HTMLDivElement>(null)
-    // this angle will stay ≥ initialAngle, then interpolate to initialAngle+maxDelta
-    const angle = useScrollClamp(ref, initialAngle, maxDelta, 0.8)
-  
-    return (
-      <div
-        ref={ref}
-        className="w-[360px]" 
-        style={{
-          transform: `rotate(${angle}deg)`,
-          transition: 'transform 0.1s ease-out',
-        }}
-      >
-        <FeatureCard icon={icon} title={title} description={description} />
-      </div>
-    )
-  }
-
 
 export default function LandingPage() {
   return (
@@ -111,17 +42,6 @@ export default function LandingPage() {
         />
 
         <FeaturesGrid />
-        <Hero
-        title="AUTOMATE EVERY POST, EVERYWHERE"
-        subtitle="Effortlessly create, schedule, and share videos across all your channels. From idea to upload, manage every step in one seamless dashboard—no more juggling platforms or missing your moment."
-        primaryActionText="Start now"
-        onPrimaryAction={() => console.log('Start now')}
-        secondaryActionText="Watch demo"
-        onSecondaryAction={() => console.log('Watch demo')}
-        imageSrc="/corn.png"
-        imageAlt="Video management dashboard"
-        stats={stats}
-        />
     </>
   );
 }
@@ -129,11 +49,11 @@ export default function LandingPage() {
 
 function Nav() {
   return (
-    <nav className="bg-gray-900 text-white fixed w-full z-10">
+    <nav className="bg-gray-900 text-black fixed w-full z-10">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
         <a href="#" className="flex items-center space-x-2">
           <Logo className="h-8 w-8 text-white" />
-          <span className="text-xl font-bold uppercase">Dataway</span>
+          <span className="text-xl font-bold uppercase">Omniposter</span>
         </a>
         <div className="hidden md:flex space-x-8">
           <Dropdown title="Features">
@@ -157,53 +77,6 @@ function Nav() {
   );
 }
 
-
-function FeatureCards() {
-  const features = [
-    { title: 'Automate content, schedule, and grow', icon: ContentIcon },
-    { title: 'Create stunning videos in minutes', icon: VideoIcon },
-    { title: 'AI-powered metadata for more reach', icon: MetaIcon },
-    { title: 'One-click uploads, everywhere you post', icon: UploadIcon },
-  ];
-  return (
-    <section className="py-16 bg-gray-900 text-white overflow-hidden">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          {features.map((f, idx) => (
-            <div
-              key={f.title}
-              className={`p-6 bg-gray-800 border border-gray-700 rounded-lg transform ${idx % 2 === 0 ? '-rotate-3' : 'rotate-3'} hover:rotate-0 transition`}
-            >
-              <div className="w-12 h-12 mb-4"><f.icon /></div>
-              <h3 className="text-lg font-semibold uppercase mb-2">{f.title}</h3>
-              <p className="text-sm text-gray-400">{f.title} description goes here.</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function InfoCards() {
-  const infos = [
-    { title: 'Safe accounts, easy scheduling', icon: ShieldIcon },
-    { title: 'Cloud storage, instant access', icon: CloudIcon },
-  ];
-  return (
-    <section className="py-16 bg-white text-gray-900">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid grid-cols-1 md:grid-cols-2 gap-8">
-        {infos.map((inf) => (
-          <div key={inf.title} className="p-6 bg-gray-50 rounded-lg shadow space-y-4">
-            <div className="w-12 h-12 text-purple-600"><inf.icon /></div>
-            <h3 className="text-xl font-semibold">{inf.title}</h3>
-            <p className="text-sm text-gray-600">{inf.title} detailed text goes here.</p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
 
 function CallToAction() {
   return (

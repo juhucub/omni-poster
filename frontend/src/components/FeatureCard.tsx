@@ -10,6 +10,8 @@ export interface FeatureCardProps {
   description: string
   /** Optional wrapper classes (e.g. for width or transforms) */
   className?: string
+  /** dark = transparent + white border + white text; 'light' = white bg + gray border + dark text */
+  variant?: 'dark' | 'light'
 }
 
 const FeatureCard: React.FC<FeatureCardProps> = ({
@@ -17,41 +19,41 @@ const FeatureCard: React.FC<FeatureCardProps> = ({
   title,
   description,
   className = '',
+  variant = 'dark',
 }) => {
-  const titleId = `feature-card-title-${title
-    .toLowerCase()
-    .replace(/\s+/g, '-')}`
+    const isDark = variant === 'dark'
+
+    const bgClass = isDark ? 'bg-transparent' : 'bg-white'
+    const borderClass = isDark ? 'border-white' : 'border-gray-200'
+    const titleColor = isDark ? 'text-white' : 'text-gray-900'
+    const descColor = isDark ? 'text-gray-300' : 'text-gray-600'
+    const iconColor = isDark ? 'text-purple-500' : 'text-purple-600'
 
   return (
     <article
       role="region"
-      aria-labelledby={titleId}
-      className={
-        [
-          // transparent bg so the dark section shows through
-          'bg-transparent',
-          // 1px white border, softly rounded corners
-          'border border-white rounded-2xl',
-          // comfortable inner padding
-          'p-6',
-          // horizontal layout: icon + text
-          'flex items-start space-x-4',
-          // allow parent to override width or rotation
-          className,
-        ].join(' ')
-      }
+      aria-labelledby={`feature-${title}`}
+      className={[
+        bgClass,
+        'border',
+        borderClass,
+        'rounded-3xl',
+        'p-6',
+        'flex items-start space-x-4',
+        className,
+      ].join(' ')}
     >
-      <div className="flex-shrink-0 text-purple-500">
+      <div className={`${iconColor} flex-shrink-0`}>
         {icon}
       </div>
       <div>
         <h3
-          id={titleId}
-          className="text-white text-lg font-semibold leading-tight"
+          id={`feature-${title}`}
+          className={`${titleColor} text-lg font-semibold leading-tight`}
         >
           {title}
         </h3>
-        <p className="mt-2 text-gray-300 text-sm leading-relaxed">
+        <p className={`mt-2 ${descColor} text-sm leading-relaxed`}>
           {description}
         </p>
       </div>
