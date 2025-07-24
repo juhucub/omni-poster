@@ -5,6 +5,7 @@ from threading import Lock
 logger = logging.getLogger("uvicorn.error")
 
 # In-memory demo store use real DB later
+JOBS = {}
 _ACCOUNTS = {}
 _NEXT_ID = 1
 _LOCK = Lock()
