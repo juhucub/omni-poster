@@ -4,8 +4,9 @@ import { useAuth }     from './context/AuthContext.tsx';
 import MediaUploader   from './pages/MediaUploader.tsx';
 import AuthPage from './pages/AuthPage.tsx';
 import LandingPage from './pages/LandingPage.tsx';
-import Dashboard from './pages/Dashboard.tsx';
 import AccountManager from './pages/AccountManager.tsx';
+import Dashboard from './pages/Dashboard.tsx';
+import './output.css'; // Ensure Tailwind CSS is imported
 
 const App: React.FC = () => {
   const { isAuthenticated, logout } = useAuth();
@@ -26,6 +27,9 @@ const App: React.FC = () => {
 
       <main className="p-6">
         <Routes>
+          {/* public route for home landing page */ }
+          <Route path="/home" element={<LandingPage />} />
+
           {/* Public route for login/signup */}
           <Route
             path="/login"
@@ -41,7 +45,7 @@ const App: React.FC = () => {
             path="/dashboard"
             element={
               isAuthenticated
-                ? <LandingPage />
+                ? <Dashboard />
                 : <Navigate to="/login" replace />
             }
           />

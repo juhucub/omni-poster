@@ -1,5 +1,5 @@
 import React from 'react';
-import { AccountOut } from '../api/accounts';
+import { AccountOut } from '../../api/accounts';
 
 interface Props {
   acct: AccountOut;

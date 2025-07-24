@@ -1,10 +1,10 @@
 import React from 'react';
-import Sidebar from '../components/Sidebar';
-import Header from '../components/Header';
-import Summary from '../components/Summary';
-import Promo from '../components/Promo';
-import Metrics from '../components/Metrix';
-import Statistics from '../components/Statistics';
+import Sidebar from '../components/dashboard/Sidebar';
+import Header from '../components/dashboard/Header';
+import Summary from '../components/account-manager/Summary';
+import Promo from '../components/dashboard/Promo';
+import Metrics from '../components/dashboard/Metrix';
+import Statistics from '../components/dashboard/Statistics';
 
 const Dashboard = () => {
   return (

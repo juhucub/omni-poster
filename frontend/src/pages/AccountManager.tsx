@@ -1,7 +1,7 @@
 // src/pages/AccountManagerPage.tsx
 import React from 'react';
-import { CreateAccount } from '../components/CreateAccount.tsx';
-import { AccountList }   from '../components/AccountList.tsx';
+import { CreateAccount } from '../components/account-manager/CreateAccount.tsx';
+import { AccountList }   from '../components/account-manager/AccountList.tsx';
 
 const AccountManager: React.FC = () => {
   return (

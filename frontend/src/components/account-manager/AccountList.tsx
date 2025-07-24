@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { listAccounts, deleteAccount, reconnectAccount, AccountOut } from '../api/accounts.ts';
+import { listAccounts, deleteAccount, reconnectAccount, AccountOut } from '../../api/accounts.ts';
 import { AccountCard } from './AccountCard.tsx';
 import { GoalForm } from './GoalForm.tsx';
 

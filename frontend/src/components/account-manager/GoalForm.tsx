@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { setGoals } from '../api/accounts.ts';
+import { setGoals } from '../../api/accounts.ts';
 
 export const GoalForm: React.FC<{ accountId: number; onDone: () => void }> = ({
   accountId, onDone
