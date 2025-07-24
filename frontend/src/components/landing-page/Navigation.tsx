@@ -6,16 +6,11 @@ const Navigation: React.FC = () => {
     const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   
     return (
-      <nav className="bg-[#17183D] border-b border-gray-100 sticky top-0 z-50">
+      <nav className="bg-[#17183D] border-1 border-gray-100 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
             {/* Logo */}
             <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center">
-                <svg width="20" height="20" viewBox="0 0 33 33" className="text-white">
-                  <path d="M28,0H5C2.24,0,0,2.24,0,5v23c0,2.76,2.24,5,5,5h23c2.76,0,5-2.24,5-5V5c0-2.76-2.24-5-5-5ZM29,17c-6.63,0-12,5.37-12,12h-1c0-6.63-5.37-12-12-12v-1c6.63,0,12-5.37,12-12h1c0,6.63,5.37,12,12,12v1Z" fill="currentColor"/>
-                </svg>
-              </div>
               <span className="text-xl font-bold text-white">Omniposter</span>
             </div>
   
