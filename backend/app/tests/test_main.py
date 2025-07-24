@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from .main import app #import FastAPI app
+from app.main import app #import FastAPI app
 
 client = TestClient(app)
 
@@ -60,11 +60,3 @@ def test_me_endpoint1():
     client.post('/auth/register', json={'username':'alice','password':'Password1'})
     r = client.get('/auth/me')  # supports GET now
     assert r.status_code == 200 and r.json()['username']=='alice'
-
-def test_me_endpoint2():
-    # register then me
-    client.post('/auth/register', json={'username':'alice','password':'Password1!'})
-    response=client.post('/auth/me', json={'username':'alice','password':'Password1!'})
-    assert response.status_code==200
-    data=response.json()
-    assert data['username']=='alice' and 'access_token' in data

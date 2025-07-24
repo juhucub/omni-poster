@@ -1,79 +1,67 @@
-from fastapi import APIRouter, Response, Depends, HTTPException, status
-from app.models import (
-    RegisterRequest,
-    LoginRequest,
-    TokenResponse,
-    MeResponse,
-    MeRequest,
-    UserResponse,
-)
-from app.services.auth import (
-    register_user,
-    authenticate_user,
-    create_access_token,
-    USERS,
-)
-from app.dependencies import get_current_user
+from fastapi import APIRouter, HTTPException, status, Response, Body, Cookie
+from pydantic import BaseModel
+from app.services.auth import create_user, authenticate_user, _users_db, SECRET_KEY, ALGORITHM
+import jwt
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+from app.models import UserResponse
 
-@router.post(
-    "/register",
-    response_model=TokenResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-def register(request: RegisterRequest, response: Response):
+router = APIRouter(prefix="/auth")
+
+class AuthPayload(BaseModel):
+    username: str
+    password: str
+
+@router.post("/register", status_code=200, response_model=UserResponse)
+async def register(
+    payload: AuthPayload = Body(...),
+    response: Response = None
+):
+    """
+    Register a new user via JSON payload, set access_token cookie, and return user info.
+    """
+    user = create_user(payload.username, payload.password)
+    token = authenticate_user(payload.username, payload.password)
+    response.set_cookie(key="access_token", value=token, httponly=True)
+    return UserResponse(username=user.username)
+
+@router.post("/login", status_code=200)
+async def login(
+    payload: AuthPayload = Body(...),
+    response: Response = None
+):
+    """
+    Authenticate via JSON payload, set access_token cookie.
+    """
+    token = authenticate_user(payload.username, payload.password)
+    response.set_cookie(key="access_token", value=token, httponly=True)
+    return {"message": "login successful"}
+
+@router.get("/me", status_code=200, response_model=UserResponse)
+async def me_get(
+    access_token: str = Cookie(None)
+):
+    """
+    Get current user from cookie-based session.
+    """
+    if not access_token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
     try:
-        register_user(request.username, request.password)
-    except ValueError:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Username already exists")
+        payload = jwt.decode(access_token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if not username or username not in _users_db:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+        return UserResponse(username=username)
+    except jwt.PyJWTError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
 
-    token = create_access_token(request.username)
-    response.set_cookie(
-        "access_token",
-        token,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-    )
-    return TokenResponse(access_token=token)
-
-
-@router.post("/login", response_model=TokenResponse)
-def login(request: LoginRequest, response: Response):
-    if not authenticate_user(request.username, request.password):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
-
-    token = create_access_token(request.username)
-    response.set_cookie(
-        "access_token",
-        token,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-    )
-    return TokenResponse(access_token=token)
-
-
-@router.post("/me", response_model=MeResponse)
-def reauth(request: MeRequest, response: Response):
-    # re-issue a fresh token on valid credentials
-    if not authenticate_user(request.username, request.password):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
-
-    token = create_access_token(request.username)
-    response.set_cookie(
-        "access_token",
-        token,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-    )
-    return MeResponse(id=USERS[request.username]["id"],
-                      username=request.username,
-                      access_token=token)
-
-
-@router.get("/me", response_model=UserResponse)
-def whoami(current: UserResponse = Depends(get_current_user)):
-    return current
+@router.post("/me", status_code=200, response_model=UserResponse)
+async def me_post(
+    payload: AuthPayload = Body(...),
+    response: Response = None
+):
+    """
+    Refresh authentication and cookie via JSON payload.
+    """
+    token = authenticate_user(payload.username, payload.password)
+    response.set_cookie(key="access_token", value=token, httponly=True)
+    return UserResponse(username=payload.username)

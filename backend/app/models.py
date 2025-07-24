@@ -4,14 +4,17 @@ from typing import Optional, Dict
 # ─── Shared responses ────────────────────────────────────
 
 class UploadResponse(BaseModel):
-    project_id: str = Field(..., description="The ID of the created project")
+    project_id: str
+    urls: Dict[str, str]
 
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
+class User(BaseModel):
+    username: str
+    hashed_password: str
 class UserResponse(BaseModel):
-    id: int
     username: str
 
 # ─── Auth requests/responses ────────────────────────────

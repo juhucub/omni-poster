@@ -1,175 +1,132 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo, useCallback } from 'react';
 import axios, { AxiosInstance } from 'axios';
-import type { TokenResponse, MeResponse } from '../api/models'; 
+import type { TokenResponse, MeResponse } from '../api/models.tsx'; 
 
 // Define shape of auth context
 interface AuthContextType {
+  user: MeResponse | null;
   isAuthenticated: boolean;
-  accessToken: string | null;
-  user: Record<string, any> | null;
   login: (username: string, password: string) => Promise<void>;
   register: (username: string, password: string) => Promise<void>;
-  logout: () => void;
-  refreshToken: () => Promise<void>;
+  logout: () => Promise<void>;
 }
 
 // Default values
-export const AuthContext = createContext<AuthContextType>({
-  isAuthenticated: false,
-  accessToken: null,
+const AuthContext = createContext<AuthContextType>({
   user: null,
+  isAuthenticated: false,
   login: async () => {},
   register: async () => {},
-  logout: () => {},
-  refreshToken: async () => {},
+  logout: async () => {},
 });
 
-interface AuthProviderProps {
-  children: ReactNode;
-  apiClient?: AxiosInstance; // allow custom axios instance
-}
+/**
+ * Centralized Axios instance for auth-protected API calls.
+ * - withCredentials: sends HTTP-only cookies for secure sessions.
+ * - JSON default headers.
+ */
+const apiClient: AxiosInstance = axios.create({
+  baseURL: process.env.REACT_APP_API_URL || 'http://localhost:8000',
+  withCredentials: true,
+  headers: { 'Content-Type': 'application/json' },
+});
+
+ /**
+ * Response interceptor to handle unauthorized errors and attempt silent refresh.
+ */
+apiClient.interceptors.response.use(
+  response => response,
+  async (error: AxiosError) => {
+    if (error.response?.status === 401) {
+      try {
+        // attempt to refresh token (backend must set a new cookie)
+        await apiClient.post('/auth/refresh');
+        // retry original request
+        return apiClient.request(error.config!);
+      } catch {
+        // refresh failed: proceed to logout
+        authLogout();
+      }
+    }
+    return Promise.reject(error);
+  }
+);
 
 /**
- * AuthProvider wraps the app and provides authentication context.
- * - Stores JWT access token securely in memory/localStorage.
- * - Sets up axios interceptors to attach token to requests.
- * - Handles login, logout, and token refresh flows.
+ * Internal logout helper for interceptor (no context access).
  */
-export const AuthProvider: React.FC<AuthProviderProps> = ({ children, apiClient }) => {
-  const [accessToken, setAccessToken] = useState<string | null>(() => {
-    // Initialize from localStorage if available
-    return localStorage.getItem('access_token');
-  });
-  const [user, setUser] = useState<Record<string, any> | null>(null);
-
-  // Determine auth status
-  const isAuthenticated = Boolean(accessToken);
-
-   // memoize client so interceptors don't get re-registered on every render
-   const client = useMemo(() => 
-   axios.create({
-     baseURL: process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000',
-     withCredentials: true,
-   }),
- [],);
+let authLogout: () => Promise<void> = async () => {};
  
 
-  // Attach interceptor to include Authorization header
-  useEffect(() => {
-    const requestInterceptor = client.interceptors.request.use((config) => {
-      if (accessToken && config.headers) {
-        config.headers['Authorization'] = `Bearer ${accessToken}`;
-      }
-      return config;
-    });
-    return () => {
-      client.interceptors.request.eject(requestInterceptor);
-    };
-  }, [accessToken, client]);
-
-  // On mount, optionally fetch current user profile
-  useEffect(() => {
-    if (!accessToken) {
-      setUser(null);
-      return;
-    }
-      client
-        .get('/auth/me')
-        .then(res => setUser(res.data))
-        .catch(() => {
-          // Token invalid or expired
-          setAccessToken(null);
-          localStorage.removeItem('access_token');
-        });
-    }, [accessToken, client]);
+/**
+ * AuthProvider wraps the app, manages the user session entirely in memory and HTTP-only cookies.
+ * Avoids localStorage to mitigate XSS risks.
+ */
+export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<MeResponse | null>(null);
 
   /**
-   * Authenticate user and store token.
+   * Perform initial "whoami" check on mount.
    */
-  const login = async (username: string, password: string) => {
-    try {
-      const response = await client.post('/auth/login', { username, password });
-      const token = response.data.access_token as string;
-      // Persist token in memory and localStorage
-      setAccessToken(token);
-      localStorage.setItem('access_token', token);
-      // Fetch user profile
-      const profile = await client.get('/auth/me');
-      setUser(profile.data);
-    } catch (error) {
-      // Propagate error for UI handling
-      throw error;
-    }
-  };
-
-  const register = async (username: string, password: string) => {
-    // calls FastAPI /auth/register (cookie + token)
-    const resp = await client.post<TokenResponse>('/auth/register', { username, password });
-    const token = resp.data.access_token as string;
-    setAccessToken(token);
-    localStorage.setItem('access_token', token);
-    // now fetch profile
-    const profile = await client.get<MeResponse>('/auth/me');
-    setUser({ id: profile.data.id, username: profile.data.username });
-  };
+  useEffect(() => {
+    apiClient
+      .get<MeResponse>('/auth/me')
+      .then(res => setUser(res.data))
+      .catch(() => setUser(null));
+  }, []);
 
   /**
-   * Clear authentication state.
+   * Log in via credentials; backend sets HTTP-only cookie and returns token JSON.
    */
-  const logout = () => {
-    setAccessToken(null);
+  const login = useCallback(async (username: string, password: string) => {
+    await apiClient.post<TokenResponse>('/auth/login', { username, password });
+    const me = await apiClient.get<MeResponse>('/auth/me');
+    setUser(me.data);
+  }, []);
+
+  /**
+   * Register a new account; backend sets HTTP-only cookie as well.
+   */
+  const register = useCallback(async (username: string, password: string) => {
+    await apiClient.post<RegisterResponse>('/auth/register', { username, password });
+    const me = await apiClient.get<MeResponse>('/auth/me');
+    setUser(me.data);
+  }, []);
+
+  /**
+   * Clear session on logout both client- and server-side.
+   */
+  const logout = useCallback(async () => {
     setUser(null);
-    localStorage.removeItem('access_token');
-    // Optionally notify backend
-    //client.post('/auth/logout').catch(() => {});
-  };
+    try {
+      await apiClient.post('/auth/logout');
+    } catch {
+      // ignore network errors on logout
+    }
+  }, []);
+
+  // assign internal logout for interceptor use
+  authLogout = logout;
 
   /**
-   * Refresh JWT access token using a refresh token cookie.
+   * Memoized context value to avoid unnecessary re-renders.
    */
-  const refreshToken = async () => {
-    try {
-      const response = await client.post('/auth/refresh', {}, { withCredentials: true });
-      const token = response.data.accessToken as string;
-      setAccessToken(token);
-      localStorage.setItem('access_token', token);
-    } catch (error) {
-      logout();
-    }
-  };
-
-  // Optionally auto-refresh token before expiry
-  useEffect(() => {
-    if (!accessToken) return;
-    // Decode token to get expiry (exp) and schedule refresh a bit early
-    try {
-      const [, payload] = accessToken.split('.');
-      const { exp } = JSON.parse(atob(payload));
-      const expiresAt = exp * 1000;
-      const now = Date.now();
-      const timeout = expiresAt - now - 60 * 1000; // 1 min before expiry
-      if (timeout > 0) {
-        const timer = setTimeout(() => refreshToken(), timeout);
-        return () => clearTimeout(timer);
-      }
-    } catch {
-      // Invalid token format; require re-login
-      logout();
-    }
-  }, [accessToken]);
-
-  return (
-    <AuthContext.Provider value={{
-      isAuthenticated, accessToken, user,
-      login, register,   // ← here
-      logout, refreshToken
-    }}>
-      {children}
-    </AuthContext.Provider>
+  const value = useMemo(
+    () => ({
+      user,
+      isAuthenticated: Boolean(user),
+      login,
+      register,
+      logout,
+    }),
+    [user, login, register, logout]
   );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
 /**
- * Custom hook to consume auth context.
+ * Hook to consume authentication context.
  */
-export const useAuth = () => useContext(AuthContext)
+export const useAuth = (): AuthContextType => useContext(AuthContext);
+  

@@ -1,10 +1,14 @@
 import os
 import logging
 from datetime import datetime, timedelta
+from fastapi import HTTPException, status, Depends
+from fastapi.security import OAuth2PasswordBearer
 from typing import Dict, Optional
 
 import jwt
 from passlib.context import CryptContext
+from app.models import User
+
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -15,36 +19,36 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 # password hashing context
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-# simple in-memory user store (replace w/ real DB in prod)
-USERS: Dict[str, Dict] = {}
-USER_ID_COUNTER = 1
-
-def get_hash(password: str) -> str:
-    return pwd_context.hash(password)
+# Simple in-memory user store for development
+_users_db: dict[str, User] = {}
 
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
-def register_user(username: str, password: str) -> int:
-    global USER_ID_COUNTER
-    if username in USERS:
-        raise ValueError("Username already exists")
-    hashed = get_hash(password)
-    uid = USER_ID_COUNTER
-    USER_ID_COUNTER += 1
-    USERS[username] = {"id": uid, "hashed_password": hashed}
-    logger.info(f"User registered: {username} (id={uid})")
-    return uid
+def create_user(username: str, password: str) -> User:
+    if username in _users_db:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already registered"
+        )
+    hashed = pwd_context.hash(password)
+    user = User(username=username, hashed_password=hashed)
+    _users_db[username] = user
+    return user
 
-def authenticate_user(username: str, password: str) -> bool:
-    user = USERS.get(username)
-    return bool(user and verify_password(password, user["hashed_password"]))
 
-def create_access_token(
-    subject: str, expires_delta: Optional[timedelta] = None
-) -> str:
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    payload = {"sub": subject, "exp": expire}
-    logger.debug(f"Issuing token for {subject}, expires {expire.isoformat()}")
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+def authenticate_user(username: str, password: str) -> str:
+    """Verify credentials and return a JWT access token."""
+    user = _users_db.get(username)
+    if not user or not pwd_context.verify(password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {"sub": username, "exp": expire}
+    token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return token
+
