@@ -122,6 +122,16 @@ dist
 # TernJS port file
 .tern-port
 
+<<<<<<< Updated upstream
+=======
+uploads
+
+uploads.db
+
+backend/app/uploads
+
+backend/app/uploads.db
+>>>>>>> Stashed changes
 # Stores VSCode versions used for testing VSCode extensions
 .vscode-test
 
