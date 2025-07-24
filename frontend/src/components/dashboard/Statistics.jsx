@@ -18,7 +18,7 @@ const Statistics = () => {
   };
 
   return (
-    <section className="bg-white rounded-lg shadow-md p-6">
+    <section className="bg-gradient-to-br from-gray-100 via-white to-gray-300 rounded-lg border-2 border-gray-400 shadow-md p-6">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-xl font-semibold">{stats.title}</h3>
         <span className="text-sm text-gray-500">{stats.views}</span>
@@ -35,11 +35,11 @@ const Statistics = () => {
         ))}
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="p-4 bg-green-50 rounded-lg">
+        <div className="p-4 bg-green-100 rounded-lg">
           <h4 className="text-sm text-gray-500">{stats.income.label}</h4>
           <p className="text-lg font-bold text-green-600">{stats.income.value}</p>
         </div>
-        <div className="p-4 bg-red-50 rounded-lg">
+        <div className="p-4 bg-red-100 rounded-lg">
           <h4 className="text-sm text-gray-500">{stats.expenses.label}</h4>
           <p className="text-lg font-bold text-red-600">{stats.expenses.value}</p>
         </div>

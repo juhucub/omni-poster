@@ -1,23 +1,23 @@
 import React from 'react';
-import { FaInstagram, FaTiktok, FaYoutube } from 'react-icons/fa';
+import { Youtube, Instagram, Annoyed } from 'lucide-react';
 
 const Summary = () => {
   const actions = [
-    { icon: <FaTiktok />, label: 'TikTok', color: 'text-pink-500' },
-    { icon: <FaInstagram />, label: 'Instagram', color: 'text-purple-500' },
-    { icon: <FaYoutube />, label: 'YouTube', color: 'text-red-500' }
+    { icon: <Annoyed />, label: 'TikTok' , color: 'text-blue-500'},
+    { icon: <Instagram />, label: 'Instagram' , color: 'text-pink-500'},
+    { icon: <Youtube />, label: 'YouTube', color: 'text-red-500' }
   ];
 
-  const prompts = ['Create', 'Post', 'Schedule', 'Automate'];
-
+  const prompts = ['Create', 'Schedule', 'Post', 'Automate'];
+  
   return (
-    <section className="bg-white rounded-lg shadow-md p-6">
-      <h3 className="text-xl font-semibold mb-4">I want to...</h3>
+    <section className="bg-gradient-to-br from-[#10123B] to-[#17183D] rounded-lg border-2 border-white shadow-md p-6">
+      <h3 className="text-xl font-semibold mb-4 text-white bebas-neue">I want to...</h3>
       <div className="flex flex-wrap gap-4 mb-6">
         {prompts.map((prompt, index) => (
           <button
             key={index}
-            className="bg-blue-100 text-blue-700 px-4 py-2 rounded-full hover:bg-blue-200 transition"
+            className="bg-purple-600 text-white px-4 py-2 rounded-full hover:bg-purple-600 transition"
           >
             {prompt}
           </button>

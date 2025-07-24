@@ -1,14 +1,14 @@
 import React from 'react';
 import Sidebar from '../components/dashboard/Sidebar.tsx';
 import Header from '../components/dashboard/Header';
-import Summary from '../components/account-manager/Summary';
+import Summary from '../components/dashboard/Summary.jsx';
 import Promo from '../components/dashboard/Promo';
 import Metrics from '../components/dashboard/Metrix';
 import Statistics from '../components/dashboard/Statistics';
 
 const Dashboard = () => {
   return (
-    <div className="flex min-h-screen bg-gradient-to-br from-[#17183D] via-purple-900 to-[#10123B] text-gray-800">
+    <div className="flex min-h-screen bg-gradient-to-br from-[#17183D] via-[#2C275C] to-[#10123B] text-gray-800">
       <Sidebar />
       <main className="flex-1 p-6 space-y-6">
         <Header />

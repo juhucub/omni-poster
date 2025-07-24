@@ -2,7 +2,7 @@ import React from 'react';
 
 const Promo = () => {
   return (
-    <section className="bg-gradient-to-r from-purple-500 to-indigo-600 text-white rounded-lg shadow-lg p-6 flex flex-col md:flex-row items-center justify-between">
+    <section className="bg-gradient-to-r from-[#251259] to-[#1F046B] text-white rounded-lg border-2 border-white shadow-lg p-6 flex flex-col md:flex-row items-center justify-between">
       <div className="mb-4 md:mb-0">
         <h3 className="text-2xl font-bold">Upgrade to PRO</h3>
         <p className="text-sm mt-2 max-w-md">

@@ -3,10 +3,10 @@ import { Search, Bell } from 'lucide-react';
 
 const Header = () => {
   return (
-    <header className="flex flex-col md:flex-row md:items-center justify-between space-y-4 md:space-y-0 border-1 border-gray-400 p-4">
+    <header className="flex flex-col md:flex-row md:items-center justify-between space-y-4 md:space-y-0 border-none border-gray-400 p-4">
       <div>
         <h2 className="text-3xl font-bold text-white">Good Morning 👋</h2>
-        <p className="text-sm text-gray-500">Welcome Back, Jacob — Saturday, 7 Dec, 2021</p>
+        <p className="text-sm text-gray-200">Welcome Back, Jacob — Saturday, 7 Dec, 2021</p>
       </div>
       <div className="flex items-center space-x-4">
         <div className="relative">
@@ -24,7 +24,7 @@ const Header = () => {
         <img
           src="url-to-avatar"
           alt="Profile"
-          className="w-10 h-10 rounded-full border-2 border-blue-600"
+          className="w-10 h-10 rounded-full border-2 border-white"
         />
       </div>
     </header>
