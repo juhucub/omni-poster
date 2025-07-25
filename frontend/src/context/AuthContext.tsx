@@ -1,11 +1,12 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo, useCallback } from 'react';
 import axios, { AxiosInstance } from 'axios';
-import type { TokenResponse, MeResponse } from '../api/models.tsx'; 
+import type { TokenResponse, MeResponse } from '../api/models'; 
 
 // Define shape of auth context
 interface AuthContextType {
   user: MeResponse | null;
   isAuthenticated: boolean;
+  isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
   register: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -15,6 +16,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
   user: null,
   isAuthenticated: false,
+  isLoading: false,
   login: async () => {},
   register: async () => {},
   logout: async () => {},
@@ -64,7 +66,7 @@ let authLogout: () => Promise<void> = async () => {};
  */
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<MeResponse | null>(null);
-
+  const [isLoading, setIsLoading] = useState(true);
   /**
    * Perform initial "whoami" check on mount.
    */
@@ -72,7 +74,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     apiClient
       .get<MeResponse>('/auth/me')
       .then(res => setUser(res.data))
-      .catch(() => setUser(null));
+      .catch(() => setUser(null))
+      .finally(() => setIsLoading(false));
   }, []);
 
   /**
@@ -115,6 +118,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     () => ({
       user,
       isAuthenticated: Boolean(user),
+      isLoading,
       login,
       register,
       logout,

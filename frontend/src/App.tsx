@@ -54,6 +54,12 @@ const App: React.FC = () => {
           <Route
             path="/upload"
             element={
+               // 1) still waiting on /auth/me? show a spinner…
+              isLoading ? (
+                <div className="flex items-center justify-center h-full">
+                  <div className="animate-spin h-8 w-8 border-b-2 border-blue-600" />
+                </div>
+              ) :
               isAuthenticated
                 ? (
                   <MediaUploader

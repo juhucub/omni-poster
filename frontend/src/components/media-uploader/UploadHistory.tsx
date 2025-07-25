@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { FC, useState, useEffect, useCallback, useMemo } from 'react';
 import API from '../../api/client.ts';
 import { useAuth } from '../../context/AuthContext.tsx';
 
