@@ -1,6 +1,7 @@
-import React, { useState, ChangeEvent, FormEvent } from 'react';
+import React, { useState, useCallback, ChangeEvent, FormEvent } from 'react';
 import API from '../api/client.ts';
 import { useAuth } from '../context/AuthContext.tsx';
+import UploadHistory from '../components/media-uploader/UploadHistory.tsx';
 
 // Allowed MIME types and size limits
 const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'];
@@ -20,18 +21,21 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
   const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  
+  // Counter to trigger history refresh
+  const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState<number>(0);
 
-  const validateFile = (file: File, allowedTypes: string[]) => {
+  const validateFile = useCallback((file: File, allowedTypes: string[]) => {
     if (!allowedTypes.includes(file.type)) {
       return `Invalid file type: ${file.type}`;
     }
     if (file.size > MAX_FILE_SIZE) {
-      return `File exceeds ${MAX_FILE_SIZE / 2**20} MB limit`;
+      return `File exceeds ${MAX_FILE_SIZE / 2**20} MB limit`;
     }
     return null;
-  };
+  }, []);
 
-  const onChangeFactory = (
+  const onChangeFactory = useCallback((
     setter: React.Dispatch<React.SetStateAction<File | null>>,
     types: string[]
   ) => (e: ChangeEvent<HTMLInputElement>) => {
@@ -42,7 +46,7 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
       if (err) return setError(err);
       setter(file);
     }
-  };
+  }, [validateFile]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -63,6 +67,21 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       const { project_id } = res.data;
+      
+      // Clear form on success
+      setVideoFile(null);
+      setAudioFile(null);
+      setThumbnailFile(null);
+      
+      // Clear file inputs
+      const form = e.target as HTMLFormElement;
+      const fileInputs = form.querySelectorAll('input[type="file"]') as NodeListOf<HTMLInputElement>;
+      fileInputs.forEach(input => input.value = '');
+      
+      // Trigger history refresh
+      setHistoryRefreshTrigger(prev => prev + 1);
+      
+      // Call parent callback
       onUploadSuccess(project_id);
     } catch (err: any) {
       if (err.response) {
@@ -88,52 +107,98 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
     }
   };
 
+  // Handle project selection from history
+  const handleProjectSelect = useCallback((projectId: string) => {
+    console.log('Selected project:', projectId);
+    // TODO: Implement project details view or navigation
+    // For now, just call the parent callback to maintain compatibility
+    onUploadSuccess(projectId);
+  }, [onUploadSuccess]);
+
   return (
-    <form onSubmit={handleSubmit} className="space-y-4 p-4 bg-white rounded-lg shadow">
-      <h2 className="text-xl font-semibold">Upload Media</h2>
+    <div className="space-y-6">
+      {/* Upload Form */}
+      <form onSubmit={handleSubmit} className="space-y-4 p-4 bg-white rounded-lg shadow">
+        <h2 className="text-xl font-semibold">Upload Media</h2>
 
-      <div>
-        <label className="block text-sm font-medium">Video File</label>
-        <input
-          type="file"
-          accept={ALLOWED_VIDEO_TYPES.join(',')}
-          onChange={onChangeFactory(setVideoFile, ALLOWED_VIDEO_TYPES)}
-          required
-          className="mt-1 block w-full text-sm"
-        />
-      </div>
+        <div>
+          <label className="block text-sm font-medium">Video File</label>
+          <input
+            type="file"
+            accept={ALLOWED_VIDEO_TYPES.join(',')}
+            onChange={onChangeFactory(setVideoFile, ALLOWED_VIDEO_TYPES)}
+            required
+            className="mt-1 block w-full text-sm border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          {videoFile && (
+            <p className="text-xs text-gray-600 mt-1">
+              Selected: {videoFile.name} ({(videoFile.size / (1024 * 1024)).toFixed(1)} MB)
+            </p>
+          )}
+        </div>
 
-      <div>
-        <label className="block text-sm font-medium">Audio File</label>
-        <input
-          type="file"
-          accept={ALLOWED_AUDIO_TYPES.join(',')}
-          onChange={onChangeFactory(setAudioFile, ALLOWED_AUDIO_TYPES)}
-          required
-          className="mt-1 block w-full text-sm"
-        />
-      </div>
+        <div>
+          <label className="block text-sm font-medium">Audio File</label>
+          <input
+            type="file"
+            accept={ALLOWED_AUDIO_TYPES.join(',')}
+            onChange={onChangeFactory(setAudioFile, ALLOWED_AUDIO_TYPES)}
+            required
+            className="mt-1 block w-full text-sm border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          {audioFile && (
+            <p className="text-xs text-gray-600 mt-1">
+              Selected: {audioFile.name} ({(audioFile.size / (1024 * 1024)).toFixed(1)} MB)
+            </p>
+          )}
+        </div>
 
-      <div>
-        <label className="block text-sm font-medium">Thumbnail (optional)</label>
-        <input
-          type="file"
-          accept={ALLOWED_IMAGE_TYPES.join(',')}
-          onChange={onChangeFactory(setThumbnailFile, ALLOWED_IMAGE_TYPES)}
-          className="mt-1 block w-full text-sm"
-        />
-      </div>
+        <div>
+          <label className="block text-sm font-medium">Thumbnail (optional)</label>
+          <input
+            type="file"
+            accept={ALLOWED_IMAGE_TYPES.join(',')}
+            onChange={onChangeFactory(setThumbnailFile, ALLOWED_IMAGE_TYPES)}
+            className="mt-1 block w-full text-sm border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          {thumbnailFile && (
+            <p className="text-xs text-gray-600 mt-1">
+              Selected: {thumbnailFile.name} ({(thumbnailFile.size / (1024 * 1024)).toFixed(1)} MB)
+            </p>
+          )}
+        </div>
 
-      {error && <p className="text-red-600 text-sm">{error}</p>}
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-md p-3">
+            <p className="text-red-600 text-sm">{error}</p>
+          </div>
+        )}
 
-      <button
-        type="submit"
-        disabled={loading}
-        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-      >
-        {loading ? 'Uploading…' : 'Upload & Generate'}
-      </button>
-    </form>
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {loading ? (
+            <span className="flex items-center justify-center">
+              <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              Uploading...
+            </span>
+          ) : (
+            'Upload & Generate'
+          )}
+        </button>
+      </form>
+
+      {/* Upload History */}
+      <UploadHistory 
+        onSelect={handleProjectSelect}
+        refreshTrigger={historyRefreshTrigger}
+      />
+    </div>
   );
 };
 
