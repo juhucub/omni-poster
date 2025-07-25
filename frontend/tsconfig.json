@@ -1,9 +1,9 @@
 {
     "compilerOptions": {
-      "jsx": "react-jsx",            // or "react"
+      "jsx": "react",     
+      "allowImportingTsExtensions": true,
       "esModuleInterop": true,
       "allowSyntheticDefaultImports": true,
-      // ...other settings...
     }
   }
   

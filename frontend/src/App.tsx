@@ -6,10 +6,11 @@ import AuthPage from './pages/AuthPage.tsx';
 import LandingPage from './pages/LandingPage.tsx';
 import AccountManager from './pages/AccountManager.tsx';
 import Dashboard from './pages/Dashboard.tsx';
+import { ProtectedRoute } from './components/ProtectedRoute.tsx';
 import './output.css'; // Ensure Tailwind CSS is imported
 
 const App: React.FC = () => {
-  const { isAuthenticated, logout } = useAuth();
+  const { isAuthenticated, isLoading, logout } = useAuth();
 
   return (
     <BrowserRouter>
@@ -50,26 +51,14 @@ const App: React.FC = () => {
             }
           />
 
-          {/* Protected upload page */}
           <Route
             path="/upload"
             element={
-               // 1) still waiting on /auth/me? show a spinner…
-              isLoading ? (
-                <div className="flex items-center justify-center h-full">
-                  <div className="animate-spin h-8 w-8 border-b-2 border-blue-600" />
-                </div>
-              ) :
-              isAuthenticated
-                ? (
-                  <MediaUploader
-                    onUploadSuccess={(projectId) => {
-                      // e.g. redirect to dashboard or store in context
-                      console.log("Uploaded, new project id:", projectId);
-                    }}
-                  />
-                )
-                : <Navigate to="/login" replace />
+              <ProtectedRoute>
+                <MediaUploader onUploadSuccess={(projectId) => {
+                    console.log("Uploaded, new project id:", projectId);
+                  }} />
+              </ProtectedRoute>
             }
           />
 
