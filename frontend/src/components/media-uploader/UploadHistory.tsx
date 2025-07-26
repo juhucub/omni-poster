@@ -1,6 +1,7 @@
-import React, { FC, useState, useEffect } from 'react';
+import React, { FC, createContext, useEffect, useContext, useState, useCallback, ReactNode } from 'react';
 import API from '../../api/client.ts';
-import { useAuth } from '../../context/AuthContext.tsx';
+import { useAuth } from '../../context/AuthContext';
+
 
 interface UploadRecord {
   project_id: string;
@@ -11,87 +12,134 @@ interface UploadRecord {
   uploaded_at: string;
 }
 
-interface UploadHistoryProps {
-  onSelect: (projectId: string) => void;
-  refreshTrigger?: number;
+interface UploadContextType {
+  uploads: UploadRecord[];
+  loading: boolean;
+  error: string | null;
+  addUpload: (upload: UploadRecord) => void;
+  removeUpload: (projectId: string, filename: string) => void;
+  refreshUploads: () => Promise<void>;
+  lastUpdated: Date | null;
 }
 
-const UploadHistory: FC<UploadHistoryProps> = ({ onSelect, refreshTrigger }) => {
-  const { logout, isAuthenticated, isLoading: authLoading } = useAuth();
+const UploadContext = createContext<UploadContextType>({
+  uploads: [],
+  loading: false,
+  error: null,
+  addUpload: () => {},
+  removeUpload: () => {},
+  refreshUploads: async () => {},
+  lastUpdated: null,
+});
+
+
+export const UploadProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [uploads, setUploads] = useState<UploadRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [retryCount, setRetryCount] = useState(0);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  const fetchHistory = async (skipAuth = false) => {
-    // Don't fetch if not authenticated (unless explicitly skipping auth check)
-    if (!skipAuth && !isAuthenticated) {
-      console.log('UploadHistory: Not authenticated, skipping fetch');
-      setLoading(false);
-      return;
-    }
-
-    console.log('UploadHistory: Fetching upload history...');
+  const refreshUploads = useCallback(async () => {
     setLoading(true);
     setError(null);
-    
     try {
-      const res = await API.get<UploadRecord[]>('/upload_history');
-      console.log('UploadHistory: Fetch successful:', res.data.length, 'records');
-      setUploads(res.data);
-      setRetryCount(0); // Reset retry count on success
+      const response = await API.get<UploadRecord[]>('/upload_history');
+      setUploads(response.data);
+      setLastUpdated(new Date());
     } catch (err: any) {
-      console.error('UploadHistory error:', err.response?.status, err.response?.data);
-      
-      if (err.response?.status === 401) {
-        console.warn('UploadHistory: 401 Unauthorized - this might be a backend configuration issue');
-        
-        // Instead of immediately logging out, let's be more careful
-        if (retryCount < 2) {
-          console.log('UploadHistory: Retrying fetch in case of transient auth issue...');
-          setRetryCount(prev => prev + 1);
-          // Retry after a short delay
-          setTimeout(() => fetchHistory(true), 1000);
-          return;
-        } else {
-          console.log('UploadHistory: Multiple 401 errors, logging out');
-          setError('Authentication failed. You will be redirected to login.');
-          // Delay logout slightly to show the error message
-          setTimeout(() => logout(), 2000);
-          return;
-        }
-      }
-      
-      const errorMessage = err.response?.data?.detail || err.message || 'Failed to fetch upload history';
-      setError(errorMessage);
-      console.error('UploadHistory error details:', errorMessage);
+      setError(err.response?.data?.detail || 'Failed to fetch uploads');
+      throw err; // Re-throw for component handling
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  const addUpload = useCallback((newUpload: UploadRecord) => {
+    console.log('Adding upload to context:', newUpload);
+    setUploads(prev => {
+      // Check if upload already exists to avoid duplicates
+      const exists = prev.some(u => 
+        u.project_id === newUpload.project_id && u.filename === newUpload.filename
+      );
+      if (exists) return prev;
+      
+      // Add new upload and sort by upload date (newest first)
+      const updated = [...prev, newUpload].sort(
+        (a, b) => new Date(b.uploaded_at).getTime() - new Date(a.uploaded_at).getTime()
+      );
+      return updated;
+    });
+    setLastUpdated(new Date());
+  }, []);
+
+  const removeUpload = useCallback((projectId: string, filename: string) => {
+    setUploads(prev => 
+      prev.filter(u => !(u.project_id === projectId && u.filename === filename))
+    );
+    setLastUpdated(new Date());
+  }, []);
+
+  const value = {
+    uploads,
+    loading,
+    error,
+    addUpload,
+    removeUpload,
+    refreshUploads,
+    lastUpdated,
   };
 
-  // Wait for auth to be resolved before fetching history
-  useEffect(() => {
-    console.log('UploadHistory: useEffect triggered', {
-      authLoading,
-      isAuthenticated,
-      refreshTrigger
-    });
-    
-    if (authLoading) {
-      console.log('UploadHistory: Auth still loading, waiting...');
-      return; // Wait for auth to resolve
-    }
-    
-    if (isAuthenticated) {
-      fetchHistory();
-    } else {
-      console.log('UploadHistory: Not authenticated, not fetching');
-      setLoading(false);
-    }
-  }, [refreshTrigger, isAuthenticated, authLoading]);
+  return <UploadContext.Provider value={value}>{children}</UploadContext.Provider>;
+};
 
-  // Show auth loading state
+interface UploadHistoryProps {
+  onSelect: (projectId: string) => void;
+}
+
+export const useUploadHistory = () => {
+  const context = useContext(UploadContext);
+  if (!context) {
+    throw new Error('useUploadHistory must be used within an UploadProvider');
+  }
+  return context;
+};
+
+const UploadHistory: FC<UploadHistoryProps> = ({ onSelect }) => {
+  const { isAuthenticated, isLoading: authLoading, logout } = useAuth();
+  const { 
+    uploads, 
+    loading, 
+    error, 
+    refreshUploads, 
+    lastUpdated 
+  } = useUploadHistory();
+
+  // Only fetch on mount or when authentication changes
+  useEffect(() => {
+    if (authLoading) return;
+    
+    if (isAuthenticated && uploads.length === 0) {
+      console.log('UploadHistory: Initial load');
+      refreshUploads().catch(err => {
+        if (err.response?.status === 401) {
+          console.log('UploadHistory: Authentication failed, logging out');
+          logout();
+        }
+      });
+    }
+  }, [isAuthenticated, authLoading, uploads.length, refreshUploads, logout]);
+
+  // Manual refresh function
+  const handleRefresh = async () => {
+    try {
+      await refreshUploads();
+    } catch (err: any) {
+      if (err.response?.status === 401) {
+        logout();
+      }
+    }
+  };
+
   if (authLoading) {
     return (
       <div className="bg-white rounded-lg shadow p-4">
@@ -104,7 +152,6 @@ const UploadHistory: FC<UploadHistoryProps> = ({ onSelect, refreshTrigger }) => 
     );
   }
 
-  // Show not authenticated state
   if (!isAuthenticated) {
     return (
       <div className="bg-white rounded-lg shadow p-4">
@@ -122,21 +169,19 @@ const UploadHistory: FC<UploadHistoryProps> = ({ onSelect, refreshTrigger }) => 
     );
   }
 
-  if (loading) {
+  if (loading && uploads.length === 0) {
     return (
       <div className="bg-white rounded-lg shadow p-4">
         <h3 className="text-lg font-semibold mb-4">Upload History</h3>
         <div className="flex items-center justify-center py-8">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
-          <span className="ml-2 text-gray-600">
-            Loading history… {retryCount > 0 && `(retry ${retryCount})`}
-          </span>
+          <span className="ml-2 text-gray-600">Loading history…</span>
         </div>
       </div>
     );
   }
 
-  if (error) {
+  if (error && uploads.length === 0) {
     return (
       <div className="bg-white rounded-lg shadow p-4">
         <h3 className="text-lg font-semibold mb-4">Upload History</h3>
@@ -146,17 +191,12 @@ const UploadHistory: FC<UploadHistoryProps> = ({ onSelect, refreshTrigger }) => 
             <div className="ml-3">
               <h4 className="text-sm font-medium text-red-800">Error loading history</h4>
               <p className="text-sm text-red-700 mt-1">{error}</p>
-              {!error.includes('Authentication failed') && (
-                <button
-                  onClick={() => {
-                    setRetryCount(0);
-                    fetchHistory();
-                  }}
-                  className="mt-2 text-sm bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1 rounded border border-red-300"
-                >
-                  Try Again
-                </button>
-              )}
+              <button
+                onClick={handleRefresh}
+                className="mt-2 text-sm bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1 rounded border border-red-300"
+              >
+                Try Again
+              </button>
             </div>
           </div>
         </div>
@@ -174,10 +214,6 @@ const UploadHistory: FC<UploadHistoryProps> = ({ onSelect, refreshTrigger }) => 
     );
   }
 
-  const sorted = [...uploads].sort(
-    (a, b) => new Date(b.uploaded_at).getTime() - new Date(a.uploaded_at).getTime()
-  );
-
   const formatTimestamp = (iso: string) => {
     const d = new Date(iso);
     return d.toLocaleString('en-US', {
@@ -193,15 +229,23 @@ const UploadHistory: FC<UploadHistoryProps> = ({ onSelect, refreshTrigger }) => 
 
   return (
     <div className="bg-white rounded-lg shadow p-4">
-      <h3 className="text-lg font-semibold mb-4">Upload History</h3>
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-lg font-semibold">Upload History</h3>
+        {lastUpdated && (
+          <span className="text-xs text-gray-500">
+            Updated {lastUpdated.toLocaleTimeString()}
+          </span>
+        )}
+      </div>
+      
       <div className="space-y-2">
-        {sorted.map((u, i) => (
+        {uploads.map((upload, i) => (
           <div
-            key={`${u.project_id}-${u.filename}`}
+            key={`${upload.project_id}-${upload.filename}`}
             role="button"
             tabIndex={0}
-            onClick={() => onSelect(u.project_id)}
-            onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && onSelect(u.project_id)}
+            onClick={() => onSelect(upload.project_id)}
+            onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && onSelect(upload.project_id)}
             className={`
               p-3 rounded-md border cursor-pointer transition-colors
               ${i % 2 === 0 ? 'bg-gray-50' : 'bg-white'}
@@ -210,33 +254,39 @@ const UploadHistory: FC<UploadHistoryProps> = ({ onSelect, refreshTrigger }) => 
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-3 flex-1 min-w-0">
-                <span className="text-xl">{iconFor(u.content_type)}</span>
+                <span className="text-xl">{iconFor(upload.content_type)}</span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">{u.filename}</p>
-                  <p className="text-xs text-gray-500 truncate">Project: {u.project_id}</p>
+                  <p className="text-sm font-medium text-gray-900 truncate">{upload.filename}</p>
+                  <p className="text-xs text-gray-500 truncate">Project: {upload.project_id}</p>
                 </div>
               </div>
               <div className="text-right flex-shrink-0">
-                <p className="text-xs text-gray-500">{formatTimestamp(u.uploaded_at)}</p>
-                <p className="text-xs text-gray-400 capitalize">{u.content_type.split('/')[0]}</p>
+                <p className="text-xs text-gray-500">{formatTimestamp(upload.uploaded_at)}</p>
+                <p className="text-xs text-gray-400 capitalize">{upload.content_type.split('/')[0]}</p>
               </div>
             </div>
           </div>
         ))}
       </div>
-      <div className="mt-4 pt-3 border-t border-gray-200 flex items-center">
-        <button 
-          onClick={() => {
-            setRetryCount(0);
-            fetchHistory();
-          }} 
-          className="text-sm text-blue-600 hover:text-blue-800"
-        >
-          🔄 Refresh
-        </button>
-        <span className="text-xs text-gray-500 ml-4">
-          {uploads.length} file{uploads.length !== 1 && 's'}
-        </span>
+      
+      <div className="mt-4 pt-3 border-t border-gray-200 flex items-center justify-between">
+        <div className="flex items-center space-x-4">
+          <button 
+            onClick={handleRefresh}
+            disabled={loading}
+            className="text-sm text-blue-600 hover:text-blue-800 disabled:opacity-50"
+          >
+            {loading ? '⏳ Refreshing...' : '🔄 Refresh'}
+          </button>
+          <span className="text-xs text-gray-500">
+            {uploads.length} file{uploads.length !== 1 && 's'}
+          </span>
+        </div>
+        {error && (
+          <span className="text-xs text-red-500">
+            ⚠️ {error}
+          </span>
+        )}
       </div>
     </div>
   );
