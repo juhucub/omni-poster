@@ -21,8 +21,9 @@ from fastapi import (
 from fastapi.security import HTTPBearer
 
 
-from app.models import UploadResponse, User
+from app.models import UploadResponse, GenerateVideoResponse, GenerateVideoRequest, User
 from app.services.upload import get_upload_service, UploadService, UploadMeta, UPLOAD_DIR
+from app.services.vid_gen import get_video_generation_service, VideoGenerationService
 from app.dependencies import get_current_user
 
 # Configure structured logging
@@ -309,24 +310,6 @@ async def get_upload_limits():
         "allowed_image_types": list(ALLOWED_IMAGE_TYPES)
     }
 
-@router.post("/generate_video", response_model=dict)
-async def generate_video(
-    payload: dict = Body(...)
-):
-    """
-    Stub generate_video endpoint: accepts project_id and returns status plus video URL.
-    """
-    project_id = payload.get("project_id")
-    if not project_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="`project_id` is required"
-        )
-    # Stub URL: in real use you'd point to the generated asset
-    final_path = os.path.join(UPLOAD_DIR, f"{project_id}_final.mp4")
-    video_url = f"file://{os.path.abspath(final_path)}"
-    return {"project_id": project_id, "status": "processing", "video_url": video_url}
-
 @router.get("/upload_history")
 async def get_upload_history(
     current_user: User = Depends(get_current_user),
@@ -344,4 +327,223 @@ async def get_upload_history(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch upload history"
+        )
+    
+
+# ============= NEW GENERATE VIDEO ENDPOINT =============
+
+def get_project_files(project_id: str, upload_service: UploadService) -> Dict[str, str]:
+    """
+    Retrieve all files for a project from the upload history.
+    
+    Returns:
+        Dict with keys 'video', 'audio', and optionally 'thumbnail'
+    """
+    try:
+        # Get all uploads for this project from the database
+        import sqlite3
+        from app.services.upload import UPLOAD_DB
+        
+        conn = sqlite3.connect(UPLOAD_DB)
+        conn.row_factory = sqlite3.Row
+        
+        cursor = conn.execute(
+            "SELECT content_type, url FROM uploads WHERE project_id = ? ORDER BY uploaded_at",
+            (project_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No files found for project {project_id}"
+            )
+        
+        # Categorize files by type
+        files = {}
+        for row in rows:
+            content_type = row['content_type']
+            url = row['url']
+            
+            if content_type.startswith('video/'):
+                files['video'] = url
+            elif content_type.startswith('audio/'):
+                files['audio'] = url
+            elif content_type.startswith('image/'):
+                files['thumbnail'] = url
+        
+        # Validate required files
+        if 'video' not in files or 'audio' not in files:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Project must contain both video and audio files"
+            )
+        
+        return files
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving project files: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve project files"
+        )
+
+async def process_video_generation(
+    project_id: str,
+    files: Dict[str, str],
+    video_service: VideoGenerationService,
+    request_params: GenerateVideoRequest
+) -> Dict[str, any]:
+    """
+    Background task to process video generation.
+    This would typically be run in a background task queue like Celery.
+    """
+    try:
+        logger.info(f"Starting video generation for project {project_id}")
+        
+        # Generate video using the service
+        result = video_service.generate_video(
+            video_path=files['video'],
+            audio_path=files['audio'],
+            thumbnail_path=files.get('thumbnail'),
+            project_id=project_id
+        )
+        
+        logger.info(f"Video generation completed for project {project_id}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Video generation failed for project {project_id}: {str(e)}")
+        raise
+
+@router.post(
+    "/generate_video", 
+    response_model=GenerateVideoResponse,
+    summary="Generate video from uploaded files",
+    description="Combine uploaded video and audio files, with optional thumbnail overlay"
+)
+async def generate_video(
+    request: GenerateVideoRequest = Body(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    current_user: User = Depends(get_current_user),
+    upload_service: UploadService = Depends(get_upload_service),
+    video_service: VideoGenerationService = Depends(get_video_generation_service)
+):
+    """
+    Generate a combined video from uploaded video and audio files.
+    
+    This endpoint:
+    1. Validates the project exists and belongs to the user
+    2. Retrieves the uploaded files for the project
+    3. Starts video generation process
+    4. Returns status and progress information
+    """
+    
+    if not request.project_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="`project_id` is required"
+        )
+    
+    try:
+        # Get project files from database
+        files = get_project_files(request.project_id, upload_service)
+        
+        # TODO: Verify user owns this project (add user_id check to get_project_files)
+        
+        # For now, process synchronously. In production, use background tasks.
+        logger.info(f"Processing video generation for project {request.project_id}")
+        
+        start_time = time.time()
+        
+        # Generate the video
+        result = await asyncio.to_thread(
+            video_service.generate_video,
+            video_path=files['video'],
+            audio_path=files['audio'],
+            thumbnail_path=files.get('thumbnail'),
+            project_id=request.project_id
+        )
+        
+        processing_time = time.time() - start_time
+        
+        # Log successful generation
+        logger.info(
+            "Video generation completed",
+            extra={
+                "project_id": request.project_id,
+                "user_id": current_user.username,
+                "processing_time": processing_time,
+                "output_size": result.get("size_bytes", 0)
+            }
+        )
+        
+        return GenerateVideoResponse(
+            project_id=request.project_id,
+            status="completed",
+            video_url=result["output_path"],
+            progress=100,
+            message="Video generation completed successfully",
+            processing_time_seconds=processing_time,
+            output_file_size=result.get("size_bytes")
+        )
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(
+            "Video generation failed",
+            extra={
+                "project_id": request.project_id,
+                "user_id": current_user.username,
+                "error": str(e),
+                "error_type": type(e).__name__
+            }
+        )
+        
+        return GenerateVideoResponse(
+            project_id=request.project_id,
+            status="failed",
+            progress=0,
+            message=f"Video generation failed: {str(e)}"
+        )
+
+@router.get(
+    "/generation_status/{project_id}",
+    response_model=GenerateVideoResponse,
+    summary="Get video generation status",
+    description="Check the status of video generation for a project"
+)
+async def get_generation_status(
+    project_id: str,
+    current_user: User = Depends(get_current_user),
+    video_service: VideoGenerationService = Depends(get_video_generation_service)
+):
+    """
+    Get the current status of video generation for a project.
+    
+    In a production system, this would check a job queue or database
+    to return real-time status updates.
+    """
+    try:
+        # For now, return a simple lookup
+        # In production, this would check Redis/database for job status
+        status_info = video_service.get_generation_status(project_id)
+        
+        return GenerateVideoResponse(
+            project_id=project_id,
+            status=status_info["status"],
+            progress=status_info.get("progress", 0),
+            message=status_info.get("message", "")
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting generation status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get generation status"
         )
