@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, status, Response, Body, Cookie
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Body, Cookie
 from pydantic import BaseModel
 from app.services.auth import create_user, authenticate_user, _users_db, SECRET_KEY, ALGORITHM
 import jwt
 
-from app.models import UserResponse
+from app.models import User, UserResponse, TokenResponse
+from app.dependencies import get_current_user
 
 router = APIRouter(prefix="/auth")
 
@@ -11,7 +12,7 @@ class AuthPayload(BaseModel):
     username: str
     password: str
 
-@router.post("/register", status_code=200, response_model=UserResponse)
+@router.post("/register", response_model=TokenResponse)
 async def register(
     payload: AuthPayload = Body(...),
     response: Response = None
@@ -21,10 +22,11 @@ async def register(
     """
     user = create_user(payload.username, payload.password)
     token = authenticate_user(payload.username, payload.password)
-    response.set_cookie(key="access_token", value=token, httponly=True)
-    return UserResponse(username=user.username)
+    response.set_cookie(key="access_token", value=token, httponly=True, secure=True, samesite="lax")
+    
+    return TokenResponse(access_token=token, token_type="bearer")
 
-@router.post("/login", status_code=200)
+@router.post("/login", response_model=TokenResponse)
 async def login(
     payload: AuthPayload = Body(...),
     response: Response = None
@@ -33,35 +35,31 @@ async def login(
     Authenticate via JSON payload, set access_token cookie.
     """
     token = authenticate_user(payload.username, payload.password)
-    response.set_cookie(key="access_token", value=token, httponly=True)
-    return {"message": "login successful"}
+    response.set_cookie(key="access_token", value=token, httponly=True, secure=True, samesite="lax")
+    return TokenResponse(access_token=token, token_type="bearer")
 
-@router.get("/me", status_code=200, response_model=UserResponse)
+@router.get("/me", response_model=UserResponse)
 async def me_get(
-    access_token: str = Cookie(None)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get current user from cookie-based session.
     """
-    if not access_token:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
-    try:
-        payload = jwt.decode(access_token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if not username or username not in _users_db:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-        return UserResponse(username=username)
-    except jwt.PyJWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+    return UserResponse(username=current_user.username)
 
-@router.post("/me", status_code=200, response_model=UserResponse)
-async def me_post(
-    payload: AuthPayload = Body(...),
-    response: Response = None
-):
+@router.post("/logout")
+async def logout(response: Response):
     """
-    Refresh authentication and cookie via JSON payload.
+    Logout user by clearing the HTTP-only cookie.
+    """
+    response.delete_cookie(key="access_token")
+    return {"message": "Successfully logged out"}
+
+@router.post("/token", response_model=TokenResponse)
+async def login_for_access_token(payload: AuthPayload = Body(...)):
+    """
+    OAuth2-compatible token endpoint (no cookie, just token).
+    Useful for API clients that only want tokens.
     """
     token = authenticate_user(payload.username, payload.password)
-    response.set_cookie(key="access_token", value=token, httponly=True)
-    return UserResponse(username=payload.username)
+    return TokenResponse(access_token=token, token_type="bearer")

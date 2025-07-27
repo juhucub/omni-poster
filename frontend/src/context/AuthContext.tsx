@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo, useCallback } from 'react';
-import axios, { AxiosInstance } from 'axios';
-import type { TokenResponse, MeResponse } from '../api/models'; 
+import axios, { AxiosError, AxiosInstance } from 'axios';
+import type { TokenResponse, MeResponse, UserResponse } from '../api/models'; 
 
 // Define shape of auth context
 interface AuthContextType {
@@ -33,46 +33,36 @@ const apiClient: AxiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
- /**
- * Response interceptor to handle unauthorized errors and attempt silent refresh.
- */
-apiClient.interceptors.response.use(
-  response => response,
-  async (error: AxiosError) => {
-    if (error.response?.status === 401) {
-      try {
-        // attempt to refresh token (backend must set a new cookie)
-        await apiClient.post('/auth/refresh');
-        // retry original request
-        return apiClient.request(error.config!);
-      } catch {
-        // refresh failed: proceed to logout
-        authLogout();
-      }
-    }
-    return Promise.reject(error);
-  }
-);
 
 /**
  * Internal logout helper for interceptor (no context access).
  */
 let authLogout: () => Promise<void> = async () => {};
  
-
+// Response interceptor for automatic token refresh
+apiClient.interceptors.response.use(
+  response => response,
+  async (error: AxiosError) => {
+    if (error.response?.status === 401) {
+      console.log('Authentication failed, logging out');
+      authLogout();
+    }
+    return Promise.reject(error);
+  }
+);
 /**
  * AuthProvider wraps the app, manages the user session entirely in memory and HTTP-only cookies.
  * Avoids localStorage to mitigate XSS risks.
  */
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<MeResponse | null>(null);
+  const [user, setUser] = useState<UserResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   /**
    * Perform initial "whoami" check on mount.
    */
   useEffect(() => {
     apiClient
-      .get<MeResponse>('/auth/me')
+      .get<UserResponse>('/auth/me')
       .then(res => setUser(res.data))
       .catch(() => setUser(null))
       .finally(() => setIsLoading(false));
@@ -83,7 +73,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
    */
   const login = useCallback(async (username: string, password: string) => {
     await apiClient.post<TokenResponse>('/auth/login', { username, password });
-    const me = await apiClient.get<MeResponse>('/auth/me');
+    const me = await apiClient.get<UserResponse>('/auth/me');
     setUser(me.data);
   }, []);
 
@@ -91,8 +81,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
    * Register a new account; backend sets HTTP-only cookie as well.
    */
   const register = useCallback(async (username: string, password: string) => {
-    await apiClient.post<RegisterResponse>('/auth/register', { username, password });
-    const me = await apiClient.get<MeResponse>('/auth/me');
+    await apiClient.post<TokenResponse>('/auth/register', { username, password });
+    const me = await apiClient.get<UserResponse>('/auth/me');
     setUser(me.data);
   }, []);
 
@@ -103,8 +93,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setUser(null);
     try {
       await apiClient.post('/auth/logout');
-    } catch {
-      // ignore network errors on logout
+    } catch(error) {
+        console.log('Logout error (ignored):', error);
     }
   }, []);
 
@@ -123,7 +113,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       register,
       logout,
     }),
-    [user, login, register, logout]
+    [user, isLoading, login, register, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

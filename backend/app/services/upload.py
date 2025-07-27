@@ -15,6 +15,7 @@ UPLOAD_DB = os.path.join(UPLOAD_DIR, "uploads.db")
 logger = logging.getLogger(__name__)
 
 class UploadMeta(BaseModel):
+    project_id: str
     filename: str
     url: str
     size: int
@@ -182,85 +183,85 @@ class UploadService:
         finally:
             conn.close()
 
-def delete_upload_record(self, project_id: str, uploader_id: str) -> bool:
-    """
-    Deletes upload records for a specific project (user can only delete their own).
-    
-    Args:
-        project_id: The project ID to delete
-        uploader_id: The user ID (for security)
+    def delete_upload_record(self, project_id: str, uploader_id: str) -> bool:
+        """
+        Deletes upload records for a specific project (user can only delete their own).
         
-    Returns:
-        True if records were deleted, False if no records found
-    """
-    conn = sqlite3.connect(UPLOAD_DB)
-    try:
-        cursor = conn.execute(
-            "DELETE FROM uploads WHERE project_id = ? AND uploader_id = ?",
-            (project_id, uploader_id)
-        )
-        conn.commit()
-        
-        deleted_count = cursor.rowcount
-        logger.info(f"Deleted {deleted_count} upload records for project {project_id}")
-        return deleted_count > 0
-        
-    except Exception as e:
-        logger.error(f"Failed to delete upload records for project {project_id}: {e}")
-        raise
-    finally:
-        conn.close()
+        Args:
+            project_id: The project ID to delete
+            uploader_id: The user ID (for security)
+            
+        Returns:
+            True if records were deleted, False if no records found
+        """
+        conn = sqlite3.connect(UPLOAD_DB)
+        try:
+            cursor = conn.execute(
+                "DELETE FROM uploads WHERE project_id = ? AND uploader_id = ?",
+                (project_id, uploader_id)
+            )
+            conn.commit()
+            
+            deleted_count = cursor.rowcount
+            logger.info(f"Deleted {deleted_count} upload records for project {project_id}")
+            return deleted_count > 0
+            
+        except Exception as e:
+            logger.error(f"Failed to delete upload records for project {project_id}: {e}")
+            raise
+        finally:
+            conn.close()
 
 
-def get_upload_stats(self, uploader_id: str) -> Dict[str, Any]:
-    """
-    Get upload statistics for a user.
-    
-    Args:
-        uploader_id: The user ID
+    def get_upload_stats(self, uploader_id: str) -> Dict[str, Any]:
+        """
+        Get upload statistics for a user.
         
-    Returns:
-        Dictionary with upload statistics
-    """
-    conn = sqlite3.connect(UPLOAD_DB)
-    try:
-        cursor = conn.execute(
-            """
-            SELECT 
-                COUNT(*) as total_uploads,
-                COUNT(DISTINCT project_id) as total_projects,
-                SUM(size) as total_size,
-                MIN(uploaded_at) as first_upload,
-                MAX(uploaded_at) as last_upload
-            FROM uploads 
-            WHERE uploader_id = ?
-            """,
-            (uploader_id,)
-        )
-        
-        row = cursor.fetchone()
-        
-        if row:
-            return {
-                'total_uploads': row[0] or 0,
-                'total_projects': row[1] or 0,
-                'total_size_bytes': row[2] or 0,
-                'first_upload': row[3],
-                'last_upload': row[4]
-            }
-        else:
-            return {
-                'total_uploads': 0,
-                'total_projects': 0,
-                'total_size_bytes': 0,
-                'first_upload': None,
-                'last_upload': None
-            } 
-    except Exception as e:
-        logger.error(f"Failed to get upload stats for user {uploader_id}: {e}")
-        raise
-    finally:
-        conn.close()
+        Args:
+            uploader_id: The user ID
+            
+        Returns:
+            Dictionary with upload statistics
+        """
+        conn = sqlite3.connect(UPLOAD_DB)
+        try:
+            cursor = conn.execute(
+                """
+                SELECT 
+                    COUNT(*) as total_uploads,
+                    COUNT(DISTINCT project_id) as total_projects,
+                    SUM(size) as total_size,
+                    MIN(uploaded_at) as first_upload,
+                    MAX(uploaded_at) as last_upload
+                FROM uploads 
+                WHERE uploader_id = ?
+                """,
+                (uploader_id,)
+            )
+            
+            row = cursor.fetchone()
+            
+            if row:
+                return {
+                    'total_uploads': row[0] or 0,
+                    'total_projects': row[1] or 0,
+                    'total_size_bytes': row[2] or 0,
+                    'first_upload': row[3],
+                    'last_upload': row[4]
+                }
+            else:
+                return {
+                    'total_uploads': 0,
+                    'total_projects': 0,
+                    'total_size_bytes': 0,
+                    'first_upload': None,
+                    'last_upload': None
+                } 
+        except Exception as e:
+            logger.error(f"Failed to get upload stats for user {uploader_id}: {e}")
+            raise
+        finally:
+            conn.close()
 
 def get_upload_service() -> UploadService:
     return UploadService()
