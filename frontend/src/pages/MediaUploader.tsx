@@ -4,6 +4,8 @@ import { useAuth } from '../context/AuthContext.tsx';
 import UploadHistory from '../components/media-uploader/UploadHistory.tsx';
 import Sidebar from '../components/Sidebar.tsx';
 import ToggleControl from '../components/media-uploader/ToggleControl.tsx';
+import useFileUpload from '../hooks/useFileUpload.tsx';
+import FileUploader from '../components/media-uploader/FileUploader.tsx';
 
 // Allowed MIME types and size limits
 const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'];
@@ -15,55 +17,6 @@ interface MediaUploaderProps {
   onUploadSuccess: (projectId: string) => void;
   onUploadError?: (errorMessage: string) => void;
 }
-
-const useFileUpload = () => {
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-
-  const uploadFile = useCallback(async (file: File, type: string) => {
-    setIsUploading(true);
-    setUploadProgress(0);
-    setError(null);
-
-    try {
-      // Simulate upload progress
-      const progressInterval = setInterval(() => {
-        setUploadProgress(prev => {
-          if (prev >= 90) {
-            clearInterval(progressInterval);
-            return 90;
-          }
-          return prev + 10;
-        });
-      }, 200);
-
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      clearInterval(progressInterval);
-      setUploadProgress(100);
-      
-      // Mock successful upload
-      return {
-        id: Date.now().toString(),
-        name: file.name,
-        type: type as 'video' | 'audio' | 'thumbnail',
-        size: file.size,
-        url: URL.createObjectURL(file),
-        uploadedAt: new Date()
-      };
-    } catch (err) {
-      setError('Upload failed. Please try again.');
-      throw err;
-    } finally {
-      setIsUploading(false);
-      setTimeout(() => setUploadProgress(0), 1000);
-    }
-  }, []);
-
-  return { uploadFile, isUploading, uploadProgress, error };
-};
 
 const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUploadError }) => {
   const { logout } = useAuth();
@@ -187,10 +140,10 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
       <main className="flex-1 p-6 space-y-6">
         {activeSection === 'upload' && (
           <div className="max-w-6xl mx-auto space-y-8">
-          <div className="flex justify-between items-center">
-            <h1 className="text-3xl font-bold text-gray-900">Media Management</h1>
-            { /* <DatabaseDropdown onSelect={setSelectedFile} /> */}
-          </div>
+            <div className="flex justify-between items-center">
+              <h1 className="text-3xl font-bold text-white">Media Management</h1>
+              { /* <DatabaseDropdown onSelect={setSelectedFile} /> */}
+            </div>
         
           <ToggleControl 
             options={[
@@ -200,6 +153,50 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
             active={'activeTab'} 
             onChange={setActiveTab}
           />
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div className="space-y-8">
+              {activeTab === 'upload' && (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="bg-white rounded-lg p-6 shadow-sm">
+                      <FileUploader
+                        fileType="video"
+                        onUpload={handleFileUpload}
+                        isUploading={isUploading}
+                        progress={uploadProgress}
+                      />
+                    </div>
+                    <div className="bg-white rounded-lg p-6 shadow-sm">
+                      <FileUploader
+                        fileType="audio"
+                        onUpload={handleFileUpload}
+                        isUploading={isUploading}
+                        progress={uploadProgress}
+                      />
+                    </div>
+                    <div className="bg-white rounded-lg p-6 shadow-sm">
+                      <FileUploader
+                        fileType="thumbnail"
+                        onUpload={handleFileUpload}
+                        isUploading={isUploading}
+                        progress={uploadProgress}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-lg p-6 shadow-sm">
+                    <MediaList
+                      files={uploadedFiles}
+                      onSelect={setSelectedFile}
+                      selectedFile={selectedFile}
+                    />
+                  </div>
+                  </>
+                )}
+                </div>
+
+                
 
         {/* Upload Form */}
         <form onSubmit={handleSubmit} className="space-y-4 p-4 bg-white rounded-lg shadow">
@@ -276,6 +273,7 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
             )}
           </button>
         </form>
+      </div>
 
       {/* Upload History */}
       <UploadHistory 

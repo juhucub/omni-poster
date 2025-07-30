@@ -1,74 +1,150 @@
-import React, { useCallback, useState, DragEvent } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
+import useFileUpload from '../../hooks/useFileUpload';
+import { Video, Music, Image } from 'lucide-react';
+// Utility functions with security
+const sanitizeInput = (input: string): string => {
+  return input.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+              .replace(/[<>]/g, '');
+};
 
-interface FileUploaderProps {
-  file?: File;
-  onFileSelect: (file: File) => void;
-  maxSize: number;
-  accept: string;
-}
+const validateFileType = (file: File, allowedTypes: string[]): boolean => {
+  return allowedTypes.some(type => file.type.startsWith(type));
+};
 
-const FileUploader: React.FC<FileUploaderProps> = ({ file, onFileSelect, maxSize, accept }) => {
-  const [error, setError] = useState<string | null>(null);
+const validateFileSize = (file: File, maxSizeMB: number): boolean => {
+  return file.size <= maxSizeMB * 1024 * 1024;
+};
 
-  const validateAndSelect = (f: File) => {
-    if (!f.type.match(accept.replace('*', '.*'))) {
-      setError('Unsupported file type.');
-    } else if (f.size > maxSize) {
-      setError(`File exceeds ${Math.round(maxSize / 1024 / 1024)} MB.`);
-    } else {
-      setError(null);
-      onFileSelect(f);
+
+const FileUploader: React.FC<{
+  fileType: 'video' | 'audio' | 'thumbnail';
+  onUpload: (file: File) => void;
+  isUploading: boolean;
+  progress: number;
+}> = ({ fileType, onUpload, isUploading, progress }) => {
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { uploadFile } = useFileUpload();
+
+  const fileConfig = {
+    video: { 
+      accept: 'video/*', 
+      maxSize: 100, 
+      icon: Video, 
+      label: 'Video Files',
+      description: 'MP4, AVI, MOV up to 100MB'
+    },
+    audio: { 
+      accept: 'audio/*', 
+      maxSize: 50, 
+      icon: Music, 
+      label: 'Audio Files',
+      description: 'MP3, WAV, AAC up to 50MB'
+    },
+    thumbnail: { 
+      accept: 'image/*', 
+      maxSize: 10, 
+      icon: Image, 
+      label: 'Thumbnail Images',
+      description: 'PNG, JPG, GIF up to 10MB'
     }
   };
 
-  const onDrop = useCallback((e: DragEvent) => {
+  const config = fileConfig[fileType];
+  const Icon = config.icon;
+
+  const handleFile = async (file: File) => {
+    if (!validateFileType(file, [config.accept.split('/')[0]])) {
+      alert(`Invalid file type. Please select a ${config.label.toLowerCase()}.`);
+      return;
+    }
+
+    if (!validateFileSize(file, config.maxSize)) {
+      alert(`File too large. Maximum size is ${config.maxSize}MB.`);
+      return;
+    }
+
+    try {
+      const uploadedFile = await uploadFile(file, fileType);
+      onUpload(uploadedFile);
+    } catch (error) {
+      console.error('Upload failed:', error);
+    }
+  };
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-    if (e.dataTransfer.files.length) {
-      validateAndSelect(e.dataTransfer.files[0]);
+    setIsDragging(false);
+    
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      handleFile(files[0]);
     }
   }, []);
 
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  }, []);
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      handleFile(files[0]);
+    }
+  }
+
   return (
-    <div>
-      <label
-        htmlFor="video-upload"
-        className="block text-sm font-medium text-gray-700 mb-1"
-      >
-        Upload Video
-      </label>
+    <div className="space-y-4">
       <div
-        onDragOver={e => e.preventDefault()}
-        onDrop={onDrop}
-        className="relative flex items-center justify-center h-40 border-2 border-dashed border-gray-300 rounded-lg bg-white hover:border-indigo-500 transition-colors"
-        aria-label="File drop zone"
+        className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+          isDragging 
+            ? 'border-blue-500 bg-blue-50' 
+            : 'border-gray-300 hover:border-gray-400'
+        }`}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
       >
-        {!file ? (
-          <div className="text-center text-gray-500">
-            <p>Drag & drop a file here</p>
-            <p>or</p>
-            <button
-              type="button"
-              onClick={() => document.getElementById('video-upload')?.click()}
-              className="mt-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            >
-              Browse
-            </button>
+        <Icon size={48} className="mx-auto mb-4 text-gray-400" />
+        <h3 className="text-lg font-medium text-gray-900 mb-2">{config.label}</h3>
+        <p className="text-gray-500 mb-4">{config.description}</p>
+        
+        {isUploading ? (
+          <div className="space-y-2">
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div 
+                className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <p className="text-sm text-gray-600">Uploading... {progress}%</p>
           </div>
         ) : (
-          <p className="text-gray-700">{file.name}</p>
+          <>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              Browse Files
+            </button>
+            <p className="text-sm text-gray-500 mt-2">or drag and drop files here</p>
+          </>
         )}
-
+        
         <input
-          id="video-upload"
+          ref={fileInputRef}
           type="file"
-          accept={accept}
+          accept={config.accept}
+          onChange={handleFileSelect}
           className="hidden"
-          onChange={e => {
-            if (e.target.files?.[0]) validateAndSelect(e.target.files[0]);
-          }}
         />
       </div>
-      {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
     </div>
   );
 };
