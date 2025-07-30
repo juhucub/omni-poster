@@ -2,7 +2,8 @@ import React, { useState, useCallback, ChangeEvent, FormEvent } from 'react';
 import API from '../api/client.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import UploadHistory from '../components/media-uploader/UploadHistory.tsx';
-
+import Sidebar from '../components/Sidebar.tsx';
+import ToggleControl from '../components/media-uploader/ToggleControl.tsx';
 // Allowed MIME types and size limits
 const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'];
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif'];
@@ -116,7 +117,17 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
   }, [onUploadSuccess]);
 
   return (
-    <div className="space-y-6">
+    <div className="flex min-h-screen bg-gradient-to-br from-[#17183D] via-[#2C275C] to-[#10123B] text-gray-800">
+      <Sidebar />
+      <main className="flex-1 p-6 space-y-6">
+        <ToggleControl 
+          options={[
+            { id: 'upload', label: 'Upload Media' },
+            { id: 'generate', label: 'Generate Media' }
+          ]} 
+          active={''} onChange={function (id: string): void {
+          throw new Error('Function not implemented.');
+        } } />
       {/* Upload Form */}
       <form onSubmit={handleSubmit} className="space-y-4 p-4 bg-white rounded-lg shadow">
         <h2 className="text-xl font-semibold">Upload Media</h2>
@@ -198,6 +209,7 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
         onSelect={handleProjectSelect}
         refreshTrigger={historyRefreshTrigger}
       />
+    </main>
     </div>
   );
 };
