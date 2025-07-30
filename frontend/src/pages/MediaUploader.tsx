@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext.tsx';
 import UploadHistory from '../components/media-uploader/UploadHistory.tsx';
 import Sidebar from '../components/Sidebar.tsx';
 import ToggleControl from '../components/media-uploader/ToggleControl.tsx';
+
 // Allowed MIME types and size limits
 const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'];
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif'];
@@ -15,13 +16,77 @@ interface MediaUploaderProps {
   onUploadError?: (errorMessage: string) => void;
 }
 
+const useFileUpload = () => {
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  const uploadFile = useCallback(async (file: File, type: string) => {
+    setIsUploading(true);
+    setUploadProgress(0);
+    setError(null);
+
+    try {
+      // Simulate upload progress
+      const progressInterval = setInterval(() => {
+        setUploadProgress(prev => {
+          if (prev >= 90) {
+            clearInterval(progressInterval);
+            return 90;
+          }
+          return prev + 10;
+        });
+      }, 200);
+
+      // Simulate API call
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      clearInterval(progressInterval);
+      setUploadProgress(100);
+      
+      // Mock successful upload
+      return {
+        id: Date.now().toString(),
+        name: file.name,
+        type: type as 'video' | 'audio' | 'thumbnail',
+        size: file.size,
+        url: URL.createObjectURL(file),
+        uploadedAt: new Date()
+      };
+    } catch (err) {
+      setError('Upload failed. Please try again.');
+      throw err;
+    } finally {
+      setIsUploading(false);
+      setTimeout(() => setUploadProgress(0), 1000);
+    }
+  }, []);
+
+  return { uploadFile, isUploading, uploadProgress, error };
+};
+
 const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUploadError }) => {
   const { logout } = useAuth();
+  const [activeSection, setActiveSection] = useState('upload');
+  const [activeTab, setActiveTab] = useState('upload');
+  //FIXME File vs MediaFile
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  const [generatedMedia] = useState<GeneratedMedia[]>([
+    {
+      id: '1',
+      name: 'Generated Video 1',
+      type: 'video',
+      createdAt: new Date('2024-01-20'),
+      status: 'completed',
+      url: '/generated-video-1.mp4'
+    }
+  ]);
+
+  const { isUploading, uploadProgress } = useFileUpload();
   
   // Counter to trigger history refresh
   const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState<number>(0);
@@ -120,97 +185,107 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
     <div className="flex min-h-screen bg-gradient-to-br from-[#17183D] via-[#2C275C] to-[#10123B] text-gray-800">
       <Sidebar />
       <main className="flex-1 p-6 space-y-6">
-        <ToggleControl 
-          options={[
-            { id: 'upload', label: 'Upload Media' },
-            { id: 'generate', label: 'Generate Media' }
-          ]} 
-          active={''} onChange={function (id: string): void {
-          throw new Error('Function not implemented.');
-        } } />
-      {/* Upload Form */}
-      <form onSubmit={handleSubmit} className="space-y-4 p-4 bg-white rounded-lg shadow">
-        <h2 className="text-xl font-semibold">Upload Media</h2>
-
-        <div>
-          <label className="block text-sm font-medium">Video File</label>
-          <input
-            type="file"
-            accept={ALLOWED_VIDEO_TYPES.join(',')}
-            onChange={onChangeFactory(setVideoFile, ALLOWED_VIDEO_TYPES)}
-            required
-            className="mt-1 block w-full text-sm border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
-          {videoFile && (
-            <p className="text-xs text-gray-600 mt-1">
-              Selected: {videoFile.name} ({(videoFile.size / (1024 * 1024)).toFixed(1)} MB)
-            </p>
-          )}
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium">Audio File</label>
-          <input
-            type="file"
-            accept={ALLOWED_AUDIO_TYPES.join(',')}
-            onChange={onChangeFactory(setAudioFile, ALLOWED_AUDIO_TYPES)}
-            required
-            className="mt-1 block w-full text-sm border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
-          {audioFile && (
-            <p className="text-xs text-gray-600 mt-1">
-              Selected: {audioFile.name} ({(audioFile.size / (1024 * 1024)).toFixed(1)} MB)
-            </p>
-          )}
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium">Thumbnail (optional)</label>
-          <input
-            type="file"
-            accept={ALLOWED_IMAGE_TYPES.join(',')}
-            onChange={onChangeFactory(setThumbnailFile, ALLOWED_IMAGE_TYPES)}
-            className="mt-1 block w-full text-sm border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
-          {thumbnailFile && (
-            <p className="text-xs text-gray-600 mt-1">
-              Selected: {thumbnailFile.name} ({(thumbnailFile.size / (1024 * 1024)).toFixed(1)} MB)
-            </p>
-          )}
-        </div>
-
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-md p-3">
-            <p className="text-red-600 text-sm">{error}</p>
+        {activeSection === 'upload' && (
+          <div className="max-w-6xl mx-auto space-y-8">
+          <div className="flex justify-between items-center">
+            <h1 className="text-3xl font-bold text-gray-900">Media Management</h1>
+            { /* <DatabaseDropdown onSelect={setSelectedFile} /> */}
           </div>
-        )}
+        
+          <ToggleControl 
+            options={[
+              { id: 'upload', label: 'Upload Media' },
+              { id: 'generate', label: 'Generate Media' }
+            ]} 
+            active={'activeTab'} 
+            onChange={setActiveTab}
+          />
 
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        >
-          {loading ? (
-            <span className="flex items-center justify-center">
-              <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              Uploading...
-            </span>
-          ) : (
-            'Upload & Generate'
+        {/* Upload Form */}
+        <form onSubmit={handleSubmit} className="space-y-4 p-4 bg-white rounded-lg shadow">
+          <h2 className="text-xl font-semibold">Upload Media</h2>
+
+          <div>
+            <label className="block text-sm font-medium">Video File</label>
+            <input
+              type="file"
+              accept={ALLOWED_VIDEO_TYPES.join(',')}
+              onChange={onChangeFactory(setVideoFile, ALLOWED_VIDEO_TYPES)}
+              required
+              className="mt-1 block w-full text-sm border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            {videoFile && (
+              <p className="text-xs text-gray-600 mt-1">
+                Selected: {videoFile.name} ({(videoFile.size / (1024 * 1024)).toFixed(1)} MB)
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium">Audio File</label>
+            <input
+              type="file"
+              accept={ALLOWED_AUDIO_TYPES.join(',')}
+              onChange={onChangeFactory(setAudioFile, ALLOWED_AUDIO_TYPES)}
+              required
+              className="mt-1 block w-full text-sm border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            {audioFile && (
+              <p className="text-xs text-gray-600 mt-1">
+                Selected: {audioFile.name} ({(audioFile.size / (1024 * 1024)).toFixed(1)} MB)
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium">Thumbnail (optional)</label>
+            <input
+              type="file"
+              accept={ALLOWED_IMAGE_TYPES.join(',')}
+              onChange={onChangeFactory(setThumbnailFile, ALLOWED_IMAGE_TYPES)}
+              className="mt-1 block w-full text-sm border border-gray-300 rounded-md p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            {thumbnailFile && (
+              <p className="text-xs text-gray-600 mt-1">
+                Selected: {thumbnailFile.name} ({(thumbnailFile.size / (1024 * 1024)).toFixed(1)} MB)
+              </p>
+            )}
+          </div>
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-md p-3">
+              <p className="text-red-600 text-sm">{error}</p>
+            </div>
           )}
-        </button>
-      </form>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {loading ? (
+              <span className="flex items-center justify-center">
+                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Uploading...
+              </span>
+            ) : (
+              'Upload & Generate'
+            )}
+          </button>
+        </form>
 
       {/* Upload History */}
       <UploadHistory 
         onSelect={handleProjectSelect}
         refreshTrigger={historyRefreshTrigger}
       />
+      </div>
+     )}
     </main>
-    </div>
+  </div>
   );
 };
 

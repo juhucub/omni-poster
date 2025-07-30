@@ -3,7 +3,7 @@ import React, { Suspense } from 'react';
 import { useAuthGuard } from '../components/video-gen/useAuthGuard.tsx';        // ← guard hook
 import { useVideoUpload } from '../api/video_service.ts';    // ← upload hook
 
-const FileUploader   = React.lazy(() => import('../components/video-gen/FileUploader'));
+const FileUploader   = React.lazy(() => import('../components/media-uploader/FileUploader'));
 const MetadataForm   = React.lazy(() => import('../components/video-gen/MetadataForm'));
 const ProgressBar    = React.lazy(() => import('../components/video-gen/ProgressBar'));
 const PreviewPlayer  = React.lazy(() => import('../components/video-gen/PreviewPlayer'));
