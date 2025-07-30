@@ -100,3 +100,23 @@ export interface UploadResponse {
     detail: string;
   }
   
+  // src/types/video.ts
+
+/** Basic metadata for a generated video */
+export interface Metadata {
+  /** Human-readable title (max ~100 chars) */
+  title: string;
+  /** Description or summary (max ~500 chars) */
+  description: string;
+  /** Array of tag strings, e.g. ["promo","tutorial"] */
+  tags: string[];
+}
+
+/** Supported output resolutions */
+export type Resolution = '720p' | '1080p' | '4k';
+
+/** Generation options beyond metadata */
+export interface VideoOptions {
+  /** Desired resolution for the final video */
+  resolution: Resolution;
+}

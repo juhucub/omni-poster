@@ -10,6 +10,7 @@ import MediaUploader           from './pages/MediaUploader.tsx';
 import AccountManager          from './pages/AccountManager.tsx';
 import { ProtectedRoute }      from './components/ProtectedRoute.tsx';
 import './output.css';
+import VideoGenerationPage from './pages/VideoGeneration.tsx';
 
 const AppRoutes: React.FC = () => {
   const { isAuthenticated, isLoading, logout } = useAuth();
@@ -62,6 +63,15 @@ const AppRoutes: React.FC = () => {
             element={
               <ProtectedRoute>
                 <AccountManager />
+              </ProtectedRoute>
+            }
+          />
+            {/* vid gen */}
+            <Route
+            path="/vid-gen"
+            element={
+              <ProtectedRoute>
+                <VideoGenerationPage />
               </ProtectedRoute>
             }
           />
