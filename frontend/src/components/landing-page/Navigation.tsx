@@ -1,9 +1,11 @@
 import React, { JSX, useState } from 'react';
+import { Navigate, useNavigate } from 'react-router-dom';
 import { Menu, X, ChevronDown } from 'lucide-react';
 
 const Navigation: React.FC = () => {
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+    const navigate = useNavigate();
   
     return (
       <nav className="bg-[#17183D] border-1 border-gray-100 sticky top-0 z-50">
@@ -64,10 +66,12 @@ const Navigation: React.FC = () => {
             </div>
   
             {/* CTA Button */}
-            <button className="hidden md:block bg-purple-600 text-white px-6 py-2 rounded-lg hover:bg-purple-700 transition-colors">
+            <button 
+              onClick={() => navigate('/login')}
+              className="hidden md:block bg-purple-600 text-white px-6 py-2 rounded-lg hover:bg-purple-700 transition-colors">
               Try free
             </button>
-  
+
             {/* Mobile menu button */}
             <button 
               onClick={() => setIsMenuOpen(!isMenuOpen)}
@@ -85,9 +89,6 @@ const Navigation: React.FC = () => {
                 <a href="#" className="block text-gray-700 hover:text-gray-900">How it works</a>
                 <a href="#" className="block text-gray-700 hover:text-gray-900">Insights</a>
                 <a href="#" className="block text-gray-700 hover:text-gray-900">Help</a>
-                <button className="w-full text-left bg-blue-600 text-white px-4 py-2 rounded-lg">
-                  Try free
-                </button>
               </div>
             </div>
           )}
