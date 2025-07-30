@@ -120,3 +120,23 @@ export interface VideoOptions {
   /** Desired resolution for the final video */
   resolution: Resolution;
 }
+
+export interface MediaFile {
+  id: string;
+  name: string;
+  type: 'video' | 'audio' | 'thumbnail';
+  size: number;
+  url: string;
+  uploadedAt: Date;
+  duration?: number;
+  dimensions?: { width: number; height: number };
+}
+
+export interface GeneratedMedia {
+  id: string;
+  name: string;
+  type: string;
+  createdAt: Date;
+  status: 'processing' | 'completed' | 'failed';
+  url?: string;
+}

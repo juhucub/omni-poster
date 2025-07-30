@@ -6,6 +6,8 @@ import Sidebar from '../components/Sidebar.tsx';
 import ToggleControl from '../components/media-uploader/ToggleControl.tsx';
 import useFileUpload from '../hooks/useFileUpload.tsx';
 import FileUploader from '../components/media-uploader/FileUploader.tsx';
+import MediaList from '../components/media-uploader/MediaList.tsx';
+import type { MediaFile, GeneratedMedia} from '../../api/models.tsx';
 
 // Allowed MIME types and size limits
 const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'];
@@ -28,6 +30,8 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
   const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  const [uploadedFiles, setUploadedFiles] = useState<MediaFile[]>([]);
+  const [selectedFile, setSelectedFile] = useState<MediaFile | null>(null);
   const [generatedMedia] = useState<GeneratedMedia[]>([
     {
       id: '1',
@@ -41,6 +45,19 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
 
   const { isUploading, uploadProgress } = useFileUpload();
   
+  const handleFileUpload = (file: MediaFile) => {
+    setUploadedFiles(prev => [file, ...prev]);
+  };
+
+  const handlePublish = (platform: string) => {
+    console.log(`Publishing to ${platform}:`, {
+      file: selectedFile,
+      // In production, this would send to your API
+    });
+    alert(`Successfully scheduled post to ${platform}!`);
+  };
+
+
   // Counter to trigger history refresh
   const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState<number>(0);
 

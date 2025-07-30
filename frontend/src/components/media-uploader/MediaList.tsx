@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { FileText, Video, Music, Image, Check } from 'lucide-react';
-import type { MediaFile } from '../../types/media';
+import type { MediaFile } from '../../api/models.tsx';
 
 interface MediaListProps {
   files: MediaFile[];
