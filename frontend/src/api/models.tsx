@@ -140,3 +140,12 @@ export interface GeneratedMedia {
   status: 'processing' | 'completed' | 'failed';
   url?: string;
 }
+
+export interface Project {
+  project_id: string;
+  video_name: string;
+  audio_name: string;
+  thumbnail_name?: string;
+  created_at: string;
+  status: string;
+}

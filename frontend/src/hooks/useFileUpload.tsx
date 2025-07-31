@@ -1,16 +1,35 @@
 import { useState, useCallback } from 'react';
+import API from '../api/client.ts';
 
-const useFileUpload = () => {
+interface UseFileUploadReturn {
+    uploadProject: (videoFile: File, audioFile: File, thumbnailFile?: File) => Promise<{ project_id: string; message: string }>;
+    isUploading: boolean;
+    uploadProgress: number;
+    error: string | null;
+  }
+
+const useFileUpload = (): UseFileUploadReturn => {
     const [isUploading, setIsUploading] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [error, setError] = useState<string | null>(null);
   
-    const uploadFile = useCallback(async (file: File, type: string) => {
-      setIsUploading(true);
-      setUploadProgress(0);
-      setError(null);
+    const uploadProject = useCallback(async (
+        videoFile: File,
+        audioFile: File,
+        thumbnailFile?: File
+    ): Promise<{ project_id: string; message: string }> => {
+        setIsUploading(true);
+        setUploadProgress(0);
+        setError(null);
   
       try {
+        //Save form data
+        const formFata = new FormData();
+        formFata.append('video', videoFile);
+        formFata.append('audio', audioFile);
+        if (thumbnailFile) {
+          formFata.append('thumbnail', thumbnailFile);
+        }   
         // Simulate upload progress
         const progressInterval = setInterval(() => {
           setUploadProgress(prev => {
@@ -23,30 +42,39 @@ const useFileUpload = () => {
         }, 200);
   
         // Simulate API call
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        const response = await API.post('/projects/upload', formFata, {
+            headers: {
+                'Content-Type': 'multipart/form-data'
+                //FIXME: CSRF projection and JWT auth headers will be added by API client
+                },
+            });
         
         clearInterval(progressInterval);
         setUploadProgress(100);
         
-        // Mock successful upload
-        return {
-          id: Date.now().toString(),
-          name: file.name,
-          type: type as 'video' | 'audio' | 'thumbnail',
-          size: file.size,
-          url: URL.createObjectURL(file),
-          uploadedAt: new Date()
-        };
-      } catch (err) {
-        setError('Upload failed. Please try again.');
+        return response.data;
+        } catch(err: any) {
+            if (err.response) {
+                const status = err.response.status;
+                if (status === 415) {
+                  setError('Unsupported file type.');
+                } else if (status === 500) {
+                  setError('Server error saving files.');
+                } else if (status === 413) {
+                  setError('File too large.');
+                } else {
+                  setError(err.response.data.detail || 'Upload failed.');
+                }
+              } else {
+                setError(err.message || 'Network error occurred.');
+              }
         throw err;
-      } finally {
-        setIsUploading(false);
-        setTimeout(() => setUploadProgress(0), 1000);
-      }
-    }, []);
-  
-    return { uploadFile, isUploading, uploadProgress, error };
-  };
-
+        } finally {
+            setIsUploading(false);
+            setTimeout(() => setUploadProgress(0), 1000);
+        }
+          }, []);
+        
+          return { uploadProject, isUploading, uploadProgress, error };
+        };
 export default useFileUpload;

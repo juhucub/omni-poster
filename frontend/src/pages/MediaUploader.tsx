@@ -7,7 +7,7 @@ import ToggleControl from '../components/media-uploader/ToggleControl.tsx';
 import useFileUpload from '../hooks/useFileUpload.tsx';
 import FileUploader from '../components/media-uploader/FileUploader.tsx';
 import MediaList from '../components/media-uploader/MediaList.tsx';
-import type { MediaFile, GeneratedMedia} from '../../api/models.tsx';
+import type { MediaFile, GeneratedMedia, Project} from '../../api/models.tsx';
 
 // Allowed MIME types and size limits
 const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'];
@@ -24,10 +24,12 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
   const { logout } = useAuth();
   const [activeSection, setActiveSection] = useState('upload');
   const [activeTab, setActiveTab] = useState('upload');
-  //FIXME File vs MediaFile
+  //File states
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
+
+  // Error and loading states
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [uploadedFiles, setUploadedFiles] = useState<MediaFile[]>([]);
