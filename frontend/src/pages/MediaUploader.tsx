@@ -9,6 +9,7 @@ import FileUploader from '../components/media-uploader/FileUploader.tsx';
 import MediaList from '../components/media-uploader/MediaList.tsx';
 import VideoManipulationPanel from '../components/media-uploader/VideoManipulationPanel.tsx';
 import type { MediaFile, GeneratedMedia, Project} from '../../api/models.tsx';
+import { AlertCircle, PlusCircle, RefreshCw } from 'lucide-react';
 
 // Allowed MIME types and size limits
 const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'];
@@ -240,12 +241,12 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
                       {/* Upload History */}
                       <div className="bg-white rounded-lg shadow-lg p-6">
                         <UploadHistory
-                          uploads={uploads}
-                          loading={historyLoading}
-                          error={historyError}
+                          uploads={uploadedFiles}
+                          loading={false}
+                          error={null}
                           onSelect={handleProjectSelect}
-                          onRefresh={refreshUploads}
-                          lastUpdated={lastUpdated}
+                          onRefresh={() => setHistoryRefreshTrigger(t => t + 1)}
+                          lastUpdated={historyRefreshTrigger}
                         />
                       </div>
                     </div>
