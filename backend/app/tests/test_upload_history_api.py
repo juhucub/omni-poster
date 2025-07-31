@@ -42,7 +42,7 @@ def cleanup_test_files():
     yield
     
     # Clean after test (optional, but good practice)
-    if os.path.exists(UPLOAD_DB):
-        os.remove(UPLOAD_DB)
-    if os.path.isdir(UPLOAD_DIR):
-        for
+    #if os.path.exists(UPLOAD_DB):
+    #    os.remove(UPLOAD_DB)
+    #if os.path.isdir(UPLOAD_DIR):
+    #    for

@@ -2,7 +2,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext.tsx';
-import { UploadProvider }      from './components/media-uploader/UploadHistory.tsx';
+import  UploadHistory          from './components/media-uploader/UploadHistory.tsx';
 import LandingPage             from './pages/LandingPage.tsx';
 import AuthPage                from './pages/AuthPage.tsx';
 import Dashboard               from './pages/Dashboard.tsx';
@@ -10,6 +10,7 @@ import MediaUploader           from './pages/MediaUploader.tsx';
 import AccountManager          from './pages/AccountManager.tsx';
 import { ProtectedRoute }      from './components/ProtectedRoute.tsx';
 import './output.css';
+import VideoGenerationPage from './pages/VideoGeneration.tsx';
 
 const AppRoutes: React.FC = () => {
   const { isAuthenticated, isLoading, logout } = useAuth();
@@ -65,6 +66,15 @@ const AppRoutes: React.FC = () => {
               </ProtectedRoute>
             }
           />
+            {/* vid gen */}
+            <Route
+            path="/vid-gen"
+            element={
+              <ProtectedRoute>
+                <VideoGenerationPage />
+              </ProtectedRoute>
+            }
+          />
 
           {/* Fallbacks */}
           <Route
@@ -84,11 +94,11 @@ const AppRoutes: React.FC = () => {
 
 const App: React.FC = () => (
   <AuthProvider>
-    <UploadProvider>
+    <UploadHistory>
       <BrowserRouter>
         <AppRoutes />
       </BrowserRouter>
-    </UploadProvider>
+    </UploadHistory>
   </AuthProvider>
 );
 

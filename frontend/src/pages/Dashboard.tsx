@@ -1,5 +1,5 @@
 import React from 'react';
-import Sidebar from '../components/dashboard/Sidebar.tsx';
+import Sidebar from '../components/Sidebar.tsx';
 import Header from '../components/dashboard/Header';
 import Summary from '../components/dashboard/Summary.jsx';
 import Promo from '../components/dashboard/Promo';
