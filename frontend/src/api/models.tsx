@@ -4,8 +4,11 @@
  * Response when uploading media assets
  */
 export interface UploadResponse {
-    project_id: string;
-  }
+  project_id: string;
+  message: string;
+}
+
+export type FileType = 'video' | 'audio' | 'thumbnail';
   
   /**
    * Authentication token response
@@ -148,4 +151,23 @@ export interface Project {
   thumbnail_name?: string;
   created_at: string;
   status: string;
+}
+
+export interface UploadRecord {
+  project_id: string;
+  filename: string;
+  url: string;
+  content_type: string;
+  uploader_id: string;
+  uploaded_at: string;
+}
+
+export interface UploadContextType {
+  uploads: UploadRecord[];
+  loading: boolean;
+  error: string | null;
+  addUpload: (upload: UploadRecord) => void;
+  removeUpload: (projectId: string, filename: string) => void;
+  refreshUploads: () => Promise<void>;
+  lastUpdated: Date | null;
 }
