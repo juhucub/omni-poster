@@ -1,11 +1,11 @@
-import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
+import axios, { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse } from 'axios';
 import { generateSecureToken } from '../utils/security';
 
 /**
  * Secure HTTP client with CSRF protection and JWT auth headers
  */
 class APIClient {
-  private client: AxiosInstance;
+  private readonly client: AxiosInstance;
   private csrfToken: string | null = null;
   private authToken: string | null = null;
 
@@ -50,7 +50,7 @@ class APIClient {
 
   private setupInterceptors(): void {
     this.client.interceptors.request.use(
-      (config: AxiosRequestConfig) => {
+      (config: InternalAxiosRequestConfig) => {
         // Add JWT token
         if (this.authToken) {
           config.headers = config.headers || {};

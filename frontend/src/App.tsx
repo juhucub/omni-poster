@@ -2,7 +2,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext.tsx';
-import { UploadProvider }      from './components/media-uploader/UploadHistory.tsx';
+import  UploadHistory          from './components/media-uploader/UploadHistory.tsx';
 import LandingPage             from './pages/LandingPage.tsx';
 import AuthPage                from './pages/AuthPage.tsx';
 import Dashboard               from './pages/Dashboard.tsx';
@@ -94,11 +94,11 @@ const AppRoutes: React.FC = () => {
 
 const App: React.FC = () => (
   <AuthProvider>
-    <UploadProvider>
+    <UploadHistory>
       <BrowserRouter>
         <AppRoutes />
       </BrowserRouter>
-    </UploadProvider>
+    </UploadHistory>
   </AuthProvider>
 );
 

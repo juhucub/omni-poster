@@ -7,6 +7,7 @@ import ToggleControl from '../components/media-uploader/ToggleControl.tsx';
 import useFileUpload from '../hooks/useFileUpload.tsx';
 import FileUploader from '../components/media-uploader/FileUploader.tsx';
 import MediaList from '../components/media-uploader/MediaList.tsx';
+import VideoManipulationPanel from '../components/media-uploader/VideoManipulationPanel.tsx';
 import type { MediaFile, GeneratedMedia, Project} from '../../api/models.tsx';
 
 // Allowed MIME types and size limits
@@ -297,6 +298,6 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
       </main>
     </div>
   );
-  
-    
+};
+
 export default MediaUploader;
