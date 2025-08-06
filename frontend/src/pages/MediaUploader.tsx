@@ -1,16 +1,14 @@
-import React, { useState, useCallback, ChangeEvent, FormEvent, useEffect } from 'react';
-import API from '../api/client';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import UploadHistory from '../components/media-uploader/UploadHistory';
 import Sidebar from '../components/Sidebar';
 import ToggleControl from '../components/media-uploader/ToggleControl';
 import useFileUpload from '../hooks/useFileUpload';
 import FileUploader from '../components/media-uploader/FileUploader';
-import MediaList from '../components/media-uploader/MediaList';
 import VideoManipulationPanel from '../components/media-uploader/VideoManipulationPanel';
-import type { MediaFile, UploadRecord, GeneratedMedia } from '../api/models.tsx';
+import type { UploadRecord } from '../api/models.tsx';
 import { AlertCircle, PlusCircle, RefreshCw } from 'lucide-react';
-import { set } from 'date-fns';
+import API from '../api/client.ts';
 
 // Allowed MIME types and size limits
 const MAX_FILE_SIZE = 50 * 2 ** 20; // 50 MB
@@ -67,7 +65,7 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
   );
 
   //Upload files to backend
-  const handleSubmit = async (e: FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 

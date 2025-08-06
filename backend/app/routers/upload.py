@@ -23,31 +23,19 @@ from fastapi.security import HTTPBearer
 
 
 from app.models import UploadResponse, GenerateVideoResponse, GenerateVideoRequest, User
-from app.services.upload import get_upload_service, UploadService, UploadMeta, UPLOAD_DIR
-from app.services.vid_gen import get_video_generation_service, VideoGenerationService
+from app.services.upload import save_upload_file, validate_file
 from app.dependencies import get_current_user
-
-# Configure structured logging
-logger = logging.getLogger(__name__)
-
-# Security constants
-MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB per file
-MAX_TOTAL_SIZE = 1024 * 1024 * 1024  # 1GB total per request
-ALLOWED_VIDEO_TYPES = {
-    'video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/webm'
-}
-ALLOWED_AUDIO_TYPES = {
-    'audio/mp3', 'audio/wav', 'audio/aac', 'audio/ogg', 'audio/mpeg'
-}
-ALLOWED_IMAGE_TYPES = {
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp'
-}
 
 # Create router WITHOUT conflicting prefix (assuming main app handles /upload)
 router = APIRouter(
-    tags=["uploads"],
-    responses={404: {"description": "Not found"}},
+    tags=["uploads"]
 )
+
+ALLOWED_VIDEO_TYPES = { "video/mp4", "video/webm","video/mpeg"}
+ALLOWED_AUDIO_TYPES = { "audio/mpeg", "audio/wav", "audio/mp3" }
+ALLOWED_IMAGE_TYPES = { "image/jpeg", "image/png", "image/gif" }
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 500 MB
+
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to prevent path traversal and ensure filesystem compatibility."""
@@ -96,208 +84,79 @@ async def validate_file_size(file: UploadFile, max_size: int = MAX_FILE_SIZE) ->
     await file.seek(0)
     return size
 
-async def process_file_upload(
-    file: UploadFile,
-    file_type: str,
-    project_id: str,
-    user: User,
-    upload_service: UploadService,
-    background_tasks: BackgroundTasks
-) -> Dict[str, any]:
-    """Process individual file upload with streaming and background tasks."""
-    
-    # Sanitize filename to prevent path traversal
-    safe_filename = sanitize_filename(file.filename)
-    
-    # Validate file size without loading into memory
-    actual_size = await validate_file_size(file)
-    
-    # Stream file to storage (don't load entire file into memory)
-    try:
-        storage_url = await upload_service.save_to_storage(
-            file, user.username
-        )
-        
-        # Create metadata record
-        meta = UploadMeta(
-            project_id=project_id,
-            filename=safe_filename,
-            url=storage_url,
-            size=actual_size,
-            content_type=file.content_type,
-            uploader_id=user.username
-        )
-        
-        # Record upload in background to not block response
-        background_tasks.add_task(upload_service.record_upload, meta)
-        
-        # Log successful upload (no sensitive data)
-        logger.info(
-            "File uploaded successfully",
-            extra={
-                "project_id": project_id,
-                "file_type": file_type,
-                "file_size": actual_size,
-                "user_id": user.username,
-                "filename_hash": hash(safe_filename)  # Don't log actual filename
-            }
-        )
-        
-        return {
-            "url": storage_url,
-            "size": actual_size,
-            "filename": safe_filename
-        }
-        
-    except Exception as e:
-        logger.error(
-            "File upload failed",
-            extra={
-                "project_id": project_id,
-                "file_type": file_type,
-                "user_id": user.username,
-                "error": str(e)
-            }
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload {file_type} file"
-        )
-
-@router.post(
-    "/upload",  # Clean path without double prefixes
-    response_model=UploadResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Upload media files",
-    description="Upload video, audio, and optional thumbnail files for processing",
-    responses={
-        413: {"description": "File too large"},
-        415: {"description": "Unsupported media type"},
-        422: {"description": "Validation error"},
-        500: {"description": "Upload failed"}
-    }
-)
-async def upload_media_files(
-    request: Request,  # For rate limiting and IP tracking
-    background_tasks: BackgroundTasks,  # For non-blocking operations
+@router.post("/upload")
+async def upload_files(
     video: UploadFile = File(..., description="Video file (required)"),
     audio: UploadFile = File(..., description="Audio file (required)"),
     thumbnail: Optional[UploadFile] = File(None, description="Optional thumbnail image"),
-    # Proper auth dependency with required scopes
-    current_user: User = Depends(get_current_user),
-    upload_service: UploadService = Depends(get_upload_service),
+    current_user: User = Depends(get_current_user)  # Ensure user is authenticated
 ):
-    """
-    Upload endpoint with comprehensive security, performance, and error handling.
     
-    Security features:
-    - File size limits and MIME type validation
-    - Filename sanitization (path traversal prevention)
-    - Proper authentication and authorization
-    - Structured logging without sensitive data
+    #Upload endpoint with comprehensive security, performance, and error handling.
     
-    Performance features:
-    - Streaming file processing (no memory loading)
-    - Background task for metadata recording
-    - Concurrent file validation
-    """
+    #Security features:
+    #- File size limits and MIME type validation
+    #- Filename sanitization (path traversal prevention)
+    #- Proper authentication and authorization
+    #- Structured logging without sensitive data
     
-    # Validate required files are provided (FastAPI handles this, but explicit check for clarity)
-    if not video.filename or not audio.filename:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Both video and audio files must have valid filenames"
-        )
-    
-    # Validate MIME types against strict whitelists
-    validate_content_type(video, ALLOWED_VIDEO_TYPES, "video")
-    validate_content_type(audio, ALLOWED_AUDIO_TYPES, "audio")
-    
-    if thumbnail:
-        validate_content_type(thumbnail, ALLOWED_IMAGE_TYPES, "thumbnail")
-    
-    # Calculate total request size for DOS protection
-    files_to_process = [video, audio]
-    if thumbnail:
-        files_to_process.append(thumbnail)
-    
-    # Validate total size across all files
-    total_size = sum(getattr(f, 'size', 0) or 0 for f in files_to_process)
-    if total_size > MAX_TOTAL_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Total upload size exceeds limit of {MAX_TOTAL_SIZE} bytes"
-        )
-    
-    # Generate project ID for grouping related files
-    project_id = str(uuid.uuid4())
-    
+    #Performance features:
+    #- Streaming file processing (no memory loading)
+    #- Background task for metadata recording
+    #- Concurrent file validation
+
     try:
-        # Process files concurrently for better performance
-        tasks = [
-            process_file_upload(video, "video", project_id, current_user, upload_service, background_tasks),
-            process_file_upload(audio, "audio", project_id, current_user, upload_service, background_tasks),
-        ]
-        
-        if thumbnail:
-            tasks.append(
-                process_file_upload(thumbnail, "thumbnail", project_id, current_user, upload_service, background_tasks)
+    
+        # Validate required files are provided (FastAPI handles this, but explicit check for clarity)
+        if not video or not video.filename:
+            raise HTTPException(
+                status_code=400,
+                detail="Both video and audio files must have valid filenames"
             )
+    
+        validate_file(video, ALLOWED_VIDEO_TYPES, "video")
+        validate_file(audio, ALLOWED_AUDIO_TYPES, "audio")
+        if thumbnail:
+            validate_file(thumbnail, ALLOWED_IMAGE_TYPES, "thumbnail")
+    
+        # Generate project ID for grouping related files
+        project_id = str(uuid.uuid4())
+
+        upload_dir = Path("uploads") / project_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        saved_files = {}
+
+        #save video
+        video_path = await save_upload_file(video, upload_dir / "video")
+        saved_files['video'] = str(video_path)
+
+        #save audio
+        audio_path = await save_upload_file(audio, upload_dir / "audio")
+        saved_files['audio'] = str(audio_path)
+
+        #save thumbnail if provided
+        if thumbnail and thumbnail.filename:
+            thumbnail_path = await save_upload_file(thumbnail, upload_dir / "thumbnail")
+            saved_files['thumbnail'] = str(thumbnail_path)
         
-        # Execute uploads concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Check for any failures
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                file_type = ["video", "audio", "thumbnail"][i]
-                logger.error(f"Failed to upload {file_type}: {result}")
-                raise result
-        
-        # Build response URLs
-        response_urls = {
-            "video": results[0]["url"],
-            "audio": results[1]["url"]
+        #FIXME save to DB
+            
+        return {
+            "success": True,
+            "project_id": project_id,
+            "files": saved_files,
+            "message": "Files uploaded successfully"
         }
-        
-        if thumbnail and len(results) > 2:
-            response_urls["thumbnail"] = results[2]["url"]
-        
-        # Log successful batch upload
-        logger.info(
-            "Batch upload completed",
-            extra={
-                "project_id": project_id,
-                "user_id": current_user.username,
-                "files_count": len(results),
-                "client_ip": request.client.host if request.client else "unknown"
-            }
-        )
-        
-        return UploadResponse(
-            project_id=project_id,
-            urls=response_urls,
-            status="success"
-        )
-        
+    
     except HTTPException:
-        # Re-raise HTTP exceptions as-is
-        raise
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
-        # Catch-all for unexpected errors
-        logger.error(
-            "Unexpected upload error",
-            extra={
-                "project_id": project_id,
-                "user_id": current_user.username,
-                "error": str(e),
-                "error_type": type(e).__name__
-            }
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred during upload"
-        )
+        print(f"Error during file upload: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred while processing the upload")
+    
+
 
 # Additional helper endpoint for checking upload limits
 @router.get("/upload/limits")
@@ -305,7 +164,7 @@ async def get_upload_limits():
     """Return current upload limits for client-side validation."""
     return {
         "max_file_size": MAX_FILE_SIZE,
-        "max_total_size": MAX_TOTAL_SIZE,
+        "max_total_size": 1 * 1024 * 1024 * 1024,  # 1 GB total limit
         "allowed_video_types": list(ALLOWED_VIDEO_TYPES),
         "allowed_audio_types": list(ALLOWED_AUDIO_TYPES),
         "allowed_image_types": list(ALLOWED_IMAGE_TYPES)

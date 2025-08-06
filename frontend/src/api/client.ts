@@ -1,113 +1,66 @@
-import axios, { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse } from 'axios';
-import { generateSecureToken } from '../utils/security';
+import axios from 'axios';
 
 /**
  * Secure HTTP client with CSRF protection and JWT auth headers
  */
-class APIClient {
-  private readonly client: AxiosInstance;
-  private csrfToken: string | null = null;
-  private authToken: string | null = null;
+export const apiClient = axios.create({
 
-  constructor(baseURL: string = process.env.REACT_APP_API_URL || '/api') {
-    this.client = axios.create({
-      baseURL,
+  //constructor(baseURL: string = process.env.REACT_APP_API_URL || '/api') {
+      baseURL: process.env.REACT_APP_API_URL || '/api',
       timeout: 30000,
       withCredentials: true,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json' },
     });
-    this.setupInterceptors();
+   
+
+  // Request interceptor to add auth token if available
+apiClient.interceptors.request.use(
+  (config) => {
+    // Get token from localStorage if available
+    const token = localStorage.getItem('access_token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
+    // Don't override Content-Type for FormData
+    if (config.data instanceof FormData) {
+      delete config.headers['Content-Type'];
+    }
+
+    console.log('Making request to:', config.url, {
+      method: config.method,
+      hasFormData: config.data instanceof FormData,
+      hasAuth: !!config.headers.Authorization
+    });
+
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
   }
+);
 
-  /**
-   * Retrieve stored JWT auth token
-   */
-  public getAuthToken(): string | null {
-    return this.authToken;
+// Response interceptor for error handling
+apiClient.interceptors.response.use(
+  (response) => {
+    return response;
+  },
+  async (error) => {
+    console.error('API Error:', {
+      status: error.response?.status,
+      data: error.response?.data,
+      url: error.config?.url,
+      method: error.config?.method
+    });
+
+    // Handle 401 - redirect to login
+    if (error.response?.status === 401) {
+      localStorage.removeItem('access_token');
+      window.location.href = '/auth';
+    }
+
+    return Promise.reject(error);
   }
+);
 
-  /**
-   * Store JWT auth token
-   */
-  public setAuthToken(token: string): void {
-    this.authToken = token;
-  }
-
-  /**
-   * Clear stored JWT auth token
-   */
-  public clearAuthToken(): void {
-    this.authToken = null;
-  }
-
-  /**
-   * Refresh CSRF token via API
-   */
-  public async refreshCSRFToken(): Promise<void> {
-    const response = await this.client.get<{ csrfToken: string }>('/auth/csrf-token');
-    this.csrfToken = response.data.csrfToken;
-  }
-
-  private setupInterceptors(): void {
-    this.client.interceptors.request.use(
-      (config: InternalAxiosRequestConfig) => {
-        // Add JWT token
-        if (this.authToken) {
-          config.headers = config.headers || {};
-          config.headers.Authorization = `Bearer ${this.authToken}`;
-        }
-        // Add CSRF token
-        if (['post','put','patch','delete'].includes(config.method || '')) {
-          if (this.csrfToken) {
-            config.headers = config.headers || {};
-            config.headers['X-CSRF-Token'] = this.csrfToken;
-          }
-        }
-        // Add request ID
-        config.headers = config.headers || {};
-        config.headers['X-Request-ID'] = generateSecureToken(16);
-        return config;
-      },
-      error => Promise.reject(error)
-    );
-
-    this.client.interceptors.response.use(
-      (response: AxiosResponse) => {
-        const newCsrf = response.headers['x-csrf-token'];
-        if (newCsrf) this.csrfToken = newCsrf;
-        return response;
-      },
-      async error => {
-        const originalRequest = error.config;
-        if (error.response?.status === 401 && !originalRequest._retry) {
-          originalRequest._retry = true;
-          this.clearAuthToken();
-          this.csrfToken = null;
-          window.dispatchEvent(new CustomEvent('auth:logout'));
-          return Promise.reject(error);
-        }
-        if (error.response?.status === 403 && error.response.data?.error === 'CSRF_TOKEN_MISMATCH') {
-          try {
-            await this.refreshCSRFToken();
-            return this.client.request(originalRequest);
-          } catch {
-            return Promise.reject(error);
-          }
-        }
-        return Promise.reject(error);
-      }
-    );
-  }
-
-  /**
-   * Expose Axios instance for direct use
-   */
-  public get instance(): AxiosInstance {
-    return this.client;
-  }
-}
-
-// Export singleton client
-const API = new APIClient();
-export default API;
-export type { APIClient };
+export default apiClient;

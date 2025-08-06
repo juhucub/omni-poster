@@ -99,4 +99,3 @@ class GenerateVideoResponse(BaseModel):
 class UploadResponse(BaseModel):
     project_id: str
     urls: Dict[str, str]
-    # Remove the status field if it was there, as it's not in the original
