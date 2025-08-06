@@ -1,4 +1,4 @@
-import React, { useState, useCallback, ChangeEvent, FormEvent } from 'react';
+import React, { useState, useCallback, ChangeEvent, FormEvent, useEffect } from 'react';
 import API from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import UploadHistory from '../components/media-uploader/UploadHistory';
@@ -8,13 +8,11 @@ import useFileUpload from '../hooks/useFileUpload';
 import FileUploader from '../components/media-uploader/FileUploader';
 import MediaList from '../components/media-uploader/MediaList';
 import VideoManipulationPanel from '../components/media-uploader/VideoManipulationPanel';
-import type { MediaFile, GeneratedMedia } from '../types/media';
+import type { MediaFile, UploadRecord, GeneratedMedia } from '../api/models.tsx';
 import { AlertCircle, PlusCircle, RefreshCw } from 'lucide-react';
+import { set } from 'date-fns';
 
 // Allowed MIME types and size limits
-const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'];
-const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif'];
-const ALLOWED_AUDIO_TYPES = ['audio/mpeg', 'audio/wav'];
 const MAX_FILE_SIZE = 50 * 2 ** 20; // 50 MB
 
 interface MediaUploaderProps {
@@ -24,88 +22,77 @@ interface MediaUploaderProps {
 
 const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUploadError }) => {
   const { logout } = useAuth();
-  const [activeSection, setActiveSection] = useState('upload');
   const [activeTab, setActiveTab] = useState('upload');
 
+  //file states
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
   
+  //error state
   const [error, setError] = useState<string | null>(null);
-  const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0);
-  const [uploadedFiles, setUploadedFiles] = useState<MediaFile[]>([]);
 
-  const { isUploading, uploadProgress } = useFileUpload();
+  //upload history state
+  const [uploads, setUploads] = useState<UploadRecord[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  // Handle upload from drag/drop or browse
-  const handleFileUpload = useCallback((file: MediaFile) => {
-    setUploadedFiles(prev => [file, ...prev]);
+  const { uploadProject, isUploading, uploadProgress, error: uploadError } = useFileUpload();
+
+  //Load Upload History
+  const refreshUploads = useCallback(async () => {
+    try {
+      setHistoryLoading(true);
+      setHistoryError(null);
+      const data = await API.instance.get('/upload_history');
+      setUploads(data.data);
+      setLastUpdated(new Date());
+    } catch (err: any) {
+      console.error('Error loading upload history:', err);
+      setHistoryError(err.response?.data?.detail || 'Failed to load upload history');
+    } finally {
+      setHistoryLoading(false);
+    }
   }, []);
+
+  //FIXME: Load history on mount
+  useEffect(() => {
+    refreshUploads();
+  }, [refreshUploads]);
 
   const handleProjectSelect = useCallback(
     (projectId: string) => onUploadSuccess(projectId),
     [onUploadSuccess]
   );
 
-  const onChangeFactory = useCallback(
-    (
-      setter: React.Dispatch<React.SetStateAction<File | null>>,
-      types: string[]
-    ) => (e: ChangeEvent<HTMLInputElement>) => {
-      setError(null);
-      const file = e.target.files?.[0] ?? null;
-      if (file) {
-        const err = !types.includes(file.type)
-          ? `Invalid file type: ${file.type}`
-          : file.size > MAX_FILE_SIZE
-            ? `File exceeds ${MAX_FILE_SIZE / 2 ** 20} MB limit`
-            : null;
-        if (err) return setError(err);
-        setter(file);
-      }
-    },
-    []
-  );
-
   //Upload files to backend
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+
     if (!videoFile || !audioFile) {
       setError('Both video and audio files are required.');
-      return;
-    }
-
-    const totalSize = videoFile.size + audioFile.size + (thumbnailFile?.size || 0);
-    if (totalSize > MAX_FILE_SIZE) {
-      setError(`Total upload size exceeds ${MAX_FILE_SIZE / 2 ** 20} MB limit.`);
       return;
     }
     //FIXME: add Uploading state
     
     try {
-      const formData = new FormData();
-      formData.append('video', videoFile);
-      formData.append('audio', audioFile);
-      if (thumbnailFile) formData.append('thumbnail', thumbnailFile);
-  
-      //FIXME: Simulate Progress
-      
+      console.log('Starting upload:');
+     
+      const result = await uploadProject(videoFile, audioFile, thumbnailFile);
 
-      const data = await API.instance.post<{ project_id: string }>(
-        '/upload',
-        formData,
-        { headers: { 'Content-Type': 'multipart/form-data' } }
-      );
+      console.log('Upload success!!:');
+
       setVideoFile(null);
       setAudioFile(null);
       setThumbnailFile(null);
-      setHistoryRefreshTrigger(t => t + 1);
-      setUploadedFiles(prev => [
-        ...prev,
-        { id: data.project_id, name: '', type: 'video', size: 0, url: '', uploadedAt: new Date() }
-      ]);
-      onUploadSuccess(data.project_id);
+
+      await refreshUploads();
+
+      //Notify parent
+      onUploadSuccess(result.project_id);
+
     } catch (err: any) {
       if (err.response) {
         const status = err.response.status;
@@ -123,12 +110,20 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
     }
   };
 
+  const handlePublish = (platform: string) => {
+    console.log(`publishing to ${platform}:`, {
+      video: videoFile?.name,
+      audio: audioFile?.name,
+      thumbnail: thumbnailFile?.name
+    });
+    alert(`Publishing to ${platform} is not implemented yet.`);
+  };
+
   return (
     <div className="flex min-h-screen bg-gradient-to-br from-[#17183D] via-[#2C275C] to-[#10123B] text-gray-800">
-      <Sidebar activeSection={activeSection} onSectionChange={setActiveSection} />
+      <Sidebar />
 
       <main className="flex-1 p-6 space-y-6">
-        {activeSection === 'upload' ? (
           <div className="max-w-6xl mx-auto space-y-8">
             <div className="flex justify-between items-center">
               <h1 className="text-3xl font-bold text-white">Media Management</h1>
@@ -144,9 +139,11 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
             />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              { /* :eft Column */ }
               <div className="space-y-8">
                 {activeTab === 'upload' && (
                   <div className="grid xl:grid-cols-2 gap-8">
+                    { /* File Upload Form */ } 
                     <form
                       onSubmit={handleSubmit}
                       className="bg-white rounded-lg shadow-lg p-6 space-y-6"
@@ -172,11 +169,11 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
                         />
                       </div>
 
-                      {error && (
+                      {(error || uploadError) && (
                         <div className="bg-red-50 border border-red-200 rounded-md p-3">
                           <div className="flex items-center space-x-2">
                             <AlertCircle size={16} className="text-red-500" />
-                            <p className="text-red-600 text-sm">{error}</p>
+                            <p className="text-red-600 text-sm">{error || uploadError}</p>
                           </div>
                         </div>
                       )}
@@ -197,14 +194,15 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
                       </button>
                     </form>
 
+                    { /* Upload History */ }
                     <div className="bg-white rounded-lg shadow-lg p-6">
                       <UploadHistory
-                        uploads={uploadedFiles}
-                        loading={false}
-                        error={null}
+                        uploads={uploads}
+                        loading={historyLoading}
+                        error={historyError}
                         onSelect={handleProjectSelect}
-                        onRefresh={() => setHistoryRefreshTrigger(t => t + 1)}
-                        lastUpdated={historyRefreshTrigger}
+                        onRefresh={refreshUploads}
+                        lastUpdated={lastUpdated}
                       />
                     </div>
                   </div>
@@ -221,33 +219,23 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
                 )}
               </div>
 
+              { /* Right Column */ }
               <div className="bg-white rounded-lg shadow-lg p-6">
                 <h3 className="text-xl font-bold text-gray-900 mb-6">Video Manipulation & Publish</h3>
                 <VideoManipulationPanel
                   videoFile={videoFile}
                   audioFile={audioFile}
                   thumbnailFile={thumbnailFile}
-                  onPublish={() => {} }
+                  onPublish={handlePublish}
                 />
               </div>
             </div>
           </div>
-        ) : (
-          <div className="max-w-4xl mx-auto text-center py-16">
-            <div className="text-gray-400 mb-4">
-              <PlusCircle size={64} className="mx-auto" />
-            </div>
-            <h2 className="text-2xl font-bold text-white mb-2 capitalize">{activeSection}</h2>
-            <p className="text-gray-300">This section is coming soon!</p>
-          </div>
-        )}
       </main>
     </div>
   );
 };
 
 export default MediaUploader;
-function setLoading(arg0: boolean) {
-  throw new Error('Function not implemented.');
-}
+
 
