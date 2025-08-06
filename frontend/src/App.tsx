@@ -94,11 +94,9 @@ const AppRoutes: React.FC = () => {
 
 const App: React.FC = () => (
   <AuthProvider>
-    <UploadHistory>
       <BrowserRouter>
         <AppRoutes />
       </BrowserRouter>
-    </UploadHistory>
   </AuthProvider>
 );
 
