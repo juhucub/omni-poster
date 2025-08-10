@@ -1,32 +1,35 @@
 import { useState, useCallback } from 'react';
 import API from '../api/client';
 
-interface UseFileUploadReturn {
-  uploadProject: (videoFile: File, audioFile: File, thumbnailFile?: File) => Promise<{ project_id: string; message: string }>;
-  isUploading: boolean;
-  uploadProgress: number;
-  error: string | null;
+interface UploadResponse {
+  success: boolean;
+  files: {
+    video: string;
+    audio: string;
+    thumbnail?: string;
+  };
+  project_id: string;
+  message: string;
 }
 
-const useFileUpload = (): UseFileUploadReturn => {
+const useFileUpload = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  const uploadProject = useCallback(async (
-    videoFile: File,
-    audioFile: File,
-    thumbnailFile?: File
-  ): Promise<{ project_id: string; message: string }> => {
-    setIsUploading(true);
-    setUploadProgress(0);
-    setError(null);
+  const uploadFiles = useCallback(async (
+    videoFile: File | null,
+    audioFile: File | null,
+    thumbnailFile?: File | null
+  ): Promise<UploadResponse | null> => {
+    if (!videoFile || !audioFile) {
+      setError('Both video and audio files are required.');
+      return null;
+    }
 
-    console.log('🚀 Starting upload with files:', {
-      video: { name: videoFile.name, size: videoFile.size, type: videoFile.type },
-      audio: { name: audioFile.name, size: audioFile.size, type: audioFile.type },
-      thumbnail: thumbnailFile ? { name: thumbnailFile.name, size: thumbnailFile.size, type: thumbnailFile.type } : null
-    });
+    setIsUploading(true);
+    setError(null);
+    setUploadProgress(0);
 
     try {
       // Create form data
@@ -37,97 +40,85 @@ const useFileUpload = (): UseFileUploadReturn => {
         formData.append('thumbnail', thumbnailFile);
       }
 
-      // Simulate upload progress
-      const progressInterval = setInterval(() => {
-        setUploadProgress(prev => {
-          if (prev >= 90) {
-            clearInterval(progressInterval);
-            return 90;
-          }
-          return prev + 10;
-        });
-      }, 200);
+      console.log('Uploading files:', {
+        video: videoFile.name,
+        audio: audioFile.name,
+        thumbnail: thumbnailFile?.name
+      });
 
-      console.log('🌐 Making API request to /upload...');
-
-      // THE KEY FIX: Override Content-Type for this specific request
-      const response = await API.instance.post('/upload', formData, {
+      // Make the upload request
+      const response = await API.post<UploadResponse>('/upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
-          // Axios will automatically set the boundary
         },
         timeout: 300000, // 5 minutes for large files
         onUploadProgress: (progressEvent) => {
           if (progressEvent.total) {
             const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-            console.log(`📈 Upload progress: ${percentCompleted}%`);
-            setUploadProgress(Math.min(percentCompleted, 90));
+            setUploadProgress(percentCompleted);
+            console.log(`Upload progress: ${percentCompleted}%`);
           }
         }
       });
       
-      clearInterval(progressInterval);
+      console.log('Full response from server:', response);
+      console.log('Response data:', response.data);
+      
+      // Check if response exists and has data
+      if (!response || !response.data) {
+        console.error('No response data received from server');
+        throw new Error('No response data received from server');
+      }
+      
+      // Validate response structure
+      if (!response.data.project_id) {
+        console.error('Response missing project_id. Actual response:', response.data);
+        throw new Error('Invalid response from server - missing project_id');
+      }
+      
       setUploadProgress(100);
-      
-      console.log('✅ Upload successful:', response.data);
-      
-      // Your backend returns: { project_id, urls, status }
-      return {
-        project_id: response.data.project_id,
-        message: response.data.status || 'Upload successful'
-      };
+      return response.data;
       
     } catch (err: any) {
-      console.error('❌ Upload error details:', {
-        message: err.message,
-        response: err.response?.data,
-        status: err.response?.status,
-        headers: err.response?.headers
-      });
+      console.error('Upload error:', err);
 
-      let errorMessage = 'Upload failed';
-
-      if (err.response) {
-        const status = err.response.status;
-        const data = err.response.data;
-        
-        switch (status) {
-          case 401:
-            errorMessage = 'Authentication required. Please log in.';
-            break;
-          case 413:
-            errorMessage = 'File too large. Maximum size is 500MB per file.';
-            break;
-          case 415:
-            errorMessage = 'Unsupported file type. Please check file formats.';
-            break;
-          case 422:
-            errorMessage = data.detail || 'Invalid file data.';
-            break;
-          case 500:
-            errorMessage = 'Server error. Please try again later.';
-            break;
-          default:
-            errorMessage = data.detail || `Server error (${status})`;
-        }
-      } else if (err.request) {
-        errorMessage = 'Network error. Please check your connection.';
-      } else if (err.code === 'ECONNABORTED') {
-        errorMessage = 'Upload timeout. Please try again.';
+      // Fixed: Changed 'error' to 'err' throughout the catch block
+      if (err.response?.status === 404) {
+        setError('Upload endpoint not found. Check if the backend server is running.');
+      } else if (err.response?.status === 422) {
+        const details = err.response.data?.detail || [];
+        const errorMsg = Array.isArray(details) 
+          ? details.map((d: any) => `${d.loc?.join('.')}: ${d.msg}`).join(', ')
+          : 'Invalid file format or data';
+        setError(`Validation error: ${errorMsg}`);
+      } else if (err.response?.status === 413) {
+        setError('File too large. Please check file size limits.');
+      } else if (err.response?.status === 415) {
+        setError('Unsupported file type. Please check the allowed file formats.');
+      } else if (err.response?.status === 500) {
+        setError('Server error. Please try again later.');
+      } else if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else if (err.message) {
+        setError(err.message);
       } else {
-        errorMessage = err.message || 'Unexpected error occurred.';
+        setError('Upload failed. Please try again.');
       }
-
-      setError(errorMessage);
-      throw new Error(errorMessage);
       
+      return null;
+
     } finally {
       setIsUploading(false);
-      setTimeout(() => setUploadProgress(0), 1000);
     }
   }, []);
 
-  return { uploadProject, isUploading, uploadProgress, error };
+  const resetUpload = useCallback(() => {
+    setIsUploading(false);
+    setUploadProgress(0);
+    setError(null);
+  }, []);
+  
+  return { uploadFiles, isUploading, uploadProgress, error, resetUpload };
 };
 
 export default useFileUpload;
