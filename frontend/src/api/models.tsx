@@ -4,8 +4,11 @@
  * Response when uploading media assets
  */
 export interface UploadResponse {
-    project_id: string;
-  }
+  project_id: string;
+  message: string;
+}
+
+export type FileType = 'video' | 'audio' | 'thumbnail';
   
   /**
    * Authentication token response
@@ -100,3 +103,71 @@ export interface UploadResponse {
     detail: string;
   }
   
+  // src/types/video.ts
+
+/** Basic metadata for a generated video */
+export interface Metadata {
+  /** Human-readable title (max ~100 chars) */
+  title: string;
+  /** Description or summary (max ~500 chars) */
+  description: string;
+  /** Array of tag strings, e.g. ["promo","tutorial"] */
+  tags: string[];
+}
+
+/** Supported output resolutions */
+export type Resolution = '720p' | '1080p' | '4k';
+
+/** Generation options beyond metadata */
+export interface VideoOptions {
+  /** Desired resolution for the final video */
+  resolution: Resolution;
+}
+
+export interface MediaFile {
+  id: string;
+  name: string;
+  type: 'video' | 'audio' | 'thumbnail';
+  size: number;
+  url: string;
+  uploadedAt: Date;
+  duration?: number;
+  dimensions?: { width: number; height: number };
+}
+
+export interface GeneratedMedia {
+  id: string;
+  name: string;
+  type: string;
+  createdAt: Date;
+  status: 'processing' | 'completed' | 'failed';
+  url?: string;
+}
+
+export interface Project {
+  project_id: string;
+  video_name: string;
+  audio_name: string;
+  thumbnail_name?: string;
+  created_at: string;
+  status: string;
+}
+
+export interface UploadRecord {
+  project_id: string;
+  filename: string;
+  url: string;
+  content_type: string;
+  uploader_id: string;
+  uploaded_at: string;
+}
+
+export interface UploadContextType {
+  uploads: UploadRecord[];
+  loading: boolean;
+  error: string | null;
+  addUpload: (upload: UploadRecord) => void;
+  removeUpload: (projectId: string, filename: string) => void;
+  refreshUploads: () => Promise<void>;
+  lastUpdated: Date | null;
+}

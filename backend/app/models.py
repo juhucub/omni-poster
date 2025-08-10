@@ -74,3 +74,28 @@ class GoalIn(BaseModel):
 
 class Message(BaseModel):
     detail: str
+
+# ─── Video Generation Models ────────────────────────────
+
+class GenerateVideoRequest(BaseModel):
+    """Request model for video generation."""
+    project_id: str
+    output_format: Optional[str] = "mp4"
+    quality: Optional[str] = "high"  # low, medium, high
+    aspect_ratio: Optional[str] = "16:9"  # 16:9, 9:16, 1:1
+
+class GenerateVideoResponse(BaseModel):
+    """Response model for video generation."""
+    project_id: str
+    status: str  # processing, completed, failed
+    video_url: Optional[str] = None
+    progress: Optional[int] = None
+    message: str
+    processing_time_seconds: Optional[float] = None
+    output_file_size: Optional[int] = None
+
+# ─── Enhanced Upload Response ────────────────────────────
+
+class UploadResponse(BaseModel):
+    project_id: str
+    urls: Dict[str, str]

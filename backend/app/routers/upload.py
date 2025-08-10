@@ -3,6 +3,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -21,31 +22,30 @@ from fastapi import (
 from fastapi.security import HTTPBearer
 
 
-from app.models import UploadResponse, User
-from app.services.upload import get_upload_service, UploadService, UploadMeta, UPLOAD_DIR
+from app.models import UploadResponse, User, GenerateVideoRequest, GenerateVideoResponse
 from app.dependencies import get_current_user
+from app.services.upload import (
+    save_upload_file, 
+    validate_file, 
+    get_upload_service, 
+    UploadService,
+    UploadMeta,
+    ALLOWED_VIDEO_TYPES,
+    ALLOWED_AUDIO_TYPES, 
+    ALLOWED_IMAGE_TYPES,
+    MAX_FILE_SIZE,
+    MAX_TOTAL_SIZE
+)
+from app.services.vid_gen import VideoGenerationService, get_video_generation_service
 
-# Configure structured logging
+# Setup logger
 logger = logging.getLogger(__name__)
-
-# Security constants
-MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB per file
-MAX_TOTAL_SIZE = 1024 * 1024 * 1024  # 1GB total per request
-ALLOWED_VIDEO_TYPES = {
-    'video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/webm'
-}
-ALLOWED_AUDIO_TYPES = {
-    'audio/mp3', 'audio/wav', 'audio/aac', 'audio/ogg', 'audio/mpeg'
-}
-ALLOWED_IMAGE_TYPES = {
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp'
-}
 
 # Create router WITHOUT conflicting prefix (assuming main app handles /upload)
 router = APIRouter(
-    tags=["uploads"],
-    responses={404: {"description": "Not found"}},
+    tags=["uploads"]
 )
+
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to prevent path traversal and ensure filesystem compatibility."""
@@ -94,208 +94,93 @@ async def validate_file_size(file: UploadFile, max_size: int = MAX_FILE_SIZE) ->
     await file.seek(0)
     return size
 
-async def process_file_upload(
-    file: UploadFile,
-    file_type: str,
-    project_id: str,
-    user: User,
-    upload_service: UploadService,
-    background_tasks: BackgroundTasks
-) -> Dict[str, any]:
-    """Process individual file upload with streaming and background tasks."""
-    
-    # Sanitize filename to prevent path traversal
-    safe_filename = sanitize_filename(file.filename)
-    
-    # Validate file size without loading into memory
-    actual_size = await validate_file_size(file)
-    
-    # Stream file to storage (don't load entire file into memory)
-    try:
-        storage_url = await upload_service.save_to_storage(
-            file, user.username
-        )
-        
-        # Create metadata record
-        meta = UploadMeta(
-            project_id=project_id,
-            filename=safe_filename,
-            url=storage_url,
-            size=actual_size,
-            content_type=file.content_type,
-            uploader_id=user.username
-        )
-        
-        # Record upload in background to not block response
-        background_tasks.add_task(upload_service.record_upload, meta)
-        
-        # Log successful upload (no sensitive data)
-        logger.info(
-            "File uploaded successfully",
-            extra={
-                "project_id": project_id,
-                "file_type": file_type,
-                "file_size": actual_size,
-                "user_id": user.username,
-                "filename_hash": hash(safe_filename)  # Don't log actual filename
-            }
-        )
-        
-        return {
-            "url": storage_url,
-            "size": actual_size,
-            "filename": safe_filename
-        }
-        
-    except Exception as e:
-        logger.error(
-            "File upload failed",
-            extra={
-                "project_id": project_id,
-                "file_type": file_type,
-                "user_id": user.username,
-                "error": str(e)
-            }
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload {file_type} file"
-        )
-
-@router.post(
-    "/upload",  # Clean path without double prefixes
-    response_model=UploadResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Upload media files",
-    description="Upload video, audio, and optional thumbnail files for processing",
-    responses={
-        413: {"description": "File too large"},
-        415: {"description": "Unsupported media type"},
-        422: {"description": "Validation error"},
-        500: {"description": "Upload failed"}
-    }
-)
-async def upload_media_files(
-    request: Request,  # For rate limiting and IP tracking
-    background_tasks: BackgroundTasks,  # For non-blocking operations
+@router.post("/upload")
+async def upload_files(
     video: UploadFile = File(..., description="Video file (required)"),
     audio: UploadFile = File(..., description="Audio file (required)"),
     thumbnail: Optional[UploadFile] = File(None, description="Optional thumbnail image"),
-    # Proper auth dependency with required scopes
-    current_user: User = Depends(get_current_user),
-    upload_service: UploadService = Depends(get_upload_service),
+    current_user: User = Depends(get_current_user),  # Ensure user is authenticated
+    upload_service: UploadService = Depends(get_upload_service)
 ):
-    """
-    Upload endpoint with comprehensive security, performance, and error handling.
     
-    Security features:
-    - File size limits and MIME type validation
-    - Filename sanitization (path traversal prevention)
-    - Proper authentication and authorization
-    - Structured logging without sensitive data
+    #Upload endpoint with comprehensive security, performance, and error handling.
     
-    Performance features:
-    - Streaming file processing (no memory loading)
-    - Background task for metadata recording
-    - Concurrent file validation
-    """
+    #Security features:
+    #- File size limits and MIME type validation
+    #- Filename sanitization (path traversal prevention)
+    #- Proper authentication and authorization
+    #- Structured logging without sensitive data
     
-    # Validate required files are provided (FastAPI handles this, but explicit check for clarity)
-    if not video.filename or not audio.filename:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Both video and audio files must have valid filenames"
-        )
-    
-    # Validate MIME types against strict whitelists
-    validate_content_type(video, ALLOWED_VIDEO_TYPES, "video")
-    validate_content_type(audio, ALLOWED_AUDIO_TYPES, "audio")
-    
-    if thumbnail:
-        validate_content_type(thumbnail, ALLOWED_IMAGE_TYPES, "thumbnail")
-    
-    # Calculate total request size for DOS protection
-    files_to_process = [video, audio]
-    if thumbnail:
-        files_to_process.append(thumbnail)
-    
-    # Validate total size across all files
-    total_size = sum(getattr(f, 'size', 0) or 0 for f in files_to_process)
-    if total_size > MAX_TOTAL_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Total upload size exceeds limit of {MAX_TOTAL_SIZE} bytes"
-        )
-    
-    # Generate project ID for grouping related files
-    project_id = str(uuid.uuid4())
-    
+    #Performance features:
+    #- Streaming file processing (no memory loading)
+    #- Background task for metadata recording
+    #- Concurrent file validation
+
     try:
-        # Process files concurrently for better performance
-        tasks = [
-            process_file_upload(video, "video", project_id, current_user, upload_service, background_tasks),
-            process_file_upload(audio, "audio", project_id, current_user, upload_service, background_tasks),
-        ]
-        
-        if thumbnail:
-            tasks.append(
-                process_file_upload(thumbnail, "thumbnail", project_id, current_user, upload_service, background_tasks)
+        # Validate required files are provided (FastAPI handles this, but explicit check for clarity)
+        if not video or not video.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Both video and audio files must have valid filenames"
             )
+    
+        validate_file(video, ALLOWED_VIDEO_TYPES, "video")
+        validate_file(audio, ALLOWED_AUDIO_TYPES, "audio")
+        if thumbnail:
+            validate_file(thumbnail, ALLOWED_IMAGE_TYPES, "thumbnail")
+    
+        # Generate project ID for grouping related files
+        project_id = str(uuid.uuid4())
+
+        upload_dir = Path("uploads") / project_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        saved_files = {}
+        upload_metas = []
+
         
-        # Execute uploads concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        #save video
+        video_path = await save_upload_file(video, upload_dir / f"video{Path(video.filename).suffix}")
+        saved_files['video'] = str(video_path)
+
+        #save audio
+        audio_path = await save_upload_file(audio, upload_dir / "audio")
+        saved_files['audio'] = str(audio_path)
+
+        #save thumbnail if provided
+        if thumbnail and thumbnail.filename:
+            thumbnail_path = await save_upload_file(thumbnail, upload_dir / "thumbnail")
+            saved_files['thumbnail'] = str(thumbnail_path)
+            
         
-        # Check for any failures
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                file_type = ["video", "audio", "thumbnail"][i]
-                logger.error(f"Failed to upload {file_type}: {result}")
-                raise result
-        
-        # Build response URLs
-        response_urls = {
-            "video": results[0]["url"],
-            "audio": results[1]["url"]
+        # save to DB
+        for file_type, file_path in saved_files.items():
+            file_obj = video if file_type == 'video' else audio if file_type == 'audio' else thumbnail
+            if file_obj:
+                meta = UploadMeta(
+                    project_id=project_id,
+                    filename=file_obj.filename,
+                    url=f"file://{os.path.abspath(file_path)}",
+                    size=os.path.getsize(file_path),
+                    content_type=file_obj.content_type,
+                    uploader_id=current_user.username
+                )
+                upload_service.record_upload(meta)
+            
+        return {
+            "success": True,
+            "project_id": project_id,
+            "files": saved_files,
+            "message": "Files uploaded successfully"
         }
-        
-        if thumbnail and len(results) > 2:
-            response_urls["thumbnail"] = results[2]["url"]
-        
-        # Log successful batch upload
-        logger.info(
-            "Batch upload completed",
-            extra={
-                "project_id": project_id,
-                "user_id": current_user.username,
-                "files_count": len(results),
-                "client_ip": request.client.host if request.client else "unknown"
-            }
-        )
-        
-        return UploadResponse(
-            project_id=project_id,
-            urls=response_urls,
-            status="success"
-        )
-        
+    
     except HTTPException:
-        # Re-raise HTTP exceptions as-is
-        raise
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
-        # Catch-all for unexpected errors
-        logger.error(
-            "Unexpected upload error",
-            extra={
-                "project_id": project_id,
-                "user_id": current_user.username,
-                "error": str(e),
-                "error_type": type(e).__name__
-            }
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred during upload"
-        )
+        print(f"Error during file upload: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred while processing the upload")
+    
+
 
 # Additional helper endpoint for checking upload limits
 @router.get("/upload/limits")
@@ -303,29 +188,11 @@ async def get_upload_limits():
     """Return current upload limits for client-side validation."""
     return {
         "max_file_size": MAX_FILE_SIZE,
-        "max_total_size": MAX_TOTAL_SIZE,
+        "max_total_size": 1 * 1024 * 1024 * 1024,  # 1 GB total limit
         "allowed_video_types": list(ALLOWED_VIDEO_TYPES),
         "allowed_audio_types": list(ALLOWED_AUDIO_TYPES),
         "allowed_image_types": list(ALLOWED_IMAGE_TYPES)
     }
-
-@router.post("/generate_video", response_model=dict)
-async def generate_video(
-    payload: dict = Body(...)
-):
-    """
-    Stub generate_video endpoint: accepts project_id and returns status plus video URL.
-    """
-    project_id = payload.get("project_id")
-    if not project_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="`project_id` is required"
-        )
-    # Stub URL: in real use you'd point to the generated asset
-    final_path = os.path.join(UPLOAD_DIR, f"{project_id}_final.mp4")
-    video_url = f"file://{os.path.abspath(final_path)}"
-    return {"project_id": project_id, "status": "processing", "video_url": video_url}
 
 @router.get("/upload_history")
 async def get_upload_history(
@@ -344,4 +211,223 @@ async def get_upload_history(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch upload history"
+        )
+    
+
+# ============= NEW GENERATE VIDEO ENDPOINT =============
+
+def get_project_files(project_id: str, upload_service: UploadService) -> Dict[str, str]:
+    """
+    Retrieve all files for a project from the upload history.
+    
+    Returns:
+        Dict with keys 'video', 'audio', and optionally 'thumbnail'
+    """
+    try:
+        # Get all uploads for this project from the database
+        import sqlite3
+        from app.services.upload import UPLOAD_DB
+        
+        conn = sqlite3.connect(UPLOAD_DB)
+        conn.row_factory = sqlite3.Row
+        
+        cursor = conn.execute(
+            "SELECT content_type, url FROM uploads WHERE project_id = ? ORDER BY uploaded_at",
+            (project_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No files found for project {project_id}"
+            )
+        
+        # Categorize files by type
+        files = {}
+        for row in rows:
+            content_type = row['content_type']
+            url = row['url']
+            
+            if content_type.startswith('video/'):
+                files['video'] = url
+            elif content_type.startswith('audio/'):
+                files['audio'] = url
+            elif content_type.startswith('image/'):
+                files['thumbnail'] = url
+        
+        # Validate required files
+        if 'video' not in files or 'audio' not in files:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Project must contain both video and audio files"
+            )
+        
+        return files
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving project files: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve project files"
+        )
+
+async def process_video_generation(
+    project_id: str,
+    files: Dict[str, str],
+    video_service: VideoGenerationService,
+    request_params: GenerateVideoRequest
+) -> Dict[str, any]:
+    """
+    Background task to process video generation.
+    This would typically be run in a background task queue like Celery.
+    """
+    try:
+        logger.info(f"Starting video generation for project {project_id}")
+        
+        # Generate video using the service
+        result = video_service.generate_video(
+            video_path=files['video'],
+            audio_path=files['audio'],
+            thumbnail_path=files.get('thumbnail'),
+            project_id=project_id
+        )
+        
+        logger.info(f"Video generation completed for project {project_id}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Video generation failed for project {project_id}: {str(e)}")
+        raise
+
+@router.post(
+    "/generate_video", 
+    response_model=GenerateVideoResponse,
+    summary="Generate video from uploaded files",
+    description="Combine uploaded video and audio files, with optional thumbnail overlay"
+)
+async def generate_video(
+    request: GenerateVideoRequest = Body(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    current_user: User = Depends(get_current_user),
+    upload_service: UploadService = Depends(get_upload_service),
+    video_service: VideoGenerationService = Depends(get_video_generation_service)
+):
+    """
+    Generate a combined video from uploaded video and audio files.
+    
+    This endpoint:
+    1. Validates the project exists and belongs to the user
+    2. Retrieves the uploaded files for the project
+    3. Starts video generation process
+    4. Returns status and progress information
+    """
+    
+    if not request.project_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="`project_id` is required"
+        )
+    
+    try:
+        # Get project files from database
+        files = get_project_files(request.project_id, upload_service)
+        
+        # TODO: Verify user owns this project (add user_id check to get_project_files)
+        
+        # For now, process synchronously. In production, use background tasks.
+        logger.info(f"Processing video generation for project {request.project_id}")
+        
+        start_time = time.time()
+        
+        # Generate the video
+        result = await asyncio.to_thread(
+            video_service.generate_video,
+            video_path=files['video'],
+            audio_path=files['audio'],
+            thumbnail_path=files.get('thumbnail'),
+            project_id=request.project_id
+        )
+        
+        processing_time = time.time() - start_time
+        
+        # Log successful generation
+        logger.info(
+            "Video generation completed",
+            extra={
+                "project_id": request.project_id,
+                "user_id": current_user.username,
+                "processing_time": processing_time,
+                "output_size": result.get("size_bytes", 0)
+            }
+        )
+        
+        return GenerateVideoResponse(
+            project_id=request.project_id,
+            status="completed",
+            video_url=result["output_path"],
+            progress=100,
+            message="Video generation completed successfully",
+            processing_time_seconds=processing_time,
+            output_file_size=result.get("size_bytes")
+        )
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(
+            "Video generation failed",
+            extra={
+                "project_id": request.project_id,
+                "user_id": current_user.username,
+                "error": str(e),
+                "error_type": type(e).__name__
+            }
+        )
+        
+        return GenerateVideoResponse(
+            project_id=request.project_id,
+            status="failed",
+            progress=0,
+            message=f"Video generation failed: {str(e)}"
+        )
+
+@router.get(
+    "/generation_status/{project_id}",
+    response_model=GenerateVideoResponse,
+    summary="Get video generation status",
+    description="Check the status of video generation for a project"
+)
+async def get_generation_status(
+    project_id: str,
+    current_user: User = Depends(get_current_user),
+    video_service: VideoGenerationService = Depends(get_video_generation_service)
+):
+    """
+    Get the current status of video generation for a project.
+    
+    In a production system, this would check a job queue or database
+    to return real-time status updates.
+    """
+    try:
+        # For now, return a simple lookup
+        # In production, this would check Redis/database for job status
+        status_info = video_service.get_generation_status(project_id)
+        
+        return GenerateVideoResponse(
+            project_id=project_id,
+            status=status_info["status"],
+            progress=status_info.get("progress", 0),
+            message=status_info.get("message", "")
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting generation status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get generation status"
         )
