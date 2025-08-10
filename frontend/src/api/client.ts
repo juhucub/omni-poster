@@ -6,7 +6,7 @@ import axios from 'axios';
 export const apiClient = axios.create({
 
   //constructor(baseURL: string = process.env.REACT_APP_API_URL || '/api') {
-      baseURL: process.env.REACT_APP_API_URL || '/api',
+      baseURL: process.env.REACT_APP_API_URL || 'http://localhost:8000',
       timeout: 30000,
       withCredentials: true,
       headers: { 'Content-Type': 'application/json' },

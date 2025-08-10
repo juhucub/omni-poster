@@ -22,19 +22,29 @@ from fastapi import (
 from fastapi.security import HTTPBearer
 
 
-from app.models import UploadResponse, GenerateVideoResponse, GenerateVideoRequest, User
-from app.services.upload import save_upload_file, validate_file
+from app.models import UploadResponse, User, GenerateVideoRequest, GenerateVideoResponse
 from app.dependencies import get_current_user
+from app.services.upload import (
+    save_upload_file, 
+    validate_file, 
+    get_upload_service, 
+    UploadService,
+    UploadMeta,
+    ALLOWED_VIDEO_TYPES,
+    ALLOWED_AUDIO_TYPES, 
+    ALLOWED_IMAGE_TYPES,
+    MAX_FILE_SIZE,
+    MAX_TOTAL_SIZE
+)
+from app.services.vid_gen import VideoGenerationService, get_video_generation_service
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 # Create router WITHOUT conflicting prefix (assuming main app handles /upload)
 router = APIRouter(
     tags=["uploads"]
 )
-
-ALLOWED_VIDEO_TYPES = { "video/mp4", "video/webm","video/mpeg"}
-ALLOWED_AUDIO_TYPES = { "audio/mpeg", "audio/wav", "audio/mp3" }
-ALLOWED_IMAGE_TYPES = { "image/jpeg", "image/png", "image/gif" }
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 500 MB
 
 
 def sanitize_filename(filename: str) -> str:
@@ -89,7 +99,8 @@ async def upload_files(
     video: UploadFile = File(..., description="Video file (required)"),
     audio: UploadFile = File(..., description="Audio file (required)"),
     thumbnail: Optional[UploadFile] = File(None, description="Optional thumbnail image"),
-    current_user: User = Depends(get_current_user)  # Ensure user is authenticated
+    current_user: User = Depends(get_current_user),  # Ensure user is authenticated
+    upload_service: UploadService = Depends(get_upload_service)
 ):
     
     #Upload endpoint with comprehensive security, performance, and error handling.
@@ -106,11 +117,10 @@ async def upload_files(
     #- Concurrent file validation
 
     try:
-    
         # Validate required files are provided (FastAPI handles this, but explicit check for clarity)
         if not video or not video.filename:
             raise HTTPException(
-                status_code=400,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Both video and audio files must have valid filenames"
             )
     
@@ -126,9 +136,11 @@ async def upload_files(
         upload_dir.mkdir(parents=True, exist_ok=True)
 
         saved_files = {}
+        upload_metas = []
 
+        
         #save video
-        video_path = await save_upload_file(video, upload_dir / "video")
+        video_path = await save_upload_file(video, upload_dir / f"video{Path(video.filename).suffix}")
         saved_files['video'] = str(video_path)
 
         #save audio
@@ -139,9 +151,21 @@ async def upload_files(
         if thumbnail and thumbnail.filename:
             thumbnail_path = await save_upload_file(thumbnail, upload_dir / "thumbnail")
             saved_files['thumbnail'] = str(thumbnail_path)
+            
         
-        
-        #FIXME save to DB
+        # save to DB
+        for file_type, file_path in saved_files.items():
+            file_obj = video if file_type == 'video' else audio if file_type == 'audio' else thumbnail
+            if file_obj:
+                meta = UploadMeta(
+                    project_id=project_id,
+                    filename=file_obj.filename,
+                    url=f"file://{os.path.abspath(file_path)}",
+                    size=os.path.getsize(file_path),
+                    content_type=file_obj.content_type,
+                    uploader_id=current_user.username
+                )
+                upload_service.record_upload(meta)
             
         return {
             "success": True,

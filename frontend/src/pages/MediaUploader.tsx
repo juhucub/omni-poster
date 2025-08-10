@@ -36,14 +36,14 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  const { uploadProject, isUploading, uploadProgress, error: uploadError } = useFileUpload();
+  const { uploadFiles, isUploading, uploadProgress, error: uploadError } = useFileUpload();
 
   //Load Upload History
   const refreshUploads = useCallback(async () => {
     try {
       setHistoryLoading(true);
       setHistoryError(null);
-      const data = await API.instance.get('/upload_history');
+      const data = await API.get('/upload_history');
       setUploads(data.data);
       setLastUpdated(new Date());
     } catch (err: any) {
@@ -78,7 +78,7 @@ const MediaUploader: React.FC<MediaUploaderProps> = ({ onUploadSuccess, onUpload
     try {
       console.log('Starting upload:');
      
-      const result = await uploadProject(videoFile, audioFile, thumbnailFile);
+      const result = await uploadFiles(videoFile, audioFile, thumbnailFile);
 
       console.log('Upload success!!:');
 
