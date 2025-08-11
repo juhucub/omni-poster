@@ -1,5 +1,9 @@
 from pydantic import BaseModel, Field, HttpUrl, constr, validator
 from typing import Optional, Dict
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, UniqueConstraint, BigInteger, Boolean
+from sqlalchemy.orm import relationship
+from datetime import datetime
+from .db import Base
 
 # ─── Shared responses ────────────────────────────────────
 
@@ -99,3 +103,37 @@ class GenerateVideoResponse(BaseModel):
 class UploadResponse(BaseModel):
     project_id: str
     urls: Dict[str, str]
+
+class Creator(Base):
+    __tablename__ = "creators"
+    id = Column(Integer, primary_key=True)
+    platform = Column(String, index=True)
+    external_id = Column(String, index=True)
+    handle = Column(String)
+    display_name = Column(String)
+    etag = Column(String)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("platform", "external_id", name="uix_creator"),)
+
+class Video(Base):
+    __tablename__ = "videos"
+    id = Column(Integer, primary_key=True)
+    creator_id = Column(Integer, ForeignKey("creators.id", ondelete="CASCADE"))
+    external_id = Column(String, index=True)
+    title = Column(String)
+    description = Column(Text)
+    published_at = Column(DateTime, index=True)
+    content_type = Column(String)  # e.g., "SHORT", "REEL", "VIDEO"
+    duration_s = Column(Integer)
+    __table_args__ = (UniqueConstraint("creator_id", "external_id", name="uix_video"),)
+    creator = relationship("Creator")
+
+class StatsSnapshot(Base):
+    __tablename__ = "stats_snapshots"
+    id = Column(Integer, primary_key=True)
+    video_id = Column(Integer, ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+    collected_at = Column(DateTime, default=datetime.utcnow, index=True)
+    views = Column(BigInteger, default=0)
+    likes = Column(BigInteger, default=0)
+    comments = Column(BigInteger, default=0)
+    shares = Column(BigInteger, default=0)
