@@ -58,7 +58,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [user, setUser] = useState<UserResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   /**
-   * Perform initial "whoami" check on mount.
+   * FIXME: Perform initial "whoami" check on mount.
    */
   useEffect(() => {
     apiClient

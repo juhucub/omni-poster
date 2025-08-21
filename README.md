@@ -1,24 +1,50 @@
-# omni-poster
+# omniposter / unified social media uploader
+
+omniposter is a full-stack application for automating the ingestion, processing, scheduling, and publishing of content to multiple social media platforms (YouTube, TikTok, Instagram, Reddit).
+It Includes:
+
+-**Backend**: FastAPI + Celery + Redis + PostgreSQL
+-**Frontend**: React + TypeScript + TailwindCSS
+-**Workers**: Distributed crwaling and video processing pipelines w/ quota aware API clients
+-**Scheduling**: Celery Beat for tiered periodic media crawls
 To create the VM i used venv module that comes with Python
 
-# Activating the VM - Do this every time you start a new terminal session to work on project
-    $ source .venv/bin/activate
+## Features
+- **Multi-platform account linking** (OAuth for YouTube, TikTok, Instagram, Reddit)
+- **Video uploads** with MIME & size validation
+- **Video generation** (MoviePy integration planned)
+- **Tiered creator crawling** with Redis-based Etag caching & rate limiting
+- **Scheduling** for periodic ingestion
+- **Secure Auth** with JWT in HTTP-only cookies, CSRF token handling, and password hashing, (more to be implemented)
+- **Monitoring-ready** (will soon integrate with Sentry, Prometheus, or Grafana)
+
+## Development Setup
+
+2 Ways to run OmniPoster:
+
+-**With Python virtualenv + Node locally**
+-**Using Docker Compose (<3 <3)**
+
+### 1. Local Development (Backend)
+
+#### Activating the VM - Do this every time you start a new terminal session to work on project
+    python3 -m venv .venv (ONLY ONCE)
+    source .venv/bin/activate
+
+##### Checking if VM active
+which python
+
+/home/user/code/awesome-project/.venv/bin/python - WORKING!
 
 # TIP
 everytime you install a new package in the environment, activate the environment again. 
 Ensures using CLI program installed by that package uses the one from VM, not globally. 
 
-# Checking if VM active
-which python
-
-/home/user/code/awesome-project/.venv/bin/python - WORKING!
-
-
 # Upgrade PIP - not using uv might transition tho
 python -m pip install --upgrade pip
 
 # Add gitignore
-$echo "*" > .venv/.gitignore
+echo "*" > .venv/.gitignore
 
 # Install packages directly
 if youre in a hurry and dont want to use a file to declare your package requirements, install directly
@@ -30,87 +56,62 @@ pip install "fastapi[standard]"
 Its a very good idea to put the packages and versions your program needs in a file (requirements.txt or pyproject.toml)
 
 
-# Install from requirements.txt
+# Install from requirements.txt in backend
 if you have one you can use it to install packages
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 
 # deactivate VM
-$ deactivate
+ deactivate
 
 #COnfigure editor
 
 # start the live server
 
-fastapi dev main.py
+[LOCAL] fastapi dev main.py
+
+(Backend API Docker Compose) cd backend
+uvicorn app.main:app --reload --port 8000
+
+# Local Development (Frontend)
+**Install Dependencies**
+    cd frontend
+    npm install
+**Start dev Server**
+    npm start
+    #Frontend runs at http://localhost:3000 and hotreloads on changes
+**Build for protection**
+    npm run build
+
+# Full stack with Docker Compose <3 <3
+    **PREREQS**
+        - Docker
+        - Docker Compose
+        - .env.dev file in project root with development settings
+
+    **Start all Services**
+    cd deploy/compose
+    docker compose up --build
+
+    **Services:**
+
+        api (FastAPI @ http://localhost:8000, docs at /docs)
+
+        worker (Celery worker; queue crawl)
+
+        beat (Celery Beat scheduler)
+
+        redis (broker/result + caches) – localhost:6379
+
+        postgres (database) – localhost:5432
 
 
-# Getting Started with Create React App
+    **follow logs for a specific service**
+    docker compose logs -f api
+    docker compose logs -f worker
+    docker compose logs -f beat
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+    **rebuild after code changes**
+    docker compose build
 
-## Available Scripts
-
-In the project directory, you can run:
-
-### `npm start`
-
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
-
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
-
-### `npm test`
-
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
-
-### `npm run build`
-
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
-
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
-
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+    **Stop Services**
+    docker compose down
