@@ -1,65 +1,60 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Body, Cookie
-from pydantic import BaseModel
-from app.services.auth import create_user, authenticate_user, _users_db, SECRET_KEY, ALGORITHM
-import jwt
+from __future__ import annotations
 
-from app.models import User, UserResponse, TokenResponse
-from app.dependencies import get_current_user
+from fastapi import APIRouter, Body, Depends, Response, status
+from sqlalchemy.orm import Session
 
-router = APIRouter(prefix="/auth")
+from app.core.config import settings
+from app.dependencies import get_current_user, get_db
+from app.models import User
+from app.schemas import AuthRequest, AuthResponse, MeResponse, SessionInfo, UserSummary
+from app.services.auth import authenticate_user, create_access_token, create_user
 
-class AuthPayload(BaseModel):
-    username: str
-    password: str
+router = APIRouter(prefix="/auth", tags=["auth"])
 
-@router.post("/register", response_model=TokenResponse)
-async def register(
-    payload: AuthPayload = Body(...),
-    response: Response = None
-):
-    """
-    Register a new user via JSON payload, set access_token cookie, and return user info.
-    """
-    user = create_user(payload.username, payload.password)
-    token = authenticate_user(payload.username, payload.password)
-    response.set_cookie(key="access_token", value=token, httponly=True, secure=True, samesite="lax")
-    
-    return TokenResponse(access_token=token, token_type="bearer")
 
-@router.post("/login", response_model=TokenResponse)
-async def login(
-    payload: AuthPayload = Body(...),
-    response: Response = None
-):
-    """
-    Authenticate via JSON payload, set access_token cookie.
-    """
-    token = authenticate_user(payload.username, payload.password)
-    response.set_cookie(key="access_token", value=token, httponly=True, secure=True, samesite="lax")
-    return TokenResponse(access_token=token, token_type="bearer")
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        secure=settings.COOKIE_SECURE,
+        samesite="lax",
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
 
-@router.get("/me", response_model=UserResponse)
-async def me_get(
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Get current user from cookie-based session.
-    """
-    return UserResponse(username=current_user.username)
+
+@router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
+def register(payload: AuthRequest = Body(...), response: Response = None, db: Session = Depends(get_db)):
+    user = create_user(db, payload.username, payload.password)
+    token, expires_at = create_access_token(user)
+    _set_session_cookie(response, token)
+    return AuthResponse(user=UserSummary(id=user.id, username=user.username), session=SessionInfo(expires_at=expires_at))
+
+
+@router.post("/login", response_model=AuthResponse)
+def login(payload: AuthRequest = Body(...), response: Response = None, db: Session = Depends(get_db)):
+    user = authenticate_user(db, payload.username, payload.password)
+    token, expires_at = create_access_token(user)
+    _set_session_cookie(response, token)
+    return AuthResponse(user=UserSummary(id=user.id, username=user.username), session=SessionInfo(expires_at=expires_at))
+
+
+@router.get("/me", response_model=MeResponse)
+def me(current_user: User = Depends(get_current_user)):
+    preferences = current_user.preferences
+    return MeResponse(
+        id=current_user.id,
+        username=current_user.username,
+        preferences_summary={
+            "default_platform": preferences.default_platform if preferences else "youtube",
+            "default_social_account_id": preferences.default_social_account_id if preferences else None,
+            "metadata_style": preferences.metadata_style if preferences else "default",
+            "auto_select_default_account": preferences.auto_select_default_account if preferences else True,
+        },
+    )
+
 
 @router.post("/logout")
-async def logout(response: Response):
-    """
-    Logout user by clearing the HTTP-only cookie.
-    """
-    response.delete_cookie(key="access_token")
-    return {"message": "Successfully logged out"}
-
-@router.post("/token", response_model=TokenResponse)
-async def login_for_access_token(payload: AuthPayload = Body(...)):
-    """
-    OAuth2-compatible token endpoint (no cookie, just token).
-    Useful for API clients that only want tokens.
-    """
-    token = authenticate_user(payload.username, payload.password)
-    return TokenResponse(access_token=token, token_type="bearer")
+def logout(response: Response):
+    response.delete_cookie("access_token")
+    return {"ok": True}

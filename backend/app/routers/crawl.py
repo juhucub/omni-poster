@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from ..tasks.crawl import crawl_creator_task
+from ..core.config import settings
 from ..dependencies import get_current_user  # reuse your auth
 import redis
 
@@ -26,7 +27,7 @@ def status(task_id: str, user=Depends(get_current_user)):
 
 @router.get("/ops/metrics")
 def ops_metrics(user=Depends(get_current_user)):
-    r = redis.Redis.from_url("redis://localhost:6379/0", decode_responses=True)
+    r = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
     # Minimal metrics
     buckets = {
         "yt_units": r.hgetall("yt:units") or {},

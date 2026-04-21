@@ -31,7 +31,7 @@ class VideoGenerationService:
     def generate_video(
         self, 
         video_path: str, 
-        audio_path: str, 
+        audio_path: Optional[str] = None, 
         thumbnail_path: Optional[str] = None,
         project_id: str = None
     ) -> Dict[str, Any]:
@@ -58,13 +58,13 @@ class VideoGenerationService:
             
             # Clean file paths (remove file:// prefix if present)
             clean_video_path = self._clean_file_path(video_path)
-            clean_audio_path = self._clean_file_path(audio_path)
+            clean_audio_path = self._clean_file_path(audio_path) if audio_path else None
             clean_thumbnail_path = self._clean_file_path(thumbnail_path) if thumbnail_path else None
             
             # Validate input files exist
             if not os.path.exists(clean_video_path):
                 raise FileNotFoundError(f"Video file not found: {clean_video_path}")
-            if not os.path.exists(clean_audio_path):
+            if clean_audio_path and not os.path.exists(clean_audio_path):
                 raise FileNotFoundError(f"Audio file not found: {clean_audio_path}")
             
             # Generate output filename
@@ -79,11 +79,12 @@ class VideoGenerationService:
             logger.info(f"Loading video from: {clean_video_path}")
             video_clip = VideoFileClip(clean_video_path)
             
-            logger.info(f"Loading audio from: {clean_audio_path}")
-            audio_clip = AudioFileClip(clean_audio_path)
-            
-            # Set audio to video (this will replace the original audio)
-            final_video = video_clip.set_audio(audio_clip)
+            audio_clip = None
+            final_video = video_clip
+            if clean_audio_path:
+                logger.info(f"Loading audio from: {clean_audio_path}")
+                audio_clip = AudioFileClip(clean_audio_path)
+                final_video = video_clip.set_audio(audio_clip)
             
             # Add thumbnail overlay if provided
             if clean_thumbnail_path and os.path.exists(clean_thumbnail_path):
@@ -108,7 +109,8 @@ class VideoGenerationService:
             
             # Cleanup clips to free memory
             video_clip.close()
-            audio_clip.close()
+            if audio_clip:
+                audio_clip.close()
             final_video.close()
             
             # Get file info
@@ -140,7 +142,7 @@ class VideoGenerationService:
     def _generate_video_fallback(
         self, 
         video_path: str, 
-        audio_path: str, 
+        audio_path: Optional[str], 
         thumbnail_path: Optional[str],
         project_id: str
     ) -> Dict[str, Any]:

@@ -1,4 +1,5 @@
 from ..celery_app import celery
+from ..core.config import settings
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import Creator, Video, StatsSnapshot
@@ -25,7 +26,7 @@ import redis, traceback
 #   - Redis (ETagCache) reachable at the configured URL.
 @celery.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, max_retries=5)
 def crawl_creator_task(self, platform: str, creator_external_id: str, latest_n: int = 20, include_comments: bool = False):
-    r = redis.Redis.from_url("redis://localhost:6379/0", decode_responses=True)
+    r = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
     etags = ETagCache(r)
     db: Session = SessionLocal()
     try:

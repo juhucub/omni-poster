@@ -1,173 +1,130 @@
-// Auto-generated TypeScript interfaces based on Python Pydantic models
-
-/**
- * Response when uploading media assets
- */
-export interface UploadResponse {
-  project_id: string;
-  message: string;
+export interface SessionInfo {
+  expires_at: string;
 }
 
-export type FileType = 'video' | 'audio' | 'thumbnail';
-  
-  /**
-   * Authentication token response
-   */
-  export interface TokenResponse {
-    access_token: string;
-    token_type: "bearer";
-  }
-  
-  /**
-   * Basic user information
-   */
-  export interface UserResponse {
-    id: number;
-    username: string;
-  }
-  
-  /**
-   * Request payload for user registration
-   */
-  export interface RegisterRequest {
-    username: string; // at least 3 characters, alphanumeric or underscore
-    password: string; // at least 8 characters, with upper, lower, digit
-  }
-  
-  /**
-   * Request payload for user login
-   */
-  export interface LoginRequest {
-    username: string; // at least 3 characters
-    password: string; // at least 8 characters
-  }
-  
-  /**
-   * Internal re-authentication request (same shape as LoginRequest)
-   */
-  export interface MeRequest {
-    username: string;
-    password: string;
-  }
-  
-  /**
-   * Response from /auth/me including new token
-   */
-  export interface MeResponse extends UserResponse {
-    access_token: string;
-    token_type: "bearer";
-  }
-  
-  /**
-   * Payload to create a social account via OAuth
-   */
-  export interface AccountCreate {
-    platform: 'youtube' | 'tiktok' | 'instagram';
-    oauth_code: string;
-  }
-  
-  /**
-   * Representation of a linked social account
-   */
-  export interface AccountOut {
-    id: number;
-    platform: string;
-    name: string;
-    profile_picture: string; // HttpUrl
-    stats: Record<string, number>; // e.g. { followers: 1000, views: 5000 }
-    status: 'authorized' | 'token_expired' | 'rate_warning';
-  }
-  
-  /**
-   * Metrics fetched from a social account
-   */
-  export interface MetricsOut {
-    followers: number;
-    views: number;
-    likes: number;
-  }
-  
-  /**
-   * Payload to set or update goals for a social account
-   */
-  export interface GoalIn {
-    views?: number;
-    likes?: number;
-    followers?: number;
-  }
-  
-  /**
-   * Generic message wrapper for simple success/failure messages
-   */
-  export interface Message {
-    detail: string;
-  }
-  
-  // src/types/video.ts
-
-/** Basic metadata for a generated video */
-export interface Metadata {
-  /** Human-readable title (max ~100 chars) */
-  title: string;
-  /** Description or summary (max ~500 chars) */
-  description: string;
-  /** Array of tag strings, e.g. ["promo","tutorial"] */
-  tags: string[];
+export interface PreferencesSummary {
+  default_platform: string;
+  default_social_account_id: number | null;
+  metadata_style: string;
+  auto_select_default_account: boolean;
 }
 
-/** Supported output resolutions */
-export type Resolution = '720p' | '1080p' | '4k';
-
-/** Generation options beyond metadata */
-export interface VideoOptions {
-  /** Desired resolution for the final video */
-  resolution: Resolution;
+export interface UserSummary {
+  id: number;
+  username: string;
 }
 
-export interface MediaFile {
-  id: string;
-  name: string;
-  type: 'video' | 'audio' | 'thumbnail';
-  size: number;
-  url: string;
-  uploadedAt: Date;
-  duration?: number;
-  dimensions?: { width: number; height: number };
+export interface AuthResponse {
+  user: UserSummary;
+  session: SessionInfo;
 }
 
-export interface GeneratedMedia {
-  id: string;
-  name: string;
-  type: string;
-  createdAt: Date;
-  status: 'processing' | 'completed' | 'failed';
-  url?: string;
+export interface MeResponse {
+  id: number;
+  username: string;
+  preferences_summary: PreferencesSummary;
+}
+
+export interface SocialAccount {
+  id: number;
+  platform: string;
+  channel_id: string;
+  channel_title: string;
+  status: string;
+  last_validated_at: string | null;
+}
+
+export interface ScriptLine {
+  speaker: string;
+  text: string;
+  order: number;
+}
+
+export interface ScriptRevision {
+  id: number;
+  raw_text: string;
+  parsed_lines: ScriptLine[];
+  characters: string[];
+  source: string;
+  is_current: boolean;
+  created_at: string;
+}
+
+export interface Asset {
+  id: number;
+  kind: string;
+  mime_type: string;
+  original_filename: string;
+  size_bytes: number;
+  duration_ms: number | null;
+  width: number | null;
+  height: number | null;
+  content_url: string;
+  created_at: string;
 }
 
 export interface Project {
-  project_id: string;
-  video_name: string;
-  audio_name: string;
-  thumbnail_name?: string;
-  created_at: string;
+  id: number;
+  name: string;
   status: string;
+  target_platform: string;
+  background_style: 'none' | 'blur' | 'grayscale';
+  selected_social_account_id: number | null;
+  current_script_revision_id: number | null;
+  current_output_video_id: number | null;
+  approved_at: string | null;
+  created_at: string;
+  updated_at: string;
+  current_script: ScriptRevision | null;
+  latest_preview: Asset | null;
 }
 
-export interface UploadRecord {
-  project_id: string;
-  filename: string;
-  url: string;
-  content_type: string;
-  uploader_id: string;
-  uploaded_at: string;
+export interface GenerationJob {
+  id: number;
+  project_id: number;
+  status: string;
+  progress: number;
+  style_preset: string;
+  error_message: string | null;
+  output_video_id: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
 }
 
-export interface UploadContextType {
-  uploads: UploadRecord[];
-  loading: boolean;
-  error: string | null;
-  addUpload: (upload: UploadRecord) => void;
-  removeUpload: (projectId: string, filename: string) => void;
-  refreshUploads: () => Promise<void>;
-  lastUpdated: Date | null;
+export interface PlatformMetadata {
+  id: number;
+  project_id: number;
+  platform: string;
+  title: string;
+  description: string;
+  tags: string[];
+  source: string;
+  updated_at: string;
+}
+
+export interface PublishJob {
+  id: number;
+  project_id: number;
+  social_account_id: number;
+  output_video_id: number;
+  platform_metadata_id: number;
+  status: string;
+  scheduled_for: string | null;
+  attempt_count: number;
+  last_error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  published_post_url: string | null;
+}
+
+export interface PublishedPost {
+  id: number;
+  project_id: number;
+  publish_job_id: number;
+  platform: string;
+  external_post_id: string;
+  external_url: string;
+  published_at: string;
 }

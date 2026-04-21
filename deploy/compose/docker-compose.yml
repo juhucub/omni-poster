@@ -4,8 +4,11 @@ services:
   api:
     build:
       context: ../../
-      dockerfile: backend/Dockerfile
+      dockerfile: deploy/compose/Dockerfile
     env_file: ["../../.env.dev"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
+      REDIS_URL: redis://redis:6379/0
     ports: ["8000:8000"]
     depends_on: [postgres, redis]
     volumes:
@@ -19,16 +22,22 @@ services:
   worker:
     build:
       context: ../../
-      dockerfile: backend/Dockerfile
+      dockerfile: deploy/compose/Dockerfile
     env_file: ["../../.env.dev"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
+      REDIS_URL: redis://redis:6379/0
     depends_on: [redis, postgres]
     command: ["celery","-A","app.celery_app.celery","worker","-Q","crawl","-O","fair","--concurrency=4"]
 
   beat:
     build:
       context: ../../
-      dockerfile: backend/Dockerfile
+      dockerfile: deploy/compose/Dockerfile
     env_file: ["../../.env.dev"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
+      REDIS_URL: redis://redis:6379/0
     depends_on: [redis]
     command: ["celery","-A","app.celery_app.celery","beat"]
 

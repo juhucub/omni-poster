@@ -1,62 +1,55 @@
+from __future__ import annotations
+
+import time
+
 from fastapi.testclient import TestClient
-from app.main import app #import FastAPI app
+
+from app.main import app
 
 client = TestClient(app)
 
-def test_upload_success():
-    files = {
-        "video": ("test_video.mp4", b"dummy", "video/mp4"),
-        "audio": ("test_audio.mp3", b"dummy", "audio/mpeg"),
-    }
-    response = client.post("/upload", files=files)
-    assert response.status_code == 200
-    data = response.json()
-    assert "project_id" in data
 
-def test_upload_unsupported_media_type():
-    files = {
-    "video": ("test_video.mp4", b"dummy", "text/plain"),  # Unsupported type
-    "audio": ("test_audio.mp3", b"dummy", "audio/mpeg"),
-}
-    response = client.post("/upload", files=files)  
-    assert response.status_code == 415
-
-def test_generate_video_not_found():
-    files = {
-        "audio": ("test_audio.mp3", b"dummy", "audio/mpeg"),
-    }
-    response = client.post("/upload", files=files)
-    assert response.status_code == 422
-
-def test_generate_video_success():
-    # Assuming the generate_video endpoint is implemented
-    response = client.post("/generate_video", json={"project_id": "some_project_id"})
-    assert response.status_code == 200
-    data = response.json()
-    assert "video_url" in data
-
-def test_register_and_cookie():
-    response = client.post("/auth/register", json={"username": "testuser", "password": "John123!"})
-    assert response.status_code == 200 and response.cookies.get("access_token")
-
-def test_register_dup_username():
-    client.post('/auth/register', json={'username':'dup','password':'Password1'})
-    r = client.post('/auth/register', json={'username':'dup','password':'Password1'})
-    assert r.status_code == 400
+def unique_username(prefix: str = "user") -> str:
+    return f"{prefix}_{int(time.time() * 1000000)}"
 
 
-def test_login_success():
-    client.post('/auth/register', json={'username':'user1','password':'Password1'})
-    r = client.post('/auth/login', json={'username':'user1','password':'Password1'})
-    assert r.status_code == 200
+def create_authenticated_client() -> TestClient:
+    username = unique_username()
+    response = client.post("/auth/register", json={"username": username, "password": "Password1"})
+    assert response.status_code == 201
+    authed = TestClient(app)
+    authed.cookies = response.cookies
+    return authed
 
 
-def test_login_invalid():
-    r = client.post('/auth/login', json={'username':'nouser','password':'wrongpass'})
-    assert r.status_code == 401
+def test_auth_register_login_and_me():
+    username = unique_username("auth")
+    register = client.post("/auth/register", json={"username": username, "password": "Password1"})
+    assert register.status_code == 201
+    assert register.cookies.get("access_token")
+
+    me = client.get("/auth/me", cookies=register.cookies)
+    assert me.status_code == 200
+    assert me.json()["username"] == username
+
+    login = client.post("/auth/login", json={"username": username, "password": "Password1"})
+    assert login.status_code == 200
 
 
-def test_me_endpoint1():
-    client.post('/auth/register', json={'username':'alice','password':'Password1'})
-    r = client.get('/auth/me')  # supports GET now
-    assert r.status_code == 200 and r.json()['username']=='alice'
+def test_project_script_asset_and_metadata_flow():
+    authed = create_authenticated_client()
+
+    project = authed.post("/projects", json={"name": "First Project", "target_platform": "youtube"})
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+
+    script = authed.put(
+        f"/projects/{project_id}/script",
+        json={"raw_text": "<Host> Hello there\n<Guest> General Kenobi", "source": "manual"},
+    )
+    assert script.status_code == 200
+    assert len(script.json()["current_revision"]["parsed_lines"]) == 2
+
+    metadata = authed.post(f"/projects/{project_id}/metadata/youtube/suggest")
+    assert metadata.status_code == 200
+    assert metadata.json()["platform"] == "youtube"

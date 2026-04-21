@@ -15,11 +15,18 @@ class Settings(BaseSettings):
     )
     ENVIRONMENT: str = "dev"
     API_PORT: int = 8000
-    DATABASE_URL: str
-    REDIS_URL: str
-    SECRET_KEY: str
+    DATABASE_URL: str = "sqlite:///./omniposter.db"
+    REDIS_URL: str = "redis://localhost:6379/0"
+    SECRET_KEY: str = "dev-only-change-me"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    FRONTEND_URL: str = "http://localhost:3000"
+    MEDIA_DIR: str = "backend/storage"
+    COOKIE_SECURE: bool = False
+
+    YOUTUBE_CLIENT_ID: str | None = None
+    YOUTUBE_CLIENT_SECRET: str | None = None
+    YOUTUBE_REDIRECT_URI: str | None = None
 
     YT_API_KEY: str | None = None
     YT_UNITS_PER_MIN: int = 900

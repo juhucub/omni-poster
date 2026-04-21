@@ -1,5 +1,6 @@
 from celery import Celery
 from celery.schedules import crontab
+from .core.config import settings
 
 """
 Purpose: Central Celery application config that defines the celery app, broker/result backends, routing, 
@@ -36,8 +37,8 @@ celery = Celery("crawler")
 # - beat_schedule: Periodic tasks (cron-like) that enqueue crawl jobs by tier
 # NOTE: For prod, prefer environment-driven config (e.g., CELERY_BROKER_URL, CELERY_RESULT_BACKEND)
 celery.conf.update(
-    broker_url="redis://localhost:6379/0",  # DEV ONLY; use env + TLS (rediss://) + auth in prod
-    result_backend="redis://localhost:6379/0",  # DEV ONLY; separate backend/DB recommended in prod
+    broker_url=settings.REDIS_URL,
+    result_backend=settings.REDIS_URL,
     task_routes={"app.tasks.*": {"queue": "crawl"}},  # Route all app tasks to a dedicated "crawl" queue
     worker_max_tasks_per_child=200,  # Recycle workers periodically (mitigates mem fragmentation/leaks)
     beat_schedule={
