@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     OAUTH_STATE_EXPIRE_MINUTES: int = 15
     FRONTEND_URL: str = "http://localhost:3000"
     MEDIA_DIR: str = "backend/storage"
+    BUNDLED_MEDIA_DIR: str = "backend/storage"
     COOKIE_SECURE: bool = False
 
     YOUTUBE_CLIENT_ID: str | None = None

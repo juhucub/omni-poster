@@ -11,6 +11,7 @@ os.environ.setdefault("SECRET_KEY", "test-secret-key")
 os.environ.setdefault("OAUTH_TOKEN_ENCRYPTION_KEY", "test-oauth-encryption-key")
 os.environ.setdefault("FRONTEND_URL", "http://localhost:3000")
 os.environ.setdefault("MEDIA_DIR", "test_storage")
+os.environ.setdefault("BUNDLED_MEDIA_DIR", "test_storage/bundled")
 os.environ.setdefault("YOUTUBE_CLIENT_ID", "youtube-client-id")
 os.environ.setdefault("YOUTUBE_CLIENT_SECRET", "youtube-client-secret")
 os.environ.setdefault("YOUTUBE_REDIRECT_URI", "http://testserver/social-accounts/youtube/callback")
@@ -25,6 +26,7 @@ from app.main import app
 
 TEST_DB_PATH = Path("test_omniposter.db")
 TEST_MEDIA_DIR = Path("test_storage")
+TEST_BUNDLED_MEDIA_DIR = TEST_MEDIA_DIR / "bundled"
 ALEMBIC_REVISION = "20260421_0002"
 
 
@@ -45,6 +47,7 @@ def reset_environment():
     if TEST_MEDIA_DIR.exists():
         shutil.rmtree(TEST_MEDIA_DIR)
     TEST_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    TEST_BUNDLED_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     yield
     engine.dispose()
     if TEST_DB_PATH.exists():

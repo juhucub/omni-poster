@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import logging
 import shutil
 import uuid
 from pathlib import Path
@@ -8,6 +9,8 @@ from pathlib import Path
 from fastapi import HTTPException, UploadFile, status
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_BACKGROUND_VIDEO_TYPES = {"video/mp4", "video/webm", "video/mpeg"}
 MAX_BACKGROUND_VIDEO_SIZE = 100 * 1024 * 1024
@@ -19,8 +22,14 @@ def media_root() -> Path:
     return root
 
 
+def bundled_media_root() -> Path:
+    root = Path(settings.BUNDLED_MEDIA_DIR)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def preset_media_dir() -> Path:
-    path = media_root() / "presets"
+    path = bundled_media_root() / "presets"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -33,7 +42,8 @@ def project_media_dir(project_id: int) -> Path:
 
 def list_background_presets() -> list[dict]:
     presets: list[dict] = []
-    for path in sorted(preset_media_dir().glob("*")):
+    preset_dir = preset_media_dir()
+    for path in sorted(preset_dir.glob("*")):
         if path.suffix.lower() not in {".mp4", ".webm", ".mpeg"}:
             continue
         presets.append(
@@ -45,6 +55,7 @@ def list_background_presets() -> list[dict]:
                 "path": path,
             }
         )
+    logger.info("Scanned bundled background presets in %s: %s found", preset_dir, len(presets))
     return presets
 
 

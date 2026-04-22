@@ -14,6 +14,24 @@ from app.tasks.publish import process_publish_job
 from app.tasks.scheduler import dispatch_due_publish_jobs
 
 
+def test_background_presets_are_loaded_from_bundled_media_dir(auth_client: TestClient):
+    preset_dir = Path("test_storage") / "bundled" / "presets"
+    preset_dir.mkdir(parents=True, exist_ok=True)
+    (preset_dir / "aurora_grid.mp4").write_bytes(b"preset-video")
+
+    response = auth_client.get("/background-presets")
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "key": "aurora_grid",
+            "name": "Aurora Grid",
+            "description": "Curated background preset",
+            "filename": "aurora_grid.mp4",
+            "content_url": "/background-presets/aurora_grid/content",
+        }
+    ]
+
+
 def _create_project_flow(client: TestClient) -> dict:
     project = client.post("/projects", json={"name": "First Project", "target_platform": "youtube"})
     assert project.status_code == 201

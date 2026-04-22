@@ -26,6 +26,7 @@ from app.routers.scripts import router as scripts_router
 from app.routers.social_accounts import router as social_accounts_router
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def _migration_state() -> dict:
@@ -45,6 +46,8 @@ def _migration_state() -> dict:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.validate_runtime()
+    logger.info("Runtime media directory: %s", settings.MEDIA_DIR)
+    logger.info("Bundled media directory: %s", settings.BUNDLED_MEDIA_DIR)
     yield
 
 
