@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.db import engine
 from app.routers.assets import router as assets_router
 from app.routers.auth import router as auth_router
+from app.routers.character_presets import router as character_presets_router
 from app.routers.generation import router as generation_router
 from app.routers.history import router as history_router
 from app.routers.metadata import router as metadata_router
@@ -65,6 +66,7 @@ app.include_router(auth_router)
 app.include_router(social_accounts_router)
 app.include_router(projects_router)
 app.include_router(assets_router)
+app.include_router(character_presets_router)
 app.include_router(scripts_router)
 app.include_router(generation_router)
 app.include_router(metadata_router)

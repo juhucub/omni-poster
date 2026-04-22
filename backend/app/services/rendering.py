@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from app.core.config import settings
+from app.services.character_presets import resolve_character_portrait_path, resolve_character_preset_for_speaker
 from app.services.tts import LocalSpeechService, SpeechSegment
 from app.services.vid_gen import VideoGenerationService
 
@@ -232,6 +233,17 @@ class ProjectRenderService:
 
     def _resolve_character_portrait(self, speaker: str, slot_index: int, work_dir: Path) -> Path:
         slug = self._slugify(speaker)
+        preset = resolve_character_preset_for_speaker(speaker)
+        preset_portrait = resolve_character_portrait_path(preset)
+        if preset_portrait:
+            logger.info(
+                "Resolved portrait for speaker=%s slot=%s from preset=%s path=%s",
+                speaker,
+                slot_index + 1,
+                preset["id"],
+                preset_portrait,
+            )
+            return preset_portrait
         bundled_character_dir = Path(settings.BUNDLED_MEDIA_DIR) / "characters"
         runtime_character_dir = Path(settings.MEDIA_DIR) / "characters"
         runtime_character_dir.mkdir(parents=True, exist_ok=True)

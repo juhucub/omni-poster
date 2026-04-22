@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
 from app.models import GenerationJob, SocialAccount
+from app.services.character_presets import get_character_preset
 from app.services.crypto import decrypt_secret
 from app.services.rendering import ProjectRenderService
 from app.tasks.generation import STALE_GENERATION_ERROR, process_generation_job, reconcile_stale_generation_jobs
@@ -32,6 +33,76 @@ def test_background_presets_are_loaded_from_bundled_media_dir(auth_client: TestC
     ]
 
 
+def test_character_presets_list_and_runtime_override(auth_client: TestClient):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    listed = auth_client.get("/character-presets")
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["id"] == "host_calm_v1"
+
+    created = auth_client.post(
+        "/character-presets",
+        json={
+            "display_name": "Engineer",
+            "speaker_names": ["Engineer", "Dev"],
+            "portrait_filename": "speaker_2.png",
+            "tts_provider": "espeak",
+            "voice": "en-us+m2",
+            "rate": 160,
+            "pitch": 40,
+            "word_gap": 1,
+            "amplitude": 138,
+            "notes": "Runtime test preset",
+            "sample_text": "Let's validate this quickly.",
+        },
+    )
+    assert created.status_code == 201
+
+    created_id = created.json()["id"]
+    updated = auth_client.put(
+        f"/character-presets/{created_id}",
+        json={
+            "display_name": "Engineer",
+            "speaker_names": ["Engineer", "Dev"],
+            "portrait_filename": "speaker_2.png",
+            "tts_provider": "espeak",
+            "voice": "en-us+m2",
+            "rate": 162,
+            "pitch": 44,
+            "word_gap": 2,
+            "amplitude": 142,
+            "notes": "Adjusted runtime preset",
+            "sample_text": "Let's validate this quickly.",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["rate"] == 162
+
+    deleted = auth_client.delete(f"/character-presets/{created_id}")
+    assert deleted.status_code == 200
+    assert get_character_preset(created_id) is None
+
+
 def test_character_portrait_prefers_bundled_media_dir_over_runtime(auth_client: TestClient, tmp_path: Path):
     bundled_characters = Path("test_storage") / "bundled" / "characters"
     runtime_characters = Path("test_storage") / "characters"
@@ -47,6 +118,65 @@ def test_character_portrait_prefers_bundled_media_dir_over_runtime(auth_client: 
     resolved = service._resolve_character_portrait("Host", 0, tmp_path)
 
     assert resolved == bundled_portrait
+
+
+def test_voice_lab_preview_uses_preset_settings(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_synthesize(self, parsed_lines, work_dir):
+        work_dir.mkdir(parents=True, exist_ok=True)
+        output_path = work_dir / "sample.wav"
+        output_path.write_bytes(b"RIFF")
+        return [
+            type(
+                "Segment",
+                (),
+                {
+                    "speaker": parsed_lines[0]["speaker"],
+                    "text": parsed_lines[0]["text"],
+                    "voice": "en-us+f3",
+                    "slot_index": 0,
+                    "audio_path": str(output_path),
+                    "duration_seconds": 1.25,
+                },
+            )()
+        ]
+
+    monkeypatch.setattr("app.routers.character_presets.LocalSpeechService.synthesize_dialogue", fake_synthesize)
+    response = auth_client.post(
+        "/voice-lab/preview",
+        json={
+            "preset_id": "host_calm_v1",
+            "text": "This is a quick voice lab check.",
+            "rate": 149,
+            "pitch": 41,
+            "word_gap": 1,
+            "amplitude": 144,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["preset_id"] == "host_calm_v1"
+    assert response.json()["content_url"].endswith("/voice-lab/previews/sample.wav")
 
 
 def _create_project_flow(client: TestClient) -> dict:

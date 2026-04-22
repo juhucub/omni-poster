@@ -1,0 +1,30 @@
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 152,
+    "pitch": 43,
+    "word_gap": 1,
+    "amplitude": 145,
+    "notes": "Calmer narrator-style host voice.",
+    "sample_text": "Hey, welcome back. Today we're testing a new workflow."
+  },
+  {
+    "id": "guest_sharp_v1",
+    "display_name": "Guest",
+    "speaker_names": ["Guest"],
+    "portrait_filename": "speaker_2.png",
+    "tts_provider": "espeak",
+    "voice": "en-gb+m3",
+    "rate": 158,
+    "pitch": 46,
+    "word_gap": 1,
+    "amplitude": 145,
+    "notes": "A slightly punchier response voice for the second character.",
+    "sample_text": "Wait, are we sure this is actually ready to ship?"
+  }
+]

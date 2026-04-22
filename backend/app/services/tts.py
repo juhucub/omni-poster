@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from app.core.config import settings
+from app.services.character_presets import resolve_character_preset_for_speaker
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class LocalSpeechService:
         espeak_word_gap: int | None = None,
         espeak_amplitude: int | None = None,
         espeak_voices: tuple[str, str] | None = None,
+        speaker_voice_overrides: dict[str, dict] | None = None,
     ) -> None:
         self.speech_rate = speech_rate or settings.TTS_SPEECH_RATE
         self.espeak_rate = espeak_rate or settings.TTS_ESPEAK_RATE
@@ -49,6 +51,9 @@ class LocalSpeechService:
             settings.TTS_ESPEAK_VOICE_SLOT_1,
             settings.TTS_ESPEAK_VOICE_SLOT_2,
         )
+        self.speaker_voice_overrides = {
+            self._slugify(speaker): dict(config) for speaker, config in (speaker_voice_overrides or {}).items()
+        }
 
     def synthesize_dialogue(self, parsed_lines: list[dict], work_dir: Path) -> list[SpeechSegment]:
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -72,15 +77,30 @@ class LocalSpeechService:
                 continue
 
             slot_index = slot_map.setdefault(speaker, len(slot_map))
+            voice_profile = self._voice_profile_for_speaker(speaker, slot_index)
             voice = self.DEFAULT_VOICES[slot_index % len(self.DEFAULT_VOICES)]
             aiff_path = work_dir / f"{index:03d}_{self._slugify(speaker)}_{uuid.uuid4().hex}.aiff"
             audio_path = work_dir / f"{index:03d}_{self._slugify(speaker)}_{uuid.uuid4().hex}.wav"
             if provider == "macos":
-                self._run_say(text=text, voice=voice, output_path=aiff_path)
+                voice = str(voice_profile.get("voice") or voice)
+                self._run_say(
+                    text=text,
+                    voice=voice,
+                    output_path=aiff_path,
+                    rate=int(voice_profile.get("speech_rate") or self.speech_rate),
+                )
                 self._convert_to_wav(source_path=aiff_path, output_path=audio_path)
             elif provider == "espeak":
-                voice = self.espeak_voices[slot_index % len(self.espeak_voices)]
-                self._run_espeak(text=text, voice=voice, output_path=audio_path)
+                voice = str(voice_profile.get("voice") or self.espeak_voices[slot_index % len(self.espeak_voices)])
+                self._run_espeak(
+                    text=text,
+                    voice=voice,
+                    output_path=audio_path,
+                    rate=int(voice_profile.get("rate") or self.espeak_rate),
+                    pitch=int(voice_profile.get("pitch") or self.espeak_pitch),
+                    word_gap=int(voice_profile.get("word_gap") if voice_profile.get("word_gap") is not None else self.espeak_word_gap),
+                    amplitude=int(voice_profile.get("amplitude") or self.espeak_amplitude),
+                )
             else:
                 raise RuntimeError("No supported text-to-speech provider is installed.")
             audio_stats = self._audio_stats(audio_path)
@@ -90,8 +110,8 @@ class LocalSpeechService:
                 speaker,
                 voice,
                 provider,
-                self.espeak_rate if provider == "espeak" else self.speech_rate,
-                self.espeak_pitch if provider == "espeak" else "n/a",
+                voice_profile.get("rate") if provider == "espeak" else voice_profile.get("speech_rate", self.speech_rate),
+                voice_profile.get("pitch") if provider == "espeak" else "n/a",
                 audio_stats["sample_rate"],
                 audio_stats["channels"],
                 duration_seconds,
@@ -119,10 +139,10 @@ class LocalSpeechService:
             return "espeak"
         return "none"
 
-    def _run_say(self, *, text: str, voice: str, output_path: Path) -> None:
+    def _run_say(self, *, text: str, voice: str, output_path: Path, rate: int) -> None:
         commands = [
-            ["say", "-v", voice, "-r", str(self.speech_rate), "-o", str(output_path), text],
-            ["say", "-r", str(self.speech_rate), "-o", str(output_path), text],
+            ["say", "-v", voice, "-r", str(rate), "-o", str(output_path), text],
+            ["say", "-r", str(rate), "-o", str(output_path), text],
         ]
         for command in commands:
             try:
@@ -134,7 +154,17 @@ class LocalSpeechService:
                 logger.warning("Speech synthesis attempt failed with %s: %s", command, exc.stderr.strip())
         raise RuntimeError("Speech synthesis failed for one or more dialogue lines.")
 
-    def _run_espeak(self, *, text: str, voice: str, output_path: Path) -> None:
+    def _run_espeak(
+        self,
+        *,
+        text: str,
+        voice: str,
+        output_path: Path,
+        rate: int,
+        pitch: int,
+        word_gap: int,
+        amplitude: int,
+    ) -> None:
         binary = shutil.which("espeak-ng") or shutil.which("espeak")
         if not binary:
             raise RuntimeError("Linux text-to-speech is unavailable. Install espeak-ng in the worker image.")
@@ -143,13 +173,13 @@ class LocalSpeechService:
             "-w",
             str(output_path),
             "-s",
-            str(self.espeak_rate),
+            str(rate),
             "-p",
-            str(self.espeak_pitch),
+            str(pitch),
             "-g",
-            str(self.espeak_word_gap),
+            str(word_gap),
             "-a",
-            str(self.espeak_amplitude),
+            str(amplitude),
             "-v",
             voice,
             text,
@@ -213,6 +243,38 @@ class LocalSpeechService:
             "frame_count": frame_count,
             "channels": channels,
             "duration_seconds": duration_seconds,
+        }
+
+    def _voice_profile_for_speaker(self, speaker: str, slot_index: int) -> dict:
+        override = self.speaker_voice_overrides.get(self._slugify(speaker))
+        if override:
+            return {
+                "voice": override.get("voice", self.espeak_voices[slot_index % len(self.espeak_voices)]),
+                "rate": override.get("rate", self.espeak_rate),
+                "pitch": override.get("pitch", self.espeak_pitch),
+                "word_gap": override.get("word_gap", self.espeak_word_gap),
+                "amplitude": override.get("amplitude", self.espeak_amplitude),
+                "speech_rate": override.get("speech_rate", self.speech_rate),
+            }
+
+        preset = resolve_character_preset_for_speaker(speaker)
+        if preset:
+            return {
+                "voice": preset.get("voice", self.espeak_voices[slot_index % len(self.espeak_voices)]),
+                "rate": int(preset.get("rate") or self.espeak_rate),
+                "pitch": int(preset.get("pitch") or self.espeak_pitch),
+                "word_gap": int(preset.get("word_gap") if preset.get("word_gap") is not None else self.espeak_word_gap),
+                "amplitude": int(preset.get("amplitude") or self.espeak_amplitude),
+                "speech_rate": self.speech_rate,
+            }
+
+        return {
+            "voice": self.espeak_voices[slot_index % len(self.espeak_voices)],
+            "rate": self.espeak_rate,
+            "pitch": self.espeak_pitch,
+            "word_gap": self.espeak_word_gap,
+            "amplitude": self.espeak_amplitude,
+            "speech_rate": self.speech_rate,
         }
 
     def _slugify(self, value: str) -> str:

@@ -154,6 +154,58 @@ class BackgroundPresetSummary(BaseModel):
     content_url: str
 
 
+class CharacterPresetSummary(BaseModel):
+    id: str
+    display_name: str
+    speaker_names: list[str]
+    portrait_filename: str | None = None
+    portrait_url: str | None = None
+    tts_provider: str
+    voice: str
+    rate: int
+    pitch: int
+    word_gap: int
+    amplitude: int
+    notes: str = ""
+    sample_text: str = ""
+    source: str
+
+
+class CharacterPresetListResponse(BaseModel):
+    items: list[CharacterPresetSummary]
+
+
+class CharacterPresetRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    speaker_names: list[str] = Field(default_factory=list)
+    portrait_filename: str | None = Field(default=None, max_length=255)
+    tts_provider: str = Field(default="espeak", max_length=32)
+    voice: str = Field(min_length=1, max_length=64)
+    rate: int = Field(ge=80, le=260)
+    pitch: int = Field(ge=0, le=99)
+    word_gap: int = Field(ge=0, le=20)
+    amplitude: int = Field(ge=0, le=200)
+    notes: str = Field(default="", max_length=2000)
+    sample_text: str = Field(default="", max_length=500)
+
+
+class VoiceLabPreviewRequest(BaseModel):
+    preset_id: str
+    text: str = Field(min_length=1, max_length=500)
+    rate: int | None = Field(default=None, ge=80, le=260)
+    pitch: int | None = Field(default=None, ge=0, le=99)
+    word_gap: int | None = Field(default=None, ge=0, le=20)
+    amplitude: int | None = Field(default=None, ge=0, le=200)
+
+
+class VoiceLabPreviewResponse(BaseModel):
+    preset_id: str
+    voice: str
+    duration_seconds: float
+    sample_text: str
+    content_url: str
+
+
 class ScriptLine(BaseModel):
     id: int | None = None
     speaker: str
