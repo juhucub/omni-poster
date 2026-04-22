@@ -12,7 +12,7 @@ const Sidebar: React.FC = () => (
   <aside className="w-full max-w-60 bg-[#11162b] text-white p-6 border-r border-white/10">
     <div className="mb-8">
       <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Omni-poster</div>
-      <h1 className="mt-2 text-2xl font-semibold">YouTube Shorts v1</h1>
+      <h1 className="mt-2 text-2xl font-semibold">Review-Driven Studio</h1>
     </div>
 
     <nav className="space-y-2">

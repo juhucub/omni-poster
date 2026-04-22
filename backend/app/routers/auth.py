@@ -73,6 +73,10 @@ def me(current_user: User = Depends(get_current_user)):
             "default_social_account_id": preferences.default_social_account_id if preferences else None,
             "metadata_style": preferences.metadata_style if preferences else "default",
             "auto_select_default_account": preferences.auto_select_default_account if preferences else True,
+            "automation_mode": preferences.automation_mode if preferences else "assisted",
+            "preferred_account_type": preferences.preferred_account_type if preferences else None,
+            "allowed_platforms": preferences.allowed_platforms_json if preferences and preferences.allowed_platforms_json else ["youtube"],
+            "publish_windows": preferences.publish_windows_json if preferences else [],
         },
     )
 

@@ -44,6 +44,7 @@ const PublishHistoryPage: React.FC = () => {
                     <th className="px-4 py-3">Job</th>
                     <th className="px-4 py-3">Project</th>
                     <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Platform</th>
                     <th className="px-4 py-3">Scheduled</th>
                     <th className="px-4 py-3">Error</th>
                   </tr>
@@ -54,13 +55,14 @@ const PublishHistoryPage: React.FC = () => {
                       <td className="px-4 py-3">#{job.id}</td>
                       <td className="px-4 py-3">{job.project_id}</td>
                       <td className="px-4 py-3">{job.status}</td>
+                      <td className="px-4 py-3">{job.routing_platform}</td>
                       <td className="px-4 py-3">{job.scheduled_for || '-'}</td>
                       <td className="px-4 py-3 text-rose-200">{job.last_error || '-'}</td>
                     </tr>
                   ))}
                   {jobs.length === 0 && (
                     <tr>
-                      <td className="px-4 py-6 text-slate-400" colSpan={5}>
+                      <td className="px-4 py-6 text-slate-400" colSpan={6}>
                         No publish jobs yet.
                       </td>
                     </tr>

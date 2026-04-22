@@ -90,9 +90,9 @@ const AccountManager: React.FC = () => {
         <div className="max-w-5xl mx-auto space-y-8">
           <header>
             <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Publishing destinations</div>
-            <h1 className="mt-2 text-4xl font-semibold">YouTube Accounts</h1>
+            <h1 className="mt-2 text-4xl font-semibold">Publishing Accounts</h1>
             <p className="mt-3 text-slate-400">
-              Link the destination channel before you approve and publish a Shorts project.
+              Link the destination channel before you route, approve, and publish a project.
             </p>
             {reconnectRequired > 0 && (
               <p className="mt-3 text-amber-300">
@@ -127,6 +127,12 @@ const AccountManager: React.FC = () => {
                     <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">{account.status}</div>
                     <h2 className="mt-2 text-2xl font-semibold">{account.channel_title}</h2>
                     <p className="mt-2 text-sm text-slate-400">{account.channel_id}</p>
+                    <p className="mt-1 text-sm text-slate-400">
+                      {account.platform} · {account.account_type} · token {account.token_status}
+                    </p>
+                    <p className="mt-1 text-sm text-slate-400">
+                      Capabilities: {account.capabilities.join(', ')} {account.routing_eligible ? '· eligible' : '· not eligible'}
+                    </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-3">
                     {account.status === 'reconnect_required' && (

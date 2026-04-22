@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_current_user, get_db
 from app.models import Project, PublishJob, PublishedPost, User
 from app.routers.projects import get_owned_project
-from app.routers.publish import to_publish_job_summary
 from app.schemas import PublishHistoryResponse, PublishedPostSummary
+from app.services.project_state import to_publish_job_summary
 
 router = APIRouter(tags=["history"])
 

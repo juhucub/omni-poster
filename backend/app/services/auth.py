@@ -39,7 +39,7 @@ def create_user(db: Session, username: str, password: str) -> User:
     db.add(user)
     db.flush()
 
-    preferences = UserPreference(user_id=user.id)
+    preferences = UserPreference(user_id=user.id, allowed_platforms_json=["youtube"])
     db.add(preferences)
     db.add(
         AuditLog(

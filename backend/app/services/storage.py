@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import mimetypes
-import os
 import shutil
 import uuid
 from pathlib import Path
@@ -20,10 +19,40 @@ def media_root() -> Path:
     return root
 
 
+def preset_media_dir() -> Path:
+    path = media_root() / "presets"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def project_media_dir(project_id: int) -> Path:
     path = media_root() / f"project_{project_id}"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def list_background_presets() -> list[dict]:
+    presets: list[dict] = []
+    for path in sorted(preset_media_dir().glob("*")):
+        if path.suffix.lower() not in {".mp4", ".webm", ".mpeg"}:
+            continue
+        presets.append(
+            {
+                "key": path.stem,
+                "name": path.stem.replace("_", " ").title(),
+                "description": "Curated background preset",
+                "filename": path.name,
+                "path": path,
+            }
+        )
+    return presets
+
+
+def resolve_background_preset(preset_key: str) -> dict:
+    for preset in list_background_presets():
+        if preset["key"] == preset_key:
+            return preset
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Background preset not found")
 
 
 async def save_background_asset(project_id: int, file: UploadFile) -> tuple[Path, int, str]:
@@ -57,6 +86,14 @@ async def save_background_asset(project_id: int, file: UploadFile) -> tuple[Path
         await file.close()
 
     return destination, size, file.content_type or mimetypes.guess_type(destination.name)[0] or "video/mp4"
+
+
+def copy_preset_to_project(project_id: int, preset_key: str) -> tuple[Path, int, str]:
+    preset = resolve_background_preset(preset_key)
+    source_path: Path = preset["path"]
+    destination = project_media_dir(project_id) / f"{uuid.uuid4().hex}_{source_path.name}"
+    shutil.copy2(source_path, destination)
+    return destination, destination.stat().st_size, guess_mime_type(str(destination))
 
 
 def store_generated_file(project_id: int, source_path: str, filename: str | None = None) -> Path:

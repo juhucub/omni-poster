@@ -2,13 +2,13 @@ import React from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 
 import { ProtectedRoute } from './components/ProtectedRoute';
-import { AuthProvider, useAuth } from './context/AuthContext';
+import { useAuth } from './context/AuthContext';
 import AccountManager from './pages/AccountManager';
 import AuthPage from './pages/AuthPage';
 import ProjectEditorPage from './pages/ProjectEditorPage';
 import ProjectsPage from './pages/ProjectsPage';
 import PublishHistoryPage from './pages/PublishHistoryPage';
-import './output.css';
+
 
 const AppRoutes: React.FC = () => {
   const { isAuthenticated } = useAuth();
@@ -55,11 +55,9 @@ const AppRoutes: React.FC = () => {
 };
 
 const App: React.FC = () => (
-  <AuthProvider>
-    <BrowserRouter>
-      <AppRoutes />
-    </BrowserRouter>
-  </AuthProvider>
+  <BrowserRouter>
+    <AppRoutes />
+  </BrowserRouter>
 );
 
 export default App;

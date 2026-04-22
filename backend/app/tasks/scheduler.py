@@ -29,7 +29,7 @@ def dispatch_due_publish_jobs(limit: int = 100) -> dict:
 
         dispatched = 0
         for job in jobs:
-            job.status = "queued"
+            job.status = "publish_queued"
             dispatched += 1
         db.commit()
 

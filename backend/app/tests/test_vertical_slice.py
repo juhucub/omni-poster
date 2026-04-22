@@ -323,6 +323,133 @@ def test_scheduled_publish_dispatch_runs_once(auth_client: TestClient, monkeypat
     assert history.json()["posts"][0]["external_post_id"] == "scheduled-video"
 
 
+def test_script_generation_revisions_and_restore(auth_client: TestClient):
+    project = auth_client.post("/projects", json={"name": "Script Lab", "target_platform": "youtube"})
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+
+    generated = auth_client.post(
+        f"/projects/{project_id}/script/generate",
+        json={
+            "prompt": "how an approval queue reduces publishing mistakes",
+            "character_names": ["Host", "Editor"],
+            "tone": "explanatory",
+        },
+    )
+    assert generated.status_code == 201
+    first_revision_id = generated.json()["current_revision"]["id"]
+
+    update = auth_client.put(
+        f"/projects/{project_id}/script",
+        json={
+            "parsed_lines": [
+                {"speaker": "Host", "text": "We generated a first pass.", "order": 0},
+                {"speaker": "Editor", "text": "Now we can revise it line by line.", "order": 1},
+            ],
+            "source": "manual",
+            "parent_revision_id": first_revision_id,
+        },
+    )
+    assert update.status_code == 200
+    assert update.json()["current_revision"]["parent_revision_id"] == first_revision_id
+
+    revisions = auth_client.get(f"/projects/{project_id}/script-revisions")
+    assert revisions.status_code == 200
+    assert len(revisions.json()["items"]) == 2
+
+    restore = auth_client.post(f"/projects/{project_id}/script-revisions/{first_revision_id}/restore")
+    assert restore.status_code == 200
+    assert restore.json()["current_revision"]["source"] == "restore"
+
+
+def test_review_queue_routing_and_auto_publish(auth_client: TestClient, monkeypatch):
+    flow = _create_project_flow(auth_client)
+    account_id = _link_youtube_account(auth_client, monkeypatch)
+
+    preview_source = Path("test_storage") / "review_queue_preview.mp4"
+    preview_source.write_bytes(b"rendered-preview")
+    monkeypatch.setattr(
+        ProjectRenderService,
+        "render_preview",
+        lambda self, project_id, background_video_path, parsed_lines, style_preset: {
+            "output_path": str(preview_source),
+            "duration_seconds": 1.25,
+        },
+    )
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: process_generation_job(job_id))
+    monkeypatch.setattr(process_publish_job, "delay", lambda job_id: process_publish_job(job_id))
+    monkeypatch.setattr(
+        "app.tasks.publish.upload_short",
+        lambda **kwargs: {
+            "external_post_id": "review-auto-video",
+            "external_url": "https://www.youtube.com/watch?v=review-auto-video",
+        },
+    )
+
+    auth_client.patch(
+        f"/projects/{flow['project_id']}",
+        json={
+            "selected_social_account_id": account_id,
+            "automation_mode": "auto",
+            "allowed_platforms": ["youtube"],
+            "preferred_account_type": "owned_channel",
+        },
+    )
+
+    generation = auth_client.post(
+        f"/projects/{flow['project_id']}/renders",
+        json={"background_style": "blur", "output_kind": "preview", "provider_name": "local-compositor"},
+    )
+    assert generation.status_code == 201
+    output_video_id = auth_client.get(f"/generation-jobs/{generation.json()['id']}").json()["output_video_id"]
+
+    submit = auth_client.post(
+        f"/projects/{flow['project_id']}/review/submit",
+        json={"output_video_id": output_video_id, "note": "Ready for human review."},
+    )
+    assert submit.status_code == 201
+    review_id = submit.json()["id"]
+    assert submit.json()["status"] == "pending"
+
+    changes = auth_client.post(
+        f"/reviews/{review_id}/request-changes",
+        json={"summary": "Tighten the script", "rejection_reason": "Shorten the intro."},
+    )
+    assert changes.status_code == 200
+    assert changes.json()["status"] == "changes_requested"
+
+    approve = auth_client.post(
+        f"/reviews/{review_id}/approve",
+        json={"summary": "Approved after revision."},
+    )
+    assert approve.status_code == 200
+    assert approve.json()["status"] == "approved"
+
+    routing = auth_client.post(f"/projects/{flow['project_id']}/routing/suggest")
+    assert routing.status_code == 200
+    assert routing.json()["recommended_platform"] == "youtube"
+    assert routing.json()["social_account_id"] == account_id
+
+    auto_publish = auth_client.post(
+        f"/projects/{flow['project_id']}/publish/auto",
+        json={
+            "platform": "youtube",
+            "output_video_id": output_video_id,
+            "platform_metadata_id": flow["metadata_id"],
+            "publish_mode": "now",
+            "scheduled_for": None,
+            "automation_mode": "auto",
+        },
+    )
+    assert auto_publish.status_code == 201
+    assert auto_publish.json()["status"] == "queued"
+
+    job = auth_client.get(f"/publish-jobs/{auto_publish.json()['id']}")
+    assert job.status_code == 200
+    assert job.json()["status"] == "published"
+    assert job.json()["published_post_url"] == "https://www.youtube.com/watch?v=review-auto-video"
+
+
 def test_end_to_end_happy_path(auth_client: TestClient, monkeypatch):
     flow = _create_project_flow(auth_client)
     account_id = _link_youtube_account(auth_client, monkeypatch)

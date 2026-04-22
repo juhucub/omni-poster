@@ -20,6 +20,7 @@ class ProjectRenderService:
         background_video_path: str,
         parsed_lines: list[dict],
         style_preset: str,
+        output_kind: str = "preview",
     ) -> dict:
         # Reuse the existing local renderer as the durable preview generator.
         result = self.video_service.generate_video(
@@ -27,6 +28,8 @@ class ProjectRenderService:
             audio_path=None,
             thumbnail_path=self._make_script_overlay(parsed_lines, style_preset),
             project_id=str(project_id),
+            background_style=style_preset,
+            output_kind=output_kind,
         )
         return result
 

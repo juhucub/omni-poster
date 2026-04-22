@@ -42,6 +42,8 @@ const ProjectsPage: React.FC = () => {
       const response = await apiClient.post<Project>('/projects', {
         name: name.trim(),
         target_platform: 'youtube',
+        automation_mode: 'assisted',
+        allowed_platforms: ['youtube'],
       });
       navigate(`/projects/${response.data.id}`);
     } catch (err: any) {
@@ -112,11 +114,15 @@ const ProjectsPage: React.FC = () => {
                 <h3 className="mt-4 text-2xl font-semibold">{project.name}</h3>
                 <p className="mt-2 text-sm text-slate-400">Platform: {project.target_platform}</p>
                 <p className="mt-1 text-sm text-slate-400">Style: {project.background_style}</p>
+                <p className="mt-1 text-sm text-slate-400">Automation: {project.automation_mode}</p>
                 <p className="mt-4 text-sm text-slate-300">
                   {project.current_script
                     ? `${project.current_script.characters.length} characters in current script`
                     : 'No script saved yet'}
                 </p>
+                {project.latest_review && (
+                  <p className="mt-2 text-sm text-amber-200">Review: {project.latest_review.status}</p>
+                )}
               </button>
             ))}
           </section>

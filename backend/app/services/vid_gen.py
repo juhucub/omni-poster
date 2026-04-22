@@ -33,7 +33,9 @@ class VideoGenerationService:
         video_path: str, 
         audio_path: Optional[str] = None, 
         thumbnail_path: Optional[str] = None,
-        project_id: str = None
+        project_id: str = None,
+        background_style: str = "none",
+        output_kind: str = "preview",
     ) -> Dict[str, Any]:
         """
         Combine video and audio files, optionally add thumbnail overlay.
@@ -80,11 +82,11 @@ class VideoGenerationService:
             video_clip = VideoFileClip(clean_video_path)
             
             audio_clip = None
-            final_video = video_clip
+            final_video = self._apply_background_style(video_clip, background_style)
             if clean_audio_path:
                 logger.info(f"Loading audio from: {clean_audio_path}")
                 audio_clip = AudioFileClip(clean_audio_path)
-                final_video = video_clip.set_audio(audio_clip)
+                final_video = final_video.set_audio(audio_clip)
             
             # Add thumbnail overlay if provided
             if clean_thumbnail_path and os.path.exists(clean_thumbnail_path):
@@ -138,6 +140,22 @@ class VideoGenerationService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Video generation failed: {str(e)}"
             )
+
+    def _apply_background_style(self, video_clip, background_style: str):
+        if background_style != "blur":
+            return video_clip
+        try:
+            import cv2
+
+            transform = getattr(video_clip, "image_transform", None)
+            if callable(transform):
+                return transform(lambda frame: cv2.GaussianBlur(frame, (31, 31), 0))
+            fl_image = getattr(video_clip, "fl_image", None)
+            if callable(fl_image):
+                return fl_image(lambda frame: cv2.GaussianBlur(frame, (31, 31), 0))
+        except Exception as exc:
+            logger.warning(f"Blur background fallback failed, keeping original frames: {exc}")
+        return video_clip
     
     def _generate_video_fallback(
         self, 

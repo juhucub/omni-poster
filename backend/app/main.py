@@ -20,6 +20,8 @@ from app.routers.history import router as history_router
 from app.routers.metadata import router as metadata_router
 from app.routers.projects import router as projects_router
 from app.routers.publish import router as publish_router
+from app.routers.reviews import router as reviews_router
+from app.routers.routing import router as routing_router
 from app.routers.scripts import router as scripts_router
 from app.routers.social_accounts import router as social_accounts_router
 
@@ -63,6 +65,8 @@ app.include_router(assets_router)
 app.include_router(scripts_router)
 app.include_router(generation_router)
 app.include_router(metadata_router)
+app.include_router(routing_router)
+app.include_router(reviews_router)
 app.include_router(publish_router)
 app.include_router(history_router)
 

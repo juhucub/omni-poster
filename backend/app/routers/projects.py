@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
 from app.models import Project, SocialAccount, User
 from app.schemas import OkResponse, ProjectCreateRequest, ProjectListResponse, ProjectSummary, ProjectUpdateRequest
+from app.services.audit import record_audit
 from app.services.project_state import sync_project_state, to_project_summary
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -39,8 +42,19 @@ def create_project(
         user_id=current_user.id,
         name=payload.name,
         target_platform=payload.target_platform,
+        automation_mode=payload.automation_mode,
+        allowed_platforms_json=list(payload.allowed_platforms or [payload.target_platform]),
     )
     db.add(project)
+    db.flush()
+    record_audit(
+        db,
+        user_id=current_user.id,
+        action="project.created",
+        entity_type="project",
+        entity_id=project.id,
+        metadata={"target_platform": payload.target_platform, "automation_mode": payload.automation_mode},
+    )
     db.commit()
     db.refresh(project)
     return to_project_summary(project)
@@ -64,6 +78,14 @@ def update_project(
         project.name = payload.name
     if payload.background_style is not None:
         project.background_style = payload.background_style
+    if payload.automation_mode is not None:
+        project.automation_mode = payload.automation_mode
+    if payload.preferred_account_type is not None:
+        project.preferred_account_type = payload.preferred_account_type
+    if payload.allowed_platforms is not None:
+        project.allowed_platforms_json = list(payload.allowed_platforms)
+    if payload.publish_windows is not None:
+        project.publish_windows_json = payload.publish_windows
     if payload.selected_social_account_id is not None:
         account = (
             db.query(SocialAccount)
@@ -78,6 +100,18 @@ def update_project(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Social account not found")
         project.selected_social_account_id = payload.selected_social_account_id
     sync_project_state(project)
+    record_audit(
+        db,
+        user_id=current_user.id,
+        action="project.updated",
+        entity_type="project",
+        entity_id=project.id,
+        metadata={
+            "background_style": project.background_style,
+            "automation_mode": project.automation_mode,
+            "allowed_platforms": project.allowed_platforms_json,
+        },
+    )
     db.commit()
     db.refresh(project)
     return to_project_summary(project)
@@ -92,12 +126,15 @@ def approve_preview(
     project = get_owned_project(db, current_user.id, project_id)
     if not project.current_output_video_id:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Project has no preview to approve")
-    if project.status not in {"preview_ready", "approved"}:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Project is not ready for approval")
-    from datetime import datetime
-
     project.approved_at = datetime.utcnow()
     project.status = "approved"
+    record_audit(
+        db,
+        user_id=current_user.id,
+        action="project.preview_approved_legacy",
+        entity_type="project",
+        entity_id=project.id,
+    )
     db.commit()
     db.refresh(project)
     return to_project_summary(project)
@@ -110,8 +147,14 @@ def archive_project(
     db: Session = Depends(get_db),
 ):
     project = get_owned_project(db, current_user.id, project_id)
-    from datetime import datetime
-
     project.archived_at = datetime.utcnow()
+    project.status = "archived"
+    record_audit(
+        db,
+        user_id=current_user.id,
+        action="project.archived",
+        entity_type="project",
+        entity_id=project.id,
+    )
     db.commit()
     return OkResponse()

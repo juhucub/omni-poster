@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models import SocialAccount
 from app.services.crypto import decrypt_secret, encrypt_secret
+from app.services.platforms import capability_for
 
 
 class YouTubeOAuthError(RuntimeError):
@@ -129,8 +130,10 @@ def upsert_social_account(
         account = SocialAccount(
             user_id=user_id,
             platform="youtube",
+            account_type="owned_channel",
             channel_id=channel_id,
             channel_title=channel_title,
+            capabilities_json=capability_for("youtube").default_capabilities,
         )
         db.add(account)
 
@@ -141,6 +144,7 @@ def upsert_social_account(
     account.token_expires_at = expires_at
     account.last_validated_at = datetime.utcnow()
     account.status = "linked"
+    account.token_status = "healthy"
     db.flush()
     return account
 
@@ -172,6 +176,7 @@ def ensure_valid_access_token(db: Session, account: SocialAccount) -> str:
 
     if not refresh_token:
         account.status = "reconnect_required"
+        account.token_status = "refresh_missing"
         account.last_validated_at = now
         db.flush()
         raise YouTubeOAuthError("Reconnect required for this YouTube account.")
@@ -180,6 +185,7 @@ def ensure_valid_access_token(db: Session, account: SocialAccount) -> str:
         payload = refresh_tokens(refresh_token)
     except httpx.HTTPError as exc:
         account.status = "reconnect_required"
+        account.token_status = "expired"
         account.last_validated_at = now
         db.flush()
         raise YouTubeOAuthError("Could not refresh the YouTube access token.") from exc
@@ -190,6 +196,7 @@ def ensure_valid_access_token(db: Session, account: SocialAccount) -> str:
         account.refresh_token_encrypted = encrypt_secret(payload["refresh_token"])
     account.token_expires_at = _expires_at_from_payload(payload)
     account.status = "linked"
+    account.token_status = "healthy"
     account.last_validated_at = now
     db.flush()
     return next_access_token

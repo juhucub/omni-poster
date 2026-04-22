@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.celery_app import celery
 from app.db import SessionLocal
 from app.models import PlatformMetadata, Project, PublishJob, PublishedPost, SocialAccount
+from app.services.notifications import create_notification
 from app.services.project_state import sync_project_state
 from app.services.youtube_accounts import YouTubeOAuthError, ensure_valid_access_token
 from app.services.youtube_publish import YouTubePublishError, upload_short
@@ -24,7 +25,7 @@ def process_publish_job(job_id: int) -> dict:
             return {"ok": False, "reason": "missing_job"}
         if job.status == "published":
             return {"ok": True, "status": "published"}
-        if job.status not in {"queued", "retrying"}:
+        if job.status not in {"publish_queued", "queued", "retrying"}:
             return {"ok": True, "status": job.status}
 
         project = db.get(Project, job.project_id)
@@ -34,7 +35,7 @@ def process_publish_job(job_id: int) -> dict:
         output_asset = output_video.asset if output_video else None
         if not project or not account or not metadata or not output_asset:
             raise RuntimeError("Publish job references missing project data.")
-        if project.status not in {"approved", "scheduled", "publishing", "failed"} or not project.approved_at:
+        if project.status not in {"approved", "scheduled", "publish_queued", "publishing", "failed"} or not project.approved_at:
             raise RuntimeError("Project must be approved before publishing.")
         if account.status != "linked":
             raise RuntimeError("Linked YouTube account requires reconnect.")
@@ -78,6 +79,14 @@ def process_publish_job(job_id: int) -> dict:
         job.status = "published"
         job.finished_at = datetime.utcnow()
         project.status = "published"
+        create_notification(
+            db,
+            user_id=project.user_id,
+            project_id=project.id,
+            category="publish.succeeded",
+            message="The approved video was published successfully.",
+            payload={"job_id": job.id, "external_url": post.external_url},
+        )
         db.commit()
         return {"ok": True, "status": job.status, "external_post_id": post.external_post_id}
     except (RuntimeError, YouTubeOAuthError, YouTubePublishError) as exc:
@@ -91,6 +100,14 @@ def process_publish_job(job_id: int) -> dict:
             job.finished_at = datetime.utcnow()
             if project:
                 project.status = "failed"
+                create_notification(
+                    db,
+                    user_id=project.user_id,
+                    project_id=project.id,
+                    category="publish.failed",
+                    message="A publish job failed and can be retried.",
+                    payload={"job_id": job.id, "error": str(exc)},
+                )
             db.commit()
         return {"ok": False, "reason": str(exc)}
     finally:

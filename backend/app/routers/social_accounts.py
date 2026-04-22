@@ -10,7 +10,8 @@ from app.core.config import settings
 from app.core.http_rate_limit import enforce_rate_limit, request_identity
 from app.dependencies import get_current_user, get_db
 from app.models import SocialAccount, User
-from app.schemas import OAuthStartResponse, OkResponse, SocialAccountListResponse, SocialAccountSummary
+from app.schemas import OAuthStartResponse, OkResponse, SocialAccountListResponse
+from app.services.routing import is_account_routing_eligible, to_social_account_summary
 from app.services.youtube_accounts import (
     YouTubeOAuthError,
     build_authorization_url,
@@ -21,26 +22,22 @@ from app.services.youtube_accounts import (
 router = APIRouter(prefix="/social-accounts", tags=["social_accounts"])
 
 
-def to_social_summary(account: SocialAccount) -> SocialAccountSummary:
-    return SocialAccountSummary(
-        id=account.id,
-        platform=account.platform,
-        channel_id=account.channel_id,
-        channel_title=account.channel_title,
-        status=account.status,
-        last_validated_at=account.last_validated_at,
-    )
-
-
 @router.get("", response_model=SocialAccountListResponse)
 def list_social_accounts(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     accounts = (
         db.query(SocialAccount)
         .filter(SocialAccount.user_id == current_user.id, SocialAccount.status != "revoked")
-        .order_by(SocialAccount.created_at.desc())
+        .order_by(SocialAccount.default_preference_rank.asc(), SocialAccount.created_at.desc())
         .all()
     )
-    return SocialAccountListResponse(items=[to_social_summary(account) for account in accounts])
+    return SocialAccountListResponse(
+        items=[
+            to_social_account_summary(account).model_copy(
+                update={"routing_eligible": is_account_routing_eligible(account, platform=account.platform)}
+            )
+            for account in accounts
+        ]
+    )
 
 
 @router.post("/youtube/connect/start", response_model=OAuthStartResponse)
@@ -88,7 +85,7 @@ def youtube_callback(
     return RedirectResponse(url=target, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
-@router.post("/{account_id}/refresh", response_model=SocialAccountSummary)
+@router.post("/{account_id}/refresh")
 def refresh_social_account(
     account_id: int,
     current_user: User = Depends(get_current_user),
@@ -110,7 +107,7 @@ def refresh_social_account(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     db.refresh(account)
-    return to_social_summary(account)
+    return to_social_account_summary(account)
 
 
 @router.delete("/{account_id}", response_model=OkResponse)
@@ -127,5 +124,6 @@ def disconnect_social_account(
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Social account not found")
     account.status = "revoked"
+    account.token_status = "revoked"
     db.commit()
     return OkResponse()
