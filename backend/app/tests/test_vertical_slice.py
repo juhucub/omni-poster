@@ -6,10 +6,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
-from app.models import SocialAccount
+from app.models import GenerationJob, SocialAccount
 from app.services.crypto import decrypt_secret
 from app.services.rendering import ProjectRenderService
-from app.tasks.generation import process_generation_job
+from app.tasks.generation import STALE_GENERATION_ERROR, process_generation_job, reconcile_stale_generation_jobs
 from app.tasks.publish import process_publish_job
 from app.tasks.scheduler import dispatch_due_publish_jobs
 
@@ -160,6 +160,78 @@ def test_generation_job_lifecycle(auth_client: TestClient, monkeypatch):
     assert project.status_code == 200
     assert project.json()["status"] == "preview_ready"
     assert project.json()["latest_preview"] is not None
+
+
+def test_generation_job_dedupes_active_job(auth_client: TestClient, monkeypatch):
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+
+    first = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert first.status_code == 201
+
+    second = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["status"] == "queued"
+
+    active = auth_client.get(f"/projects/{flow['project_id']}/generation-jobs/active")
+    assert active.status_code == 200
+    assert active.json()["id"] == first.json()["id"]
+
+
+def test_stale_processing_generation_job_is_reconciled(auth_client: TestClient, monkeypatch):
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert create_job.status_code == 201
+    stale_job_id = create_job.json()["id"]
+
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, stale_job_id)
+        job.status = "processing"
+        job.progress = 20
+        job.started_at = datetime.utcnow() - timedelta(minutes=20)
+        db.commit()
+    finally:
+        db.close()
+
+    source_preview = Path("test_storage") / "reconciled_preview.mp4"
+    source_preview.write_bytes(b"rendered-preview")
+    monkeypatch.setattr(
+        ProjectRenderService,
+        "render_preview",
+        lambda self, project_id, background_video_path, parsed_lines, style_preset: {
+            "output_path": str(source_preview),
+            "duration_seconds": 1.2,
+        },
+    )
+
+    next_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert next_job.status_code == 201
+    assert next_job.json()["id"] != stale_job_id
+
+    db = SessionLocal()
+    try:
+        stale_job = db.get(GenerationJob, stale_job_id)
+        assert stale_job.status == "failed"
+        assert stale_job.error_message == STALE_GENERATION_ERROR
+        assert stale_job.finished_at is not None
+    finally:
+        db.close()
 
 
 def test_youtube_link_refresh_and_reconnect_required(auth_client: TestClient, monkeypatch):

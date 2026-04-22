@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -19,7 +19,11 @@ from app.schemas import (
 from app.services.audit import record_audit
 from app.services.notifications import create_notification
 from app.services.project_state import sync_project_state, to_generation_summary, to_output_video_summary
-from app.tasks.generation import process_generation_job
+from app.tasks.generation import (
+    ACTIVE_GENERATION_STATUSES,
+    process_generation_job,
+    reconcile_stale_generation_jobs,
+)
 
 router = APIRouter(tags=["generation"])
 
@@ -38,6 +42,7 @@ def create_generation_job(
     project_id: int,
     payload: GenerationJobCreateRequest,
     request: Request,
+    response: Response,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -60,6 +65,24 @@ def create_generation_job(
         )
     if not script_revision:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Project needs an editable script")
+
+    reconciled = reconcile_stale_generation_jobs(db, project_id=project.id)
+    if reconciled:
+        db.commit()
+
+    existing_active_job = (
+        db.query(GenerationJob)
+        .filter(
+            GenerationJob.project_id == project.id,
+            GenerationJob.output_kind == payload.output_kind,
+            GenerationJob.status.in_(tuple(ACTIVE_GENERATION_STATUSES)),
+        )
+        .order_by(GenerationJob.created_at.desc())
+        .first()
+    )
+    if existing_active_job:
+        response.status_code = status.HTTP_200_OK
+        return to_generation_summary(existing_active_job)
 
     job = GenerationJob(
         project_id=project.id,
@@ -106,6 +129,34 @@ def get_generation_job(job_id: int, current_user: User = Depends(get_current_use
     )
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation job not found")
+    reconciled = reconcile_stale_generation_jobs(db, project_id=job.project_id)
+    if reconciled and job.id in reconciled:
+        db.commit()
+        db.refresh(job)
+    return to_generation_summary(job)
+
+
+@router.get("/projects/{project_id}/generation-jobs/active", response_model=GenerationJobSummary)
+def get_active_generation_job(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = get_owned_project(db, current_user.id, project_id)
+    reconciled = reconcile_stale_generation_jobs(db, project_id=project.id)
+    if reconciled:
+        db.commit()
+    job = (
+        db.query(GenerationJob)
+        .filter(
+            GenerationJob.project_id == project.id,
+            GenerationJob.status.in_(tuple(ACTIVE_GENERATION_STATUSES)),
+        )
+        .order_by(GenerationJob.created_at.desc())
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active generation job")
     return to_generation_summary(job)
 
 
