@@ -32,6 +32,23 @@ def test_background_presets_are_loaded_from_bundled_media_dir(auth_client: TestC
     ]
 
 
+def test_character_portrait_prefers_bundled_media_dir_over_runtime(auth_client: TestClient, tmp_path: Path):
+    bundled_characters = Path("test_storage") / "bundled" / "characters"
+    runtime_characters = Path("test_storage") / "characters"
+    bundled_characters.mkdir(parents=True, exist_ok=True)
+    runtime_characters.mkdir(parents=True, exist_ok=True)
+
+    bundled_portrait = bundled_characters / "speaker_1.png"
+    runtime_portrait = runtime_characters / "speaker_1.png"
+    bundled_portrait.write_bytes(b"bundled-portrait")
+    runtime_portrait.write_bytes(b"runtime-portrait")
+
+    service = ProjectRenderService()
+    resolved = service._resolve_character_portrait("Host", 0, tmp_path)
+
+    assert resolved == bundled_portrait
+
+
 def _create_project_flow(client: TestClient) -> dict:
     project = client.post("/projects", json={"name": "First Project", "target_platform": "youtube"})
     assert project.status_code == 201

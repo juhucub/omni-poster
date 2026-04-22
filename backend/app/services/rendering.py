@@ -218,17 +218,48 @@ class ProjectRenderService:
         return cast
 
     def _resolve_character_portrait(self, speaker: str, slot_index: int, work_dir: Path) -> Path:
-        character_dir = Path(settings.MEDIA_DIR) / "characters"
-        character_dir.mkdir(parents=True, exist_ok=True)
         slug = self._slugify(speaker)
-        candidates = [
-            character_dir / f"{slug}.png",
-            character_dir / f"{slug}_{slot_index + 1}.png",
-            character_dir / f"speaker_{slot_index + 1}.png",
+        bundled_character_dir = Path(settings.BUNDLED_MEDIA_DIR) / "characters"
+        runtime_character_dir = Path(settings.MEDIA_DIR) / "characters"
+        runtime_character_dir.mkdir(parents=True, exist_ok=True)
+
+        lookup_groups = [
+            (
+                "bundled",
+                [
+                    bundled_character_dir / f"{slug}.png",
+                    bundled_character_dir / f"speaker_{slot_index + 1}.png",
+                ],
+            ),
+            (
+                "runtime",
+                [
+                    runtime_character_dir / f"{slug}.png",
+                    runtime_character_dir / f"{slug}_{slot_index + 1}.png",
+                    runtime_character_dir / f"speaker_{slot_index + 1}.png",
+                ],
+            ),
         ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
+
+        for source, candidates in lookup_groups:
+            for candidate in candidates:
+                if candidate.exists():
+                    logger.info(
+                        "Resolved portrait for speaker=%s slot=%s from %s path=%s",
+                        speaker,
+                        slot_index + 1,
+                        source,
+                        candidate,
+                    )
+                    return candidate
+
+        logger.info(
+            "No portrait asset found for speaker=%s slot=%s in bundled=%s or runtime=%s; generating fallback portrait",
+            speaker,
+            slot_index + 1,
+            bundled_character_dir,
+            runtime_character_dir,
+        )
         return self._build_generated_portrait(speaker, slot_index, work_dir)
 
     def _build_generated_portrait(self, speaker: str, slot_index: int, work_dir: Path) -> Path:
