@@ -1,10 +1,9 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { History, Link as LinkIcon, LayoutDashboard, Wand2 } from 'lucide-react';
+import { History, Link as LinkIcon, LayoutDashboard } from 'lucide-react';
 
 const navItems = [
   { icon: <LayoutDashboard size={18} />, label: 'Projects', path: '/projects' },
-  { icon: <Wand2 size={18} />, label: 'Create', path: '/projects/new' },
   { icon: <LinkIcon size={18} />, label: 'Accounts', path: '/accounts' },
   { icon: <History size={18} />, label: 'Publish History', path: '/history' },
 ];

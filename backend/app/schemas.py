@@ -87,11 +87,19 @@ class SocialAccountListResponse(BaseModel):
 
 class OAuthStartResponse(BaseModel):
     authorization_url: str
+    state: str
 
 
 class ProjectCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     target_platform: str = "youtube"
+
+    @field_validator("target_platform")
+    @classmethod
+    def validate_target_platform(cls, value: str) -> str:
+        if value != "youtube":
+            raise ValueError("Only YouTube Shorts is supported in this MVP.")
+        return value
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -181,6 +189,14 @@ class PublishJobCreateRequest(BaseModel):
     publish_mode: Literal["now", "schedule"]
     scheduled_for: datetime | None = None
 
+    @field_validator("scheduled_for")
+    @classmethod
+    def validate_schedule(cls, value: datetime | None, info) -> datetime | None:
+        publish_mode = info.data.get("publish_mode")
+        if publish_mode == "schedule" and value is None:
+            raise ValueError("scheduled_for is required when publish_mode is 'schedule'.")
+        return value
+
 
 class PublishJobSummary(BaseModel):
     id: int
@@ -235,4 +251,3 @@ class ProjectListResponse(BaseModel):
 
 class OkResponse(BaseModel):
     ok: bool = True
-

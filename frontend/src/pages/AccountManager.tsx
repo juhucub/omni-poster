@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import apiClient from '../api/client';
 import type { SocialAccount } from '../api/models';
@@ -7,7 +8,12 @@ import Sidebar from '../components/Sidebar';
 const AccountManager: React.FC = () => {
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const oauthStatus = searchParams.get('youtube_oauth');
+  const oauthMessage = searchParams.get('message');
 
   const loadAccounts = async () => {
     try {
@@ -23,23 +29,48 @@ const AccountManager: React.FC = () => {
     loadAccounts();
   }, []);
 
+  useEffect(() => {
+    if (!oauthStatus) {
+      return;
+    }
+
+    if (oauthStatus === 'success') {
+      setInfo('YouTube account linked successfully.');
+      loadAccounts();
+    } else if (oauthStatus === 'error') {
+      setError(oauthMessage || 'YouTube linking failed.');
+    }
+
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('youtube_oauth');
+    nextParams.delete('message');
+    nextParams.delete('account_id');
+    setSearchParams(nextParams, { replace: true });
+  }, [oauthMessage, oauthStatus, searchParams, setSearchParams]);
+
+  const reconnectRequired = useMemo(
+    () => accounts.filter((account) => account.status === 'reconnect_required').length,
+    [accounts]
+  );
+
   const connectYoutube = async () => {
     try {
       setBusy(true);
       const response = await apiClient.post<{ authorization_url: string }>('/social-accounts/youtube/connect/start');
-      const authUrl = response.data.authorization_url;
-      const backendBase = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-      if (authUrl.startsWith(backendBase)) {
-        const callbackPath = authUrl.replace(backendBase, '');
-        await apiClient.get(callbackPath);
-        await loadAccounts();
-      } else {
-        window.location.href = authUrl;
-      }
+      window.location.href = response.data.authorization_url;
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to start YouTube linking.');
-    } finally {
       setBusy(false);
+    }
+  };
+
+  const refreshAccount = async (accountId: number) => {
+    try {
+      await apiClient.post(`/social-accounts/${accountId}/refresh`);
+      setInfo('Account token refreshed.');
+      await loadAccounts();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to refresh account.');
     }
   };
 
@@ -63,8 +94,14 @@ const AccountManager: React.FC = () => {
             <p className="mt-3 text-slate-400">
               Link the destination channel before you approve and publish a Shorts project.
             </p>
+            {reconnectRequired > 0 && (
+              <p className="mt-3 text-amber-300">
+                {reconnectRequired} linked account needs to reconnect before it can publish again.
+              </p>
+            )}
           </header>
 
+          {info && <div className="rounded-2xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-3 text-emerald-200">{info}</div>}
           {error && <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-rose-200">{error}</div>}
 
           <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
@@ -73,7 +110,7 @@ const AccountManager: React.FC = () => {
               disabled={busy}
               className="rounded-2xl bg-cyan-300 px-5 py-4 font-medium text-slate-950 disabled:opacity-60"
             >
-              {busy ? 'Connecting...' : 'Connect YouTube Account'}
+              {busy ? 'Redirecting to Google...' : 'Connect YouTube Account'}
             </button>
           </section>
 
@@ -91,12 +128,22 @@ const AccountManager: React.FC = () => {
                     <h2 className="mt-2 text-2xl font-semibold">{account.channel_title}</h2>
                     <p className="mt-2 text-sm text-slate-400">{account.channel_id}</p>
                   </div>
-                  <button
-                    onClick={() => disconnectAccount(account.id)}
-                    className="rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10"
-                  >
-                    Disconnect
-                  </button>
+                  <div className="flex flex-wrap items-center gap-3">
+                    {account.status === 'reconnect_required' && (
+                      <button
+                        onClick={() => refreshAccount(account.id)}
+                        className="rounded-2xl bg-amber-300 px-4 py-3 text-sm font-medium text-slate-950"
+                      >
+                        Refresh Token
+                      </button>
+                    )}
+                    <button
+                      onClick={() => disconnectAccount(account.id)}
+                      className="rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10"
+                    >
+                      Disconnect
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}

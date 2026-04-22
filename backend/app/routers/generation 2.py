@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
-from app.core.http_rate_limit import enforce_rate_limit
 from app.dependencies import get_current_user, get_db
-from app.models import Asset, GenerationJob, Project, User
+from app.db import SessionLocal
+from app.models import Asset, GenerationJob, OutputVideo, Project, User
 from app.routers.projects import get_owned_project
 from app.schemas import GenerationJobCreateRequest, GenerationJobSummary, OkResponse
-from app.tasks.generation import process_generation_job
+from app.services.project_state import sync_project_state
+from app.services.rendering import ProjectRenderService
+from app.services.storage import guess_mime_type, store_generated_file
 
 router = APIRouter(tags=["generation"])
 
@@ -37,20 +38,88 @@ def to_generation_summary(job: GenerationJob) -> GenerationJobSummary:
     )
 
 
+def process_generation_job(job_id: int) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        if not job:
+            return
+        project = db.get(Project, job.project_id)
+        asset = db.get(Asset, job.input_asset_id)
+        if not job or not project or not asset or not job.script_revision:
+            return
+
+        job.status = "processing"
+        job.progress = 20
+        job.started_at = datetime.utcnow()
+        project.status = "rendering"
+        db.commit()
+
+        render_service = ProjectRenderService()
+        result = render_service.render_preview(
+            project_id=project.id,
+            background_video_path=asset.storage_key,
+            parsed_lines=job.script_revision.parsed_lines_json,
+            style_preset=job.style_preset,
+        )
+
+        generated_path = result["output_path"].replace("file://", "")
+        stored_path = store_generated_file(project.id, generated_path, f"preview_{job.id}.mp4")
+        output_asset = Asset(
+            user_id=project.user_id,
+            project_id=project.id,
+            kind="render_output",
+            storage_key=str(stored_path),
+            original_filename=stored_path.name,
+            mime_type=guess_mime_type(str(stored_path)),
+            size_bytes=stored_path.stat().st_size,
+            duration_ms=int((result.get("duration_seconds") or 0) * 1000) or None,
+        )
+        db.add(output_asset)
+        db.flush()
+
+        output_video = OutputVideo(
+            project_id=project.id,
+            generation_job_id=job.id,
+            asset_id=output_asset.id,
+            is_preview=True,
+            duration_ms=output_asset.duration_ms,
+        )
+        db.add(output_video)
+        db.flush()
+
+        project.current_output_video_id = output_video.id
+        project.background_style = job.style_preset
+        project.approved_at = None
+        job.status = "completed"
+        job.progress = 100
+        job.finished_at = datetime.utcnow()
+        sync_project_state(project)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.get(GenerationJob, job_id)
+        if job:
+            project = db.get(Project, job.project_id)
+            job.status = "failed"
+            job.progress = 0
+            job.error_message = str(exc)
+            job.finished_at = datetime.utcnow()
+            if project:
+                project.status = "failed"
+            db.commit()
+    finally:
+        db.close()
+
+
 @router.post("/projects/{project_id}/generation-jobs", response_model=GenerationJobSummary, status_code=status.HTTP_201_CREATED)
 def create_generation_job(
     project_id: int,
     payload: GenerationJobCreateRequest,
-    request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    enforce_rate_limit(
-        "generation.create",
-        str(current_user.id),
-        limit=settings.HEAVY_ENDPOINT_RATE_LIMIT_COUNT,
-        window_seconds=settings.HEAVY_ENDPOINT_RATE_LIMIT_WINDOW_SECONDS,
-    )
     project = get_owned_project(db, current_user.id, project_id)
     background_asset = latest_background_asset(project)
     if not background_asset:
@@ -77,7 +146,7 @@ def create_generation_job(
     db.add(job)
     db.commit()
     db.refresh(job)
-    process_generation_job.delay(job.id)
+    background_tasks.add_task(process_generation_job, job.id)
     return to_generation_summary(job)
 
 
@@ -110,6 +179,6 @@ def cancel_generation_job(job_id: int, current_user: User = Depends(get_current_
     job.finished_at = datetime.utcnow()
     project = db.get(Project, job.project_id)
     if project:
-        project.status = "assets_ready"
+        sync_project_state(project)
     db.commit()
     return OkResponse()

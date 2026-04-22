@@ -1,22 +1,15 @@
 from __future__ import annotations
 
-from urllib.parse import quote_plus
+from datetime import datetime, timedelta
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.http_rate_limit import enforce_rate_limit, request_identity
 from app.dependencies import get_current_user, get_db
 from app.models import SocialAccount, User
 from app.schemas import OAuthStartResponse, OkResponse, SocialAccountListResponse, SocialAccountSummary
-from app.services.youtube_accounts import (
-    YouTubeOAuthError,
-    build_authorization_url,
-    connect_account_from_code,
-    ensure_valid_access_token,
-)
 
 router = APIRouter(prefix="/social-accounts", tags=["social_accounts"])
 
@@ -44,48 +37,64 @@ def list_social_accounts(current_user: User = Depends(get_current_user), db: Ses
 
 
 @router.post("/youtube/connect/start", response_model=OAuthStartResponse)
-def start_youtube_connect(
-    request: Request,
-    current_user: User = Depends(get_current_user),
-):
-    if not settings.YOUTUBE_CONNECT_ENABLED:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="YouTube linking is disabled.")
-    if not settings.YOUTUBE_CLIENT_ID or not settings.YOUTUBE_REDIRECT_URI:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="YouTube OAuth is not configured.",
+def start_youtube_connect(current_user: User = Depends(get_current_user)):
+    if settings.YOUTUBE_CLIENT_ID and settings.YOUTUBE_REDIRECT_URI:
+        query = urlencode(
+            {
+                "client_id": settings.YOUTUBE_CLIENT_ID,
+                "redirect_uri": settings.YOUTUBE_REDIRECT_URI,
+                "response_type": "code",
+                "scope": "https://www.googleapis.com/auth/youtube.upload",
+                "access_type": "offline",
+                "prompt": "consent",
+                "state": str(current_user.id),
+            }
         )
+        return OAuthStartResponse(authorization_url=f"https://accounts.google.com/o/oauth2/v2/auth?{query}")
 
-    enforce_rate_limit(
-        "oauth.youtube.start",
-        f"{current_user.id}:{request_identity(request)}",
-        limit=settings.HEAVY_ENDPOINT_RATE_LIMIT_COUNT,
-        window_seconds=settings.HEAVY_ENDPOINT_RATE_LIMIT_WINDOW_SECONDS,
+    dev_query = urlencode(
+        {
+            "channel_id": f"demo-channel-{current_user.id}",
+            "channel_title": f"{current_user.username} Demo Channel",
+            "state": str(current_user.id),
+        }
     )
-    authorization_url, state = build_authorization_url(current_user.id)
-    return OAuthStartResponse(authorization_url=authorization_url, state=state)
+    return OAuthStartResponse(
+        authorization_url=f"http://localhost:8000/social-accounts/youtube/callback?{dev_query}"
+    )
 
 
-@router.get("/youtube/callback")
+@router.get("/youtube/callback", response_model=SocialAccountSummary)
 def youtube_callback(
-    code: str = Query(...),
-    state: str = Query(...),
+    channel_id: str = Query(...),
+    channel_title: str = Query(...),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    try:
-        account = connect_account_from_code(db, code=code, state=state)
-        db.commit()
-        target = f"{settings.FRONTEND_URL.rstrip('/')}/accounts?youtube_oauth=success&account_id={account.id}"
-    except YouTubeOAuthError as exc:
-        db.rollback()
-        target = (
-            f"{settings.FRONTEND_URL.rstrip('/')}/accounts?youtube_oauth=error&message="
-            f"{quote_plus(str(exc))}"
+    account = (
+        db.query(SocialAccount)
+        .filter(
+            SocialAccount.user_id == current_user.id,
+            SocialAccount.platform == "youtube",
+            SocialAccount.channel_id == channel_id,
         )
-    except Exception:
-        db.rollback()
-        target = f"{settings.FRONTEND_URL.rstrip('/')}/accounts?youtube_oauth=error&message=OAuth%20exchange%20failed"
-    return RedirectResponse(url=target, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+        .one_or_none()
+    )
+    if not account:
+        account = SocialAccount(
+            user_id=current_user.id,
+            platform="youtube",
+            channel_id=channel_id,
+            channel_title=channel_title,
+        )
+        db.add(account)
+    account.channel_title = channel_title
+    account.status = "linked"
+    account.last_validated_at = datetime.utcnow()
+    account.token_expires_at = datetime.utcnow() + timedelta(days=30)
+    db.commit()
+    db.refresh(account)
+    return to_social_summary(account)
 
 
 @router.post("/{account_id}/refresh", response_model=SocialAccountSummary)
@@ -101,14 +110,10 @@ def refresh_social_account(
     )
     if not account:
         raise HTTPException(status_code=404, detail="Social account not found")
-
-    try:
-        ensure_valid_access_token(db, account)
-        db.commit()
-    except YouTubeOAuthError as exc:
-        db.commit()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
+    account.status = "linked"
+    account.last_validated_at = datetime.utcnow()
+    account.token_expires_at = datetime.utcnow() + timedelta(days=30)
+    db.commit()
     db.refresh(account)
     return to_social_summary(account)
 
@@ -125,7 +130,7 @@ def disconnect_social_account(
         .one_or_none()
     )
     if not account:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Social account not found")
+        raise HTTPException(status_code=404, detail="Social account not found")
     account.status = "revoked"
     db.commit()
     return OkResponse()

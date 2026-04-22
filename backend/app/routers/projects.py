@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
-from app.models import Project, User
+from app.models import Project, SocialAccount, User
 from app.schemas import OkResponse, ProjectCreateRequest, ProjectListResponse, ProjectSummary, ProjectUpdateRequest
 from app.services.project_state import sync_project_state, to_project_summary
 
@@ -65,6 +65,17 @@ def update_project(
     if payload.background_style is not None:
         project.background_style = payload.background_style
     if payload.selected_social_account_id is not None:
+        account = (
+            db.query(SocialAccount)
+            .filter(
+                SocialAccount.id == payload.selected_social_account_id,
+                SocialAccount.user_id == current_user.id,
+                SocialAccount.status != "revoked",
+            )
+            .one_or_none()
+        )
+        if not account:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Social account not found")
         project.selected_social_account_id = payload.selected_social_account_id
     sync_project_state(project)
     db.commit()

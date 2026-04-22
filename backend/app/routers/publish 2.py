@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import datetime
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
-from app.core.http_rate_limit import enforce_rate_limit
 from app.dependencies import get_current_user, get_db
-from app.models import OutputVideo, PlatformMetadata, Project, PublishJob, SocialAccount, User
+from app.db import SessionLocal
+from app.models import PlatformMetadata, Project, PublishJob, PublishedPost, SocialAccount, User
 from app.routers.projects import get_owned_project
 from app.schemas import OkResponse, PublishJobCreateRequest, PublishJobSummary
-from app.tasks.publish import process_publish_job
 
 router = APIRouter(tags=["publish"])
 
@@ -32,25 +32,76 @@ def to_publish_job_summary(job: PublishJob) -> PublishJobSummary:
     )
 
 
+def process_publish_job(job_id: int) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(PublishJob, job_id)
+        if not job:
+            return
+        project = db.get(Project, job.project_id)
+        if not project:
+            return
+
+        if job.status == "scheduled" and job.scheduled_for and job.scheduled_for > datetime.utcnow():
+            return
+
+        job.status = "publishing"
+        job.attempt_count += 1
+        job.started_at = datetime.utcnow()
+        project.status = "publishing"
+        db.commit()
+
+        account = db.get(SocialAccount, job.social_account_id)
+        metadata = db.get(PlatformMetadata, job.platform_metadata_id)
+        if not account or account.platform != "youtube":
+            raise RuntimeError("Publish target is invalid")
+
+        if not account.access_token_encrypted:
+            raise RuntimeError(
+                "YouTube publishing integration is not configured yet. Link a real account/token flow before launch."
+            )
+
+        post = PublishedPost(
+            project_id=project.id,
+            publish_job_id=job.id,
+            social_account_id=account.id,
+            platform="youtube",
+            external_post_id=f"yt-{job.id}",
+            external_url=f"https://youtube.com/shorts/yt-{job.id}",
+        )
+        db.add(post)
+        db.flush()
+
+        job.status = "published"
+        job.finished_at = datetime.utcnow()
+        project.status = "published"
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.get(PublishJob, job_id)
+        if job:
+            project = db.get(Project, job.project_id)
+            job.status = "failed"
+            job.last_error = str(exc)
+            job.finished_at = datetime.utcnow()
+            if project:
+                project.status = "failed"
+            db.commit()
+    finally:
+        db.close()
+
+
 @router.post("/projects/{project_id}/publish-jobs", response_model=PublishJobSummary, status_code=status.HTTP_201_CREATED)
 def create_publish_job(
     project_id: int,
     payload: PublishJobCreateRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    enforce_rate_limit(
-        "publish.create",
-        str(current_user.id),
-        limit=settings.HEAVY_ENDPOINT_RATE_LIMIT_COUNT,
-        window_seconds=settings.HEAVY_ENDPOINT_RATE_LIMIT_WINDOW_SECONDS,
-    )
     project = get_owned_project(db, current_user.id, project_id)
     if project.status != "approved":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Project must be approved before publishing",
-        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Project must be approved before publishing")
 
     account = (
         db.query(SocialAccount)
@@ -59,10 +110,6 @@ def create_publish_job(
     )
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Social account not found")
-    if account.platform != "youtube":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only YouTube publishing is supported")
-    if account.status != "linked":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Reconnect the YouTube account before publishing")
 
     metadata = (
         db.query(PlatformMetadata)
@@ -72,31 +119,21 @@ def create_publish_job(
     if not metadata:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Metadata not found")
 
-    output_video = (
-        db.query(OutputVideo)
-        .filter(OutputVideo.id == payload.output_video_id, OutputVideo.project_id == project.id)
-        .one_or_none()
-    )
-    if not output_video:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview output not found")
-    if project.current_output_video_id != output_video.id:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only the current approved preview can be published")
-
     job = PublishJob(
         project_id=project.id,
         social_account_id=account.id,
-        output_video_id=output_video.id,
+        output_video_id=payload.output_video_id,
         platform_metadata_id=metadata.id,
         status="queued" if payload.publish_mode == "now" else "scheduled",
         scheduled_for=payload.scheduled_for if payload.publish_mode == "schedule" else None,
     )
-    project.status = "publishing" if job.status == "queued" else "scheduled"
+    project.status = job.status if job.status == "scheduled" else "publishing"
     db.add(job)
     db.commit()
     db.refresh(job)
 
     if job.status == "queued":
-        process_publish_job.delay(job.id)
+        background_tasks.add_task(process_publish_job, job.id)
 
     return to_publish_job_summary(job)
 
@@ -117,6 +154,7 @@ def get_publish_job(job_id: int, current_user: User = Depends(get_current_user),
 @router.post("/publish-jobs/{job_id}/retry", response_model=PublishJobSummary)
 def retry_publish_job(
     job_id: int,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -130,13 +168,9 @@ def retry_publish_job(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Publish job not found")
     if job.status != "failed":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only failed jobs can retry")
-    job.status = "queued"
-    job.last_error = None
-    project = db.get(Project, job.project_id)
-    if project:
-        project.status = "publishing"
+    job.status = "retrying"
     db.commit()
-    process_publish_job.delay(job.id)
+    background_tasks.add_task(process_publish_job, job.id)
     return to_publish_job_summary(job)
 
 
@@ -153,8 +187,5 @@ def cancel_publish_job(job_id: int, current_user: User = Depends(get_current_use
     if job.status != "scheduled":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only scheduled jobs can be canceled")
     job.status = "canceled"
-    project = db.get(Project, job.project_id)
-    if project:
-        project.status = "approved"
     db.commit()
     return OkResponse()

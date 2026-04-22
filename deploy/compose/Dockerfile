@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt requirements.txt
 RUN pip install -r requirements.txt
 
+COPY backend/alembic.ini ./alembic.ini
+COPY backend/alembic ./alembic
 COPY backend/app ./app
 
 # default command is uvicorn (overridden in compose for worker/beat)

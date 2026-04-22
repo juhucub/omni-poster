@@ -5,7 +5,6 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import AccountManager from './pages/AccountManager';
 import AuthPage from './pages/AuthPage';
-import LandingPage from './pages/LandingPage';
 import ProjectEditorPage from './pages/ProjectEditorPage';
 import ProjectsPage from './pages/ProjectsPage';
 import PublishHistoryPage from './pages/PublishHistoryPage';
@@ -16,18 +15,9 @@ const AppRoutes: React.FC = () => {
 
   return (
     <Routes>
-      <Route path="/home" element={<LandingPage />} />
       <Route path="/login" element={isAuthenticated ? <Navigate to="/projects" replace /> : <AuthPage />} />
       <Route
         path="/projects"
-        element={
-          <ProtectedRoute>
-            <ProjectsPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/projects/new"
         element={
           <ProtectedRoute>
             <ProjectsPage />

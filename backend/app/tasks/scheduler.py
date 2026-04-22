@@ -1,44 +1,41 @@
-from ..celery_app import celery
+from __future__ import annotations
+
+from datetime import datetime
+
 from sqlalchemy.orm import Session
-from ..db import SessionLocal
-from ..models import Creator
-from .crawl import crawl_creator_task
 
-TIER_LIMITS = {"T0": 20, "T1": 10, "T2": 5}
+from app.celery_app import celery
+from app.db import SessionLocal
+from app.models import PublishJob
+from app.tasks.publish import process_publish_job
 
 
-# Celery entrypoint used by Celery Beat (see celery_app.py) to enqueue crawl jobs by tier.
-# Inputs:
-#   - tier (str): One of "T0", "T1", "T2" (or future tiers). Determines freshness/limits.
-# Returns:
-#   - Dict[str, Any]: {"enqueued": <count>, "tier": <tier>} for lightweight monitoring.
-# Side effects:
-#   - Reads from the DB to select creators; enqueues a Celery task per selected creator.
-#   - No writes to the DB here; downstream crawl task performs upserts/snapshots.
-# Depends on:
-#   - SessionLocal for DB connection.
-#   - Creator model with `platform`, `external_id`, optional `tier`, and `handle` fields.
-#   - `crawl_creator_task` to execute the actual crawling work.
-@celery.task(name="app.tasks.scheduler.enqueue_tier")
-def enqueue_tier(tier: str):
+@celery.task(name="app.tasks.scheduler.dispatch_due_publish_jobs")
+def dispatch_due_publish_jobs(limit: int = 100) -> dict:
     db: Session = SessionLocal()
+    now = datetime.utcnow()
     try:
-        #select creators w a non-null handle 
-        creators = db.query(Creator).filter(Creator.handle != None).all()
-        # TODO: add a real tier column; for now, naive filter by name/tag
-        selected = [c for c in creators if getattr(c, "tier", "T2") == tier]
-
-        #ddetermine hgow many recent videos to request per creator for this tier
-        limit = TIER_LIMITS.get(tier, 5)
-        for c in selected:
-            crawl_creator_task.apply_async(kwargs={
-                "platform": c.platform,
-                "creator_external_id": c.external_id,
-                "latest_n": limit,
-                "include_comments": False,
-            }, priority=5       #FIXME: Map priority to tier (T0=10, T1=5, T2=1)
+        jobs = (
+            db.query(PublishJob)
+            .filter(
+                PublishJob.status == "scheduled",
+                PublishJob.scheduled_for.is_not(None),
+                PublishJob.scheduled_for <= now,
             )
+            .order_by(PublishJob.scheduled_for.asc())
+            .limit(limit)
+            .all()
+        )
 
-        return {"enqueued": len(selected), "tier": tier}
+        dispatched = 0
+        for job in jobs:
+            job.status = "queued"
+            dispatched += 1
+        db.commit()
+
+        for job in jobs:
+            process_publish_job.delay(job.id)
+
+        return {"dispatched": dispatched}
     finally:
         db.close()

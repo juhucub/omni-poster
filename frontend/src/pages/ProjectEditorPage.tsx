@@ -29,6 +29,12 @@ const ProjectEditorPage: React.FC = () => {
     () => assets.find((asset) => asset.kind === 'background_video') || null,
     [assets]
   );
+  const selectedAccount = useMemo(
+    () => accounts.find((account) => account.id === (project?.selected_social_account_id || accounts[0]?.id)) || null,
+    [accounts, project?.selected_social_account_id]
+  );
+
+  const toUtcIso = (value: string) => (value ? new Date(value).toISOString() : null);
 
   const loadAll = async () => {
     try {
@@ -79,6 +85,26 @@ const ProjectEditorPage: React.FC = () => {
 
     return () => window.clearInterval(timer);
   }, [generationJob]);
+
+  useEffect(() => {
+    if (!publishJob || !['queued', 'publishing', 'retrying', 'scheduled'].includes(publishJob.status)) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await apiClient.get<PublishJob>(`/publish-jobs/${publishJob.id}`);
+        setPublishJob(response.data);
+        if (['published', 'failed', 'canceled'].includes(response.data.status)) {
+          await loadAll();
+        }
+      } catch {
+        window.clearInterval(timer);
+      }
+    }, 2000);
+
+    return () => window.clearInterval(timer);
+  }, [publishJob]);
 
   const uploadBackground = async () => {
     if (!selectedFile) {
@@ -186,7 +212,7 @@ const ProjectEditorPage: React.FC = () => {
         output_video_id: project.current_output_video_id,
         platform_metadata_id: metadata.id,
         publish_mode: publishMode,
-        scheduled_for: publishMode === 'schedule' ? scheduledFor : null,
+        scheduled_for: publishMode === 'schedule' ? toUtcIso(scheduledFor) : null,
       });
       setPublishJob(response.data);
       await loadAll();
@@ -425,10 +451,16 @@ const ProjectEditorPage: React.FC = () => {
                     {accounts.length === 0 && <option value="">Link a YouTube account first</option>}
                     {accounts.map((account) => (
                       <option key={account.id} value={account.id}>
-                        {account.channel_title}
+                        {account.channel_title} ({account.status})
                       </option>
                     ))}
                   </select>
+
+                  {selectedAccount?.status === 'reconnect_required' && (
+                    <div className="rounded-2xl border border-amber-300/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                      This account needs to reconnect before it can publish.
+                    </div>
+                  )}
 
                   <div className="flex gap-3">
                     <button
@@ -456,7 +488,13 @@ const ProjectEditorPage: React.FC = () => {
 
                   <button
                     onClick={submitPublishJob}
-                    disabled={!project?.current_output_video_id || !metadata || accounts.length === 0 || busy === 'publish'}
+                    disabled={
+                      !project?.current_output_video_id ||
+                      !metadata ||
+                      accounts.length === 0 ||
+                      selectedAccount?.status !== 'linked' ||
+                      busy === 'publish'
+                    }
                     className="rounded-2xl bg-cyan-300 px-4 py-3 font-medium text-slate-950 disabled:opacity-60"
                   >
                     {busy === 'publish' ? 'Submitting...' : publishMode === 'now' ? 'Create Publish Job' : 'Schedule Publish Job'}
