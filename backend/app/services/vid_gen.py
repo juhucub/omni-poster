@@ -8,7 +8,6 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 
 from fastapi import HTTPException, status
-from moviepy import CompositeVideoClip
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +55,8 @@ class VideoGenerationService:
             )
         
         try:
-            from moviepy import VideoFileClip, AudioFileClip, CompositeVideoClip
-            
+            from moviepy import AudioFileClip, CompositeVideoClip, ImageClip, VideoFileClip
+
             # Clean file paths (remove file:// prefix if present)
             clean_video_path = self._clean_file_path(video_path)
             clean_audio_path = self._clean_file_path(audio_path) if audio_path else None
@@ -79,19 +78,19 @@ class VideoGenerationService:
             
             # Load video and audio clips
             logger.info(f"Loading video from: {clean_video_path}")
-            video_clip = VideoFileClip(clean_video_path)
-            
+            video_clip = VideoFileClip(clean_video_path).without_audio()
+
             audio_clip = None
             final_video = self._apply_background_style(video_clip, background_style)
             if clean_audio_path:
                 logger.info(f"Loading audio from: {clean_audio_path}")
                 audio_clip = AudioFileClip(clean_audio_path)
-                final_video = final_video.set_audio(audio_clip)
-            
+                final_video = final_video.with_audio(audio_clip)
+
             # Add thumbnail overlay if provided
             if clean_thumbnail_path and os.path.exists(clean_thumbnail_path):
                 logger.info(f"Adding thumbnail overlay from: {clean_thumbnail_path}")
-                final_video = self._add_thumbnail_overlay(final_video, clean_thumbnail_path)
+                final_video = self._add_thumbnail_overlay(final_video, clean_thumbnail_path, ImageClip, CompositeVideoClip)
             
             # Export final video with optimized settings
             logger.info(f"Exporting video to: {output_path}")
@@ -101,7 +100,6 @@ class VideoGenerationService:
                 audio_codec='aac',
                 temp_audiofile='temp-audio.m4a',
                 remove_temp=True,
-                verbose=False,
                 logger=None,  # Suppress moviepy logs
                 preset='medium',  # Balance between speed and quality
                 ffmpeg_params=['-crf', '23']  # Good quality-to-size ratio
@@ -109,15 +107,15 @@ class VideoGenerationService:
             
             processing_time = time.time() - start_time
             
+            # Get file info
+            file_size = output_path.stat().st_size
+            duration = self._get_clip_duration(final_video)
+
             # Cleanup clips to free memory
             video_clip.close()
             if audio_clip:
                 audio_clip.close()
             final_video.close()
-            
-            # Get file info
-            file_size = output_path.stat().st_size
-            duration = self._get_video_duration(str(output_path))
             
             logger.info(
                 f"Video generation completed: {output_filename} "
@@ -214,33 +212,47 @@ class VideoGenerationService:
         
         # Remove file:// prefix if present
         clean_path = file_path.replace("file://", "")
-        
-        # Convert to absolute path
-        return os.path.abspath(clean_path)
+        candidate = Path(clean_path)
+        if candidate.is_absolute():
+            return str(candidate)
+
+        repo_root = Path(__file__).resolve().parents[3]
+        search_paths = [Path.cwd() / candidate, repo_root / candidate]
+        if candidate.parts and candidate.parts[0] == "backend":
+            search_paths.append(repo_root / Path(*candidate.parts[1:]))
+
+        for path in search_paths:
+            if path.exists():
+                return str(path.resolve())
+
+        return str((repo_root / candidate).resolve())
     
-    def _add_thumbnail_overlay(self, video_clip, thumbnail_path: str):
+    def _add_thumbnail_overlay(self, video_clip, thumbnail_path: str, image_clip_cls, composite_clip_cls):
         """Add thumbnail as overlay at the beginning."""
         try:
-            from moviepy import ImageClip
-            
             # Verify thumbnail exists
             if not os.path.exists(thumbnail_path):
                 logger.warning(f"Thumbnail file not found: {thumbnail_path}")
                 return video_clip
             
             # Create thumbnail clip (show for first 3 seconds)
-            thumbnail_clip = (ImageClip(thumbnail_path)
-                            .set_duration(min(3, video_clip.duration))  # Don't exceed video duration
-                            .resize(height=100)  # Small overlay
-                            .set_position(('right', 'top'))
-                            .set_start(0))
+            thumbnail_clip = (
+                image_clip_cls(thumbnail_path)
+                .with_duration(min(3, video_clip.duration))  # Don't exceed video duration
+                .resized(height=100)  # Small overlay
+                .with_position(("right", "top"))
+                .with_start(0)
+            )
             
             # Composite with main video
-            return CompositeVideoClip([video_clip, thumbnail_clip])
+            return composite_clip_cls([video_clip, thumbnail_clip], size=video_clip.size)
             
         except Exception as e:
             logger.warning(f"Thumbnail overlay failed: {e}")
             return video_clip
+
+    def _get_clip_duration(self, clip) -> float:
+        return float(getattr(clip, "duration", 0) or 0)
         
 def get_video_generation_service() -> VideoGenerationService:
     """

@@ -8,9 +8,14 @@ import jwt
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models import SocialAccount
+from app.models import SocialAccount, UserPreference
 from app.services.crypto import decrypt_secret, encrypt_secret
 from app.services.platforms import capability_for
+
+REQUIRED_YOUTUBE_SCOPES = {
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
+}
 
 
 class YouTubeOAuthError(RuntimeError):
@@ -36,12 +41,18 @@ def parse_oauth_state(state: str) -> int:
 
 def build_authorization_url(user_id: int) -> tuple[str, str]:
     state = build_oauth_state(user_id)
+    configured_scopes = {
+        scope.strip()
+        for scope in settings.YOUTUBE_OAUTH_SCOPE.split()
+        if scope.strip()
+    }
+    requested_scopes = sorted(configured_scopes | REQUIRED_YOUTUBE_SCOPES)
     query = urlencode(
         {
             "client_id": settings.YOUTUBE_CLIENT_ID,
             "redirect_uri": settings.YOUTUBE_REDIRECT_URI,
             "response_type": "code",
-            "scope": settings.YOUTUBE_OAUTH_SCOPE,
+            "scope": " ".join(requested_scopes),
             "access_type": "offline",
             "prompt": "consent",
             "include_granted_scopes": "true",
@@ -83,12 +94,19 @@ def refresh_tokens(refresh_token: str) -> dict:
 
 
 def fetch_channel_identity(access_token: str) -> dict:
-    response = httpx.get(
-        settings.YOUTUBE_CHANNELS_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=30,
-    )
-    response.raise_for_status()
+    try:
+        response = httpx.get(
+            settings.YOUTUBE_CHANNELS_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in {401, 403}:
+            raise YouTubeOAuthError(
+                "Google returned a channel access error. Reconnect the account and grant both upload and channel-read access."
+            ) from exc
+        raise YouTubeOAuthError("Could not read the authenticated YouTube channel.") from exc
     payload = response.json()
     items = payload.get("items") or []
     if not items:
@@ -137,6 +155,9 @@ def upsert_social_account(
         )
         db.add(account)
 
+    account.account_type = account.account_type or "owned_channel"
+    account.capabilities_json = account.capabilities_json or capability_for("youtube").default_capabilities
+    account.default_preference_rank = account.default_preference_rank or 100
     account.channel_title = channel_title
     account.access_token_encrypted = encrypt_secret(access_token)
     if refresh_token:
@@ -146,6 +167,11 @@ def upsert_social_account(
     account.status = "linked"
     account.token_status = "healthy"
     db.flush()
+
+    preference = db.query(UserPreference).filter(UserPreference.user_id == user_id).one_or_none()
+    if preference and preference.default_social_account_id is None:
+        preference.default_social_account_id = account.id
+        db.flush()
     return account
 
 

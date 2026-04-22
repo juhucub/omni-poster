@@ -154,22 +154,21 @@ def upgrade() -> None:
     )
     op.create_index("ix_output_videos_project_id", "output_videos", ["project_id"])
 
-    op.create_foreign_key(
-        "fk_projects_current_script_revision_id",
-        "projects",
-        "script_revisions",
-        ["current_script_revision_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-    op.create_foreign_key(
-        "fk_projects_current_output_video_id",
-        "projects",
-        "output_videos",
-        ["current_output_video_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
+    with op.batch_alter_table("projects") as batch_op:
+        batch_op.create_foreign_key(
+            "fk_projects_current_script_revision_id",
+            "script_revisions",
+            ["current_script_revision_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+        batch_op.create_foreign_key(
+            "fk_projects_current_output_video_id",
+            "output_videos",
+            ["current_output_video_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
 
     op.create_table(
         "platform_metadata",

@@ -79,9 +79,12 @@ def youtube_callback(
             f"{settings.FRONTEND_URL.rstrip('/')}/accounts?youtube_oauth=error&message="
             f"{quote_plus(str(exc))}"
         )
-    except Exception:
+    except Exception as exc:
         db.rollback()
-        target = f"{settings.FRONTEND_URL.rstrip('/')}/accounts?youtube_oauth=error&message=OAuth%20exchange%20failed"
+        target = (
+            f"{settings.FRONTEND_URL.rstrip('/')}/accounts?youtube_oauth=error&message="
+            f"{quote_plus(str(exc) or 'OAuth exchange failed')}"
+        )
     return RedirectResponse(url=target, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 

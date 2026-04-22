@@ -32,7 +32,10 @@ class Settings(BaseSettings):
     YOUTUBE_CLIENT_ID: str | None = None
     YOUTUBE_CLIENT_SECRET: str | None = None
     YOUTUBE_REDIRECT_URI: str | None = None
-    YOUTUBE_OAUTH_SCOPE: str = "https://www.googleapis.com/auth/youtube.upload"
+    YOUTUBE_OAUTH_SCOPE: str = (
+        "https://www.googleapis.com/auth/youtube.upload "
+        "https://www.googleapis.com/auth/youtube.readonly"
+    )
     YOUTUBE_TOKEN_URL: str = "https://oauth2.googleapis.com/token"
     YOUTUBE_CHANNELS_URL: str = "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true"
     YOUTUBE_UPLOAD_URL: str = (

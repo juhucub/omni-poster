@@ -32,14 +32,14 @@ def upgrade() -> None:
     op.add_column("projects", sa.Column("preferred_account_type", sa.String(length=32), nullable=True))
     op.add_column("projects", sa.Column("allowed_platforms_json", sa.JSON(), nullable=False, server_default=sa.text("'[\"youtube\"]'")))
     op.add_column("projects", sa.Column("publish_windows_json", sa.JSON(), nullable=False, server_default=sa.text("'[]'")))
-    op.create_foreign_key(
-        "fk_projects_background_asset_id",
-        "projects",
-        "assets",
-        ["background_asset_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
+    with op.batch_alter_table("projects") as batch_op:
+        batch_op.create_foreign_key(
+            "fk_projects_background_asset_id",
+            "assets",
+            ["background_asset_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
 
     op.add_column("assets", sa.Column("source_type", sa.String(length=32), nullable=False, server_default="upload"))
     op.add_column("assets", sa.Column("preset_key", sa.String(length=64), nullable=True))
@@ -48,14 +48,14 @@ def upgrade() -> None:
 
     op.add_column("script_revisions", sa.Column("parent_revision_id", sa.Integer(), nullable=True))
     op.add_column("script_revisions", sa.Column("generation_provider", sa.String(length=64), nullable=True))
-    op.create_foreign_key(
-        "fk_script_revisions_parent_revision_id",
-        "script_revisions",
-        "script_revisions",
-        ["parent_revision_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
+    with op.batch_alter_table("script_revisions") as batch_op:
+        batch_op.create_foreign_key(
+            "fk_script_revisions_parent_revision_id",
+            "script_revisions",
+            ["parent_revision_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
 
     op.create_table(
         "script_line_items",
