@@ -31,6 +31,8 @@ class ProjectRenderService:
         self.speech_service = LocalSpeechService()
         self.output_dir = Path("./generated_videos")
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.audio_export_fps = settings.TTS_AUDIO_EXPORT_FPS
+        self.audio_export_bitrate = settings.TTS_AUDIO_EXPORT_BITRATE
 
     def render_preview(
         self,
@@ -148,11 +150,22 @@ class ProjectRenderService:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_filename = f"{project_id}_{output_kind}_{timestamp}.mp4"
             output_path = self.output_dir / output_filename
+            logger.info(
+                "Writing composite video project=%s output=%s audio_fps=%s audio_bitrate=%s segment_count=%s duration=%.2fs",
+                project_id,
+                output_path,
+                self.audio_export_fps,
+                self.audio_export_bitrate,
+                len(segments),
+                total_duration,
+            )
             composite.write_videofile(
                 str(output_path),
                 fps=max(int(getattr(background_clip, "fps", 24) or 24), 24),
                 codec="libx264",
                 audio_codec="aac",
+                audio_fps=self.audio_export_fps,
+                audio_bitrate=self.audio_export_bitrate,
                 temp_audiofile=str(work_dir / "temp_audio.m4a"),
                 remove_temp=True,
                 preset="medium",

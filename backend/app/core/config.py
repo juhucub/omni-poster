@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     MEDIA_DIR: str = "backend/storage"
     BUNDLED_MEDIA_DIR: str = "backend/storage"
     COOKIE_SECURE: bool = False
+    TTS_SPEECH_RATE: int = 175
+    TTS_ESPEAK_RATE: int = 155
+    TTS_ESPEAK_PITCH: int = 45
+    TTS_ESPEAK_WORD_GAP: int = 1
+    TTS_ESPEAK_AMPLITUDE: int = 140
+    TTS_ESPEAK_VOICE_SLOT_1: str = "en-us+f3"
+    TTS_ESPEAK_VOICE_SLOT_2: str = "en-gb+m3"
+    TTS_AUDIO_EXPORT_FPS: int = 44100
+    TTS_AUDIO_EXPORT_BITRATE: str = "192k"
 
     YOUTUBE_CLIENT_ID: str | None = None
     YOUTUBE_CLIENT_SECRET: str | None = None
