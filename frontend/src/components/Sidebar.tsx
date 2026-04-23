@@ -1,10 +1,11 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { History, Link as LinkIcon, LayoutDashboard } from 'lucide-react';
+import { History, Link as LinkIcon, LayoutDashboard, Mic2 } from 'lucide-react';
 
 const navItems = [
   { icon: <LayoutDashboard size={18} />, label: 'Projects', path: '/projects' },
   { icon: <LinkIcon size={18} />, label: 'Accounts', path: '/accounts' },
+  { icon: <Mic2 size={18} />, label: 'Voice Lab', path: '/voice-lab' },
   { icon: <History size={18} />, label: 'Publish History', path: '/history' },
 ];
 

@@ -9,7 +9,7 @@ WORKDIR /app
 
 # system deps (psycopg binary ok; add build tools when compile)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates tini && \
+    curl ca-certificates tini espeak-ng && \
     rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt requirements.txt

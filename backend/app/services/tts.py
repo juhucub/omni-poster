@@ -17,6 +17,10 @@ from app.services.character_presets import resolve_character_preset_for_speaker
 logger = logging.getLogger(__name__)
 
 
+class TextToSpeechError(RuntimeError):
+    """Raised when local TTS synthesis cannot proceed."""
+
+
 @dataclass(frozen=True)
 class SpeechSegment:
     speaker: str
@@ -59,10 +63,10 @@ class LocalSpeechService:
         work_dir.mkdir(parents=True, exist_ok=True)
         segments: list[SpeechSegment] = []
         slot_map: dict[str, int] = {}
-        provider = self._detect_provider()
+        available_providers = self._available_providers()
         logger.info(
-            "Synthesizing dialogue with provider=%s speech_rate=%s espeak_rate=%s espeak_pitch=%s espeak_word_gap=%s espeak_amplitude=%s",
-            provider,
+            "Synthesizing dialogue with providers=%s speech_rate=%s espeak_rate=%s espeak_pitch=%s espeak_word_gap=%s espeak_amplitude=%s",
+            sorted(available_providers),
             self.speech_rate,
             self.espeak_rate,
             self.espeak_pitch,
@@ -78,11 +82,11 @@ class LocalSpeechService:
 
             slot_index = slot_map.setdefault(speaker, len(slot_map))
             voice_profile = self._voice_profile_for_speaker(speaker, slot_index)
-            voice = self.DEFAULT_VOICES[slot_index % len(self.DEFAULT_VOICES)]
+            provider = self._provider_for_voice_profile(voice_profile, available_providers)
+            voice = self._resolve_voice_name(voice_profile, slot_index, provider)
             aiff_path = work_dir / f"{index:03d}_{self._slugify(speaker)}_{uuid.uuid4().hex}.aiff"
             audio_path = work_dir / f"{index:03d}_{self._slugify(speaker)}_{uuid.uuid4().hex}.wav"
             if provider == "macos":
-                voice = str(voice_profile.get("voice") or voice)
                 self._run_say(
                     text=text,
                     voice=voice,
@@ -91,7 +95,6 @@ class LocalSpeechService:
                 )
                 self._convert_to_wav(source_path=aiff_path, output_path=audio_path)
             elif provider == "espeak":
-                voice = str(voice_profile.get("voice") or self.espeak_voices[slot_index % len(self.espeak_voices)])
                 self._run_espeak(
                     text=text,
                     voice=voice,
@@ -132,12 +135,25 @@ class LocalSpeechService:
             raise RuntimeError("Cannot render a dialogue video without spoken lines.")
         return segments
 
-    def _detect_provider(self) -> str:
-        if shutil.which("say") and shutil.which("afconvert"):
-            return "macos"
-        if shutil.which("espeak-ng") or shutil.which("espeak"):
-            return "espeak"
-        return "none"
+    def _available_providers(self) -> set[str]:
+        available: set[str] = set()
+        say_binary = shutil.which("say")
+        afconvert_binary = shutil.which("afconvert")
+        espeak_ng_binary = shutil.which("espeak-ng")
+        espeak_binary = shutil.which("espeak")
+        if say_binary and afconvert_binary:
+            available.add("macos")
+        if espeak_ng_binary or espeak_binary:
+            available.add("espeak")
+        logger.info(
+            "TTS provider discovery say=%s afconvert=%s espeak_ng=%s espeak=%s available=%s",
+            bool(say_binary),
+            bool(afconvert_binary),
+            bool(espeak_ng_binary),
+            bool(espeak_binary),
+            sorted(available),
+        )
+        return available
 
     def _run_say(self, *, text: str, voice: str, output_path: Path, rate: int) -> None:
         commands = [
@@ -149,10 +165,10 @@ class LocalSpeechService:
                 subprocess.run(command, check=True, capture_output=True, text=True)
                 return
             except FileNotFoundError as exc:
-                raise RuntimeError("macOS text-to-speech is unavailable. Install or configure a TTS provider.") from exc
+                raise TextToSpeechError("macOS text-to-speech is unavailable. Install or configure a TTS provider.") from exc
             except subprocess.CalledProcessError as exc:
                 logger.warning("Speech synthesis attempt failed with %s: %s", command, exc.stderr.strip())
-        raise RuntimeError("Speech synthesis failed for one or more dialogue lines.")
+        raise TextToSpeechError("Speech synthesis failed for one or more dialogue lines.")
 
     def _run_espeak(
         self,
@@ -167,7 +183,7 @@ class LocalSpeechService:
     ) -> None:
         binary = shutil.which("espeak-ng") or shutil.which("espeak")
         if not binary:
-            raise RuntimeError("Linux text-to-speech is unavailable. Install espeak-ng in the worker image.")
+            raise TextToSpeechError("Linux text-to-speech is unavailable. Install espeak-ng in the runtime image.")
         command = [
             binary,
             "-w",
@@ -187,7 +203,7 @@ class LocalSpeechService:
         try:
             subprocess.run(command, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"Speech synthesis failed for Linux provider: {exc.stderr.strip()}") from exc
+            raise TextToSpeechError(f"Speech synthesis failed for Linux provider: {exc.stderr.strip()}") from exc
 
     def _convert_to_wav(self, *, source_path: Path, output_path: Path) -> None:
         command = [
@@ -202,9 +218,9 @@ class LocalSpeechService:
         try:
             subprocess.run(command, check=True, capture_output=True, text=True)
         except FileNotFoundError as exc:
-            raise RuntimeError("macOS audio conversion tooling is unavailable for dialogue rendering.") from exc
+            raise TextToSpeechError("macOS audio conversion tooling is unavailable for dialogue rendering.") from exc
         except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"Could not convert synthesized speech to WAV: {exc.stderr.strip()}") from exc
+            raise TextToSpeechError(f"Could not convert synthesized speech to WAV: {exc.stderr.strip()}") from exc
 
     def _measure_duration(self, audio_path: Path) -> float:
         with wave.open(str(audio_path), "rb") as handle:
@@ -222,7 +238,7 @@ class LocalSpeechService:
 
         samples = np.frombuffer(raw_frames, dtype=np.int16).astype(np.float32) / 32768.0
         if samples.size == 0:
-            raise RuntimeError(f"Synthesized speech file is empty: {audio_path}")
+            raise TextToSpeechError(f"Synthesized speech file is empty: {audio_path}")
         peak = float(np.max(np.abs(samples)))
         if peak > 0:
             samples = samples * min(0.92 / peak, 1.35)
@@ -249,6 +265,7 @@ class LocalSpeechService:
         override = self.speaker_voice_overrides.get(self._slugify(speaker))
         if override:
             return {
+                "tts_provider": override.get("tts_provider", "espeak"),
                 "voice": override.get("voice", self.espeak_voices[slot_index % len(self.espeak_voices)]),
                 "rate": override.get("rate", self.espeak_rate),
                 "pitch": override.get("pitch", self.espeak_pitch),
@@ -260,6 +277,7 @@ class LocalSpeechService:
         preset = resolve_character_preset_for_speaker(speaker)
         if preset:
             return {
+                "tts_provider": preset.get("tts_provider", "espeak"),
                 "voice": preset.get("voice", self.espeak_voices[slot_index % len(self.espeak_voices)]),
                 "rate": int(preset.get("rate") or self.espeak_rate),
                 "pitch": int(preset.get("pitch") or self.espeak_pitch),
@@ -269,6 +287,7 @@ class LocalSpeechService:
             }
 
         return {
+            "tts_provider": "espeak",
             "voice": self.espeak_voices[slot_index % len(self.espeak_voices)],
             "rate": self.espeak_rate,
             "pitch": self.espeak_pitch,
@@ -276,6 +295,52 @@ class LocalSpeechService:
             "amplitude": self.espeak_amplitude,
             "speech_rate": self.speech_rate,
         }
+
+    def _provider_for_voice_profile(self, voice_profile: dict, available_providers: set[str]) -> str:
+        requested_provider = str(voice_profile.get("tts_provider") or "").strip().lower()
+        if requested_provider in available_providers:
+            return requested_provider
+        if "espeak" in available_providers and requested_provider in {"", "linux"}:
+            return "espeak"
+        if "macos" in available_providers and requested_provider in {"", "say"}:
+            return "macos"
+        if "espeak" in available_providers:
+            logger.info(
+                "Requested TTS provider %s is unavailable; falling back to espeak for voice=%s",
+                requested_provider or "default",
+                voice_profile.get("voice"),
+            )
+            return "espeak"
+        if "macos" in available_providers:
+            logger.info(
+                "Requested TTS provider %s is unavailable; falling back to macOS speech for voice=%s",
+                requested_provider or "default",
+                voice_profile.get("voice"),
+            )
+            return "macos"
+        raise TextToSpeechError(
+            "Voice preview synthesis is unavailable because no supported local TTS provider is installed. "
+            "Install espeak-ng for Linux/dev Docker or use macOS with say and afconvert available."
+        )
+
+    def _resolve_voice_name(self, voice_profile: dict, slot_index: int, provider: str) -> str:
+        configured_voice = str(voice_profile.get("voice") or "").strip()
+        if provider == "espeak":
+            return configured_voice or self.espeak_voices[slot_index % len(self.espeak_voices)]
+        if configured_voice and self._looks_like_macos_voice(configured_voice):
+            return configured_voice
+        return self._fallback_macos_voice(configured_voice, slot_index)
+
+    def _looks_like_macos_voice(self, voice: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9 _-]*", voice))
+
+    def _fallback_macos_voice(self, configured_voice: str, slot_index: int) -> str:
+        voice_lower = configured_voice.lower()
+        if "+f" in voice_lower:
+            return "Samantha"
+        if "+m" in voice_lower:
+            return "Daniel"
+        return self.DEFAULT_VOICES[slot_index % len(self.DEFAULT_VOICES)]
 
     def _slugify(self, value: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")

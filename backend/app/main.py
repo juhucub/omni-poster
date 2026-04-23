@@ -30,6 +30,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _cors_allowed_origins() -> list[str]:
+    origins = {
+        settings.FRONTEND_URL,
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    }
+    return sorted(origin for origin in origins if origin)
+
+
 def _migration_state() -> dict:
     alembic_cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     script = ScriptDirectory.from_config(alembic_cfg)
@@ -56,7 +65,7 @@ app = FastAPI(title="Omni-poster", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL, "http://localhost:3000"],
+    allow_origins=_cors_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

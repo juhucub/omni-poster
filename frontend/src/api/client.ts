@@ -1,20 +1,27 @@
 import axios from 'axios';
 
-export const apiClient = axios.create({
-  baseURL: process.env.REACT_APP_API_URL || 'http://localhost:8000',
-  timeout: 30000,
+const getApiBaseUrl = () => {
+  if (process.env.REACT_APP_API_URL) {
+    return process.env.REACT_APP_API_URL;
+  }
+
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+
+  return 'http://localhost:8000';
+};
+
+export const apiBaseUrl = getApiBaseUrl();
+
+const apiClient = axios.create({
+  baseURL: apiBaseUrl,
   withCredentials: true,
-  headers: { 'Content-Type': 'application/json' },
 });
 
 apiClient.interceptors.response.use(
   (response) => response,
-  async (error) => {
-    if (error.response?.status === 401) {
-      window.dispatchEvent(new CustomEvent('omni-auth-expired'));
-    }
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
 export default apiClient;

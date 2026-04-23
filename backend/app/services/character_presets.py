@@ -40,10 +40,10 @@ def _default_preset_payload(payload: dict[str, Any], source: str) -> dict[str, A
         "portrait_filename": payload.get("portrait_filename"),
         "tts_provider": payload.get("tts_provider") or "espeak",
         "voice": payload.get("voice") or settings.TTS_ESPEAK_VOICE_SLOT_1,
-        "rate": int(payload.get("rate") or settings.TTS_ESPEAK_RATE),
-        "pitch": int(payload.get("pitch") or settings.TTS_ESPEAK_PITCH),
-        "word_gap": int(payload.get("word_gap") or settings.TTS_ESPEAK_WORD_GAP),
-        "amplitude": int(payload.get("amplitude") or settings.TTS_ESPEAK_AMPLITUDE),
+        "rate": int(payload.get("rate") if payload.get("rate") is not None else settings.TTS_ESPEAK_RATE),
+        "pitch": int(payload.get("pitch") if payload.get("pitch") is not None else settings.TTS_ESPEAK_PITCH),
+        "word_gap": int(payload.get("word_gap") if payload.get("word_gap") is not None else settings.TTS_ESPEAK_WORD_GAP),
+        "amplitude": int(payload.get("amplitude") if payload.get("amplitude") is not None else settings.TTS_ESPEAK_AMPLITUDE),
         "notes": payload.get("notes") or "",
         "sample_text": payload.get("sample_text") or DEFAULT_SAMPLE_TEXT,
         "source": source,
@@ -154,4 +154,3 @@ def voice_lab_preview_dir() -> Path:
     path = _runtime_lab_dir() / "previews"
     path.mkdir(parents=True, exist_ok=True)
     return path
-

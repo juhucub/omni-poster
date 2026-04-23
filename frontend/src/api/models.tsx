@@ -87,6 +87,31 @@ export interface BackgroundPreset {
   content_url: string;
 }
 
+export interface CharacterPreset {
+  id: string;
+  display_name: string;
+  speaker_names: string[];
+  portrait_filename: string | null;
+  portrait_url: string | null;
+  tts_provider: string;
+  voice: string;
+  rate: number;
+  pitch: number;
+  word_gap: number;
+  amplitude: number;
+  notes: string;
+  sample_text: string;
+  source: string;
+}
+
+export interface VoiceLabPreview {
+  preset_id: string;
+  voice: string;
+  duration_seconds: number;
+  sample_text: string;
+  content_url: string;
+}
+
 export interface GenerationJob {
   id: number;
   project_id: number;

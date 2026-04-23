@@ -11,7 +11,7 @@ import {
   Wand2,
 } from 'lucide-react';
 
-import apiClient from '../api/client';
+import apiClient, { apiBaseUrl } from '../api/client';
 import type {
   Asset,
   BackgroundPreset,
@@ -52,6 +52,39 @@ const parseDraftToLines = (value: string): ScriptLine[] =>
 const linesToDraft = (lines: ScriptLine[]) =>
   lines.map((line) => `<${line.speaker}> ${line.text}`).join('\n');
 
+const normalizeDraft = (value: string) => value.trim().replace(/\r\n/g, '\n');
+
+const generationStageLabel = (job: GenerationJob | null) => {
+  if (!job) {
+    return null;
+  }
+  if (job.status === 'queued') {
+    return 'Queued';
+  }
+  if (job.status === 'completed') {
+    return 'Completed';
+  }
+  if (job.status === 'failed') {
+    return 'Failed';
+  }
+  if (job.progress >= 88) {
+    return 'Packaging output';
+  }
+  if (job.progress >= 80) {
+    return 'Encoding video';
+  }
+  if (job.progress >= 68) {
+    return 'Assembling timeline';
+  }
+  if (job.progress >= 58) {
+    return 'Preparing background';
+  }
+  if (job.progress >= 46) {
+    return 'Generating voices';
+  }
+  return 'Starting render';
+};
+
 const ProjectEditorPage: React.FC = () => {
   const { projectId } = useParams();
   const id = Number(projectId);
@@ -83,6 +116,10 @@ const ProjectEditorPage: React.FC = () => {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const activeGeneration = useMemo(
+    () => Boolean(generationJob && ['queued', 'processing', 'retrying'].includes(generationJob.status)),
+    [generationJob]
+  );
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === (project?.selected_social_account_id || routing?.social_account_id || accounts[0]?.id)) || null,
     [accounts, project?.selected_social_account_id, routing?.social_account_id]
@@ -93,9 +130,12 @@ const ProjectEditorPage: React.FC = () => {
     () => assets.find((asset) => asset.id === project?.background_asset_id) || assets.find((asset) => asset.kind.startsWith('background')) || null,
     [assets, project?.background_asset_id]
   );
+  const generationStage = useMemo(() => generationStageLabel(generationJob), [generationJob]);
+  const savedDraft = useMemo(() => normalizeDraft(script?.raw_text || defaultScript), [script?.raw_text]);
+  const scriptIsDirty = useMemo(() => normalizeDraft(scriptDraft) !== savedDraft, [scriptDraft, savedDraft]);
 
   const toUtcIso = (value: string) => (value ? new Date(value).toISOString() : null);
-  const apiBase = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+  const apiBase = apiBaseUrl;
 
   const hydrateScriptState = (revision: ScriptRevision | null) => {
     setScript(revision);
@@ -142,6 +182,16 @@ const ProjectEditorPage: React.FC = () => {
       setMetadata(metadataResponse.data);
       setAccounts(accountsResponse.data.items);
       setHistory(historyResponse.data);
+      try {
+        const activeGenerationResponse = await apiClient.get<GenerationJob>(`/projects/${id}/generation-jobs/active`);
+        setGenerationJob(activeGenerationResponse.data);
+      } catch (activeErr: any) {
+        if (activeErr.response?.status === 404) {
+          setGenerationJob(null);
+        } else {
+          throw activeErr;
+        }
+      }
       setError(null);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to load project workspace.');
@@ -246,15 +296,20 @@ const ProjectEditorPage: React.FC = () => {
     setScriptDraft(linesToDraft(normalized));
   };
 
+  const persistScriptRevision = async () => {
+    const response = await apiClient.put<{ current_revision: ScriptRevision }>(`/projects/${id}/script`, {
+      parsed_lines: scriptLines.map((line, index) => ({ ...line, order: index })),
+      source: 'manual',
+      parent_revision_id: script?.id || null,
+    });
+    hydrateScriptState(response.data.current_revision);
+    return response.data.current_revision;
+  };
+
   const saveScript = async () => {
     try {
       setBusy('script');
-      const response = await apiClient.put<{ current_revision: ScriptRevision }>(`/projects/${id}/script`, {
-        parsed_lines: scriptLines.map((line, index) => ({ ...line, order: index })),
-        source: 'manual',
-        parent_revision_id: script?.id || null,
-      });
-      hydrateScriptState(response.data.current_revision);
+      await persistScriptRevision();
       await loadAll();
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Script validation failed.');
@@ -294,12 +349,21 @@ const ProjectEditorPage: React.FC = () => {
   };
 
   const generatePreview = async (outputKind: 'preview' | 'final' = 'preview') => {
+    if (activeGeneration) {
+      return;
+    }
     try {
       setBusy('generation');
+      let scriptRevisionId = script?.id || null;
+      if (scriptIsDirty) {
+        const savedRevision = await persistScriptRevision();
+        scriptRevisionId = savedRevision.id;
+      }
       const response = await apiClient.post<GenerationJob>(`/projects/${id}/renders`, {
         background_style: project?.background_style || 'none',
         output_kind: outputKind,
         provider_name: 'local-compositor',
+        script_revision_id: scriptRevisionId,
       });
       setGenerationJob(response.data);
       setError(null);
@@ -516,7 +580,7 @@ const ProjectEditorPage: React.FC = () => {
                   <div className="mt-6 grid gap-3 md:grid-cols-2">
                     {presets.length === 0 && (
                       <div className="rounded-2xl border border-dashed border-white/15 bg-slate-950/30 p-4 text-sm text-slate-400">
-                        No local presets are available yet. Add `.mp4` files under `backend/storage/presets` to populate this gallery.
+                        No bundled presets are available yet. Add `.mp4` files under `backend/storage/presets`, then rebuild the Docker containers to refresh the gallery.
                       </div>
                     )}
                     {presets.map((preset) => (
@@ -558,6 +622,12 @@ const ProjectEditorPage: React.FC = () => {
                       {busy === 'script-generate' ? 'Generating...' : 'Generate Draft'}
                     </button>
                   </div>
+
+                  {scriptIsDirty && (
+                    <div className="mt-4 rounded-2xl border border-amber-300/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                      The dialogue has unsaved changes. Rendering will now save the latest speaker names and lines automatically before queueing a job.
+                    </div>
+                  )}
 
                   <input
                     value={scriptPrompt}
@@ -643,28 +713,45 @@ const ProjectEditorPage: React.FC = () => {
                 <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                   <h2 className="text-xl font-semibold">Render Outputs</h2>
                   <p className="mt-2 text-sm text-slate-400">Queue a preview render for review or a higher-confidence final output once the draft is stable.</p>
+                  <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-4 text-sm text-cyan-100">
+                    Detected cast: {(script?.characters || scriptLines.map((line) => line.speaker)).slice(0, 2).join(' vs ') || 'Add two dialogue speakers first'}.
+                    The local renderer now voices each line and pops the active speaker portrait. It checks bundled character PNGs in <code>backend/storage/characters</code> first using <code>&lt;speaker&gt;.png</code> or <code>speaker_1.png</code> and <code>speaker_2.png</code>, then falls back to runtime overrides and finally generated portraits.
+                  </div>
+                  {scriptIsDirty && (
+                    <div className="mt-4 rounded-2xl border border-amber-300/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                      The script editor has unsaved character names or dialogue. Generate will save this draft first so preset matching uses the latest speaker names.
+                    </div>
+                  )}
                   <div className="mt-4 flex flex-wrap gap-3">
                     <button
                       onClick={() => generatePreview('preview')}
-                      disabled={busy === 'generation' || !backgroundAsset || !script}
+                      disabled={busy === 'generation' || !backgroundAsset || !script || activeGeneration}
                       className="inline-flex items-center gap-2 rounded-2xl bg-cyan-300 px-4 py-3 font-medium text-slate-950 disabled:opacity-60"
                     >
                       <PlayCircle size={18} />
-                      {busy === 'generation' ? 'Queueing...' : 'Generate Preview'}
+                      {activeGeneration ? 'Render In Progress' : busy === 'generation' ? 'Saving + Queueing...' : scriptIsDirty ? 'Save + Generate Preview' : 'Generate Preview'}
                     </button>
                     <button
                       onClick={() => generatePreview('final')}
-                      disabled={busy === 'generation' || !backgroundAsset || !script}
+                      disabled={busy === 'generation' || !backgroundAsset || !script || activeGeneration}
                       className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10 disabled:opacity-60"
                     >
                       <Wand2 size={18} />
-                      Generate Final Pass
+                      {activeGeneration ? 'Await Active Render' : scriptIsDirty ? 'Save + Generate Final Pass' : 'Generate Final Pass'}
                     </button>
                   </div>
 
                   {generationJob && (
                     <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4 text-sm text-slate-300">
-                      Render job #{generationJob.id}: {generationJob.status} ({generationJob.progress}%)
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <span>
+                          Render job #{generationJob.id}: {generationJob.status} ({generationJob.progress}%)
+                        </span>
+                        {generationStage ? <span className="text-cyan-200">{generationStage}</span> : null}
+                      </div>
+                      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+                        <div className="h-full rounded-full bg-cyan-300 transition-[width] duration-500" style={{ width: `${generationJob.progress}%` }} />
+                      </div>
                       {generationJob.error_message && <div className="mt-2 text-rose-300">{generationJob.error_message}</div>}
                     </div>
                   )}
@@ -1013,15 +1100,26 @@ const ProjectEditorPage: React.FC = () => {
             <section className="space-y-6">
               <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                 <h2 className="text-xl font-semibold">Current Output</h2>
-                <div className="mt-4 rounded-3xl overflow-hidden border border-white/10 bg-slate-950/70">
+                <p className="mt-2 text-sm text-slate-400">The latest render stays centered in a responsive phone-frame preview so review playback matches the rest of the workspace.</p>
+                <div className="mt-4 rounded-3xl border border-white/10 bg-[radial-gradient(circle_at_top,_rgba(103,232,249,0.12),_transparent_48%),linear-gradient(180deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-4 sm:p-5">
                   {latestOutput ? (
-                    <video
-                      src={`${apiBase}${latestOutput.asset.content_url}`}
-                      controls
-                      className="aspect-[9/16] w-full bg-black object-contain"
-                    />
+                    <div className="mx-auto w-full max-w-[22rem]">
+                      <div className="overflow-hidden rounded-[2rem] border border-white/10 bg-black shadow-[0_24px_70px_rgba(2,6,23,0.55)]">
+                        <video
+                          src={`${apiBase}${latestOutput.asset.content_url}`}
+                          controls
+                          playsInline
+                          preload="metadata"
+                          className="aspect-[9/16] w-full bg-black object-contain"
+                        />
+                      </div>
+                      <div className="mt-3 flex items-center justify-between gap-3 text-xs uppercase tracking-[0.24em] text-slate-400">
+                        <span>{latestOutput.output_kind}</span>
+                        <span>{latestOutput.duration_ms ? `${Math.round(latestOutput.duration_ms / 1000)}s` : 'Duration pending'}</span>
+                      </div>
+                    </div>
                   ) : (
-                    <div className="aspect-[9/16] w-full grid place-items-center text-slate-500">
+                    <div className="mx-auto grid aspect-[9/16] w-full max-w-[22rem] place-items-center rounded-[2rem] border border-dashed border-white/10 bg-slate-950/70 text-slate-500">
                       No render output yet.
                     </div>
                   )}

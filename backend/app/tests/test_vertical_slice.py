@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
+import wave
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
@@ -10,6 +12,7 @@ from app.models import GenerationJob, SocialAccount
 from app.services.character_presets import get_character_preset
 from app.services.crypto import decrypt_secret
 from app.services.rendering import ProjectRenderService
+from app.services.tts import LocalSpeechService, SpeechSegment, TextToSpeechError
 from app.tasks.generation import STALE_GENERATION_ERROR, process_generation_job, reconcile_stale_generation_jobs
 from app.tasks.publish import process_publish_job
 from app.tasks.scheduler import dispatch_due_publish_jobs
@@ -177,6 +180,182 @@ def test_voice_lab_preview_uses_preset_settings(auth_client: TestClient, monkeyp
     assert response.status_code == 200
     assert response.json()["preset_id"] == "host_calm_v1"
     assert response.json()["content_url"].endswith("/voice-lab/previews/sample.wav")
+
+
+def test_voice_lab_preview_returns_clear_error_when_no_provider_available(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(LocalSpeechService, "_available_providers", lambda self: set())
+    response = auth_client.post(
+        "/voice-lab/preview",
+        json={
+            "preset_id": "host_calm_v1",
+            "text": "This is a quick voice lab check.",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "no supported local TTS provider is installed" in response.json()["detail"]
+    assert "espeak-ng" in response.json()["detail"]
+
+
+def test_local_speech_service_discovers_espeak_provider(monkeypatch):
+    service = LocalSpeechService()
+
+    monkeypatch.setattr(
+        "app.services.tts.shutil.which",
+        lambda binary: {
+            "espeak-ng": "/usr/bin/espeak-ng",
+        }.get(binary),
+    )
+
+    assert service._available_providers() == {"espeak"}
+
+
+def test_local_speech_service_returns_empty_provider_set_when_no_binary_exists(monkeypatch):
+    service = LocalSpeechService()
+
+    monkeypatch.setattr("app.services.tts.shutil.which", lambda binary: None)
+
+    assert service._available_providers() == set()
+
+
+def test_local_speech_service_falls_back_to_installed_provider():
+    service = LocalSpeechService()
+
+    provider = service._provider_for_voice_profile({"tts_provider": "macos", "voice": "en-us+f3"}, {"espeak"})
+
+    assert provider == "espeak"
+
+
+def test_local_speech_service_raises_clear_error_when_no_provider_available():
+    service = LocalSpeechService()
+
+    with pytest.raises(TextToSpeechError) as exc_info:
+        service._provider_for_voice_profile({"tts_provider": "espeak", "voice": "en-us+f3"}, set())
+
+    assert "no supported local TTS provider is installed" in str(exc_info.value)
+
+
+def test_local_speech_service_respects_requested_provider_per_character(monkeypatch, tmp_path: Path):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "stewie_v1",
+    "display_name": "Stewie",
+    "speaker_names": ["Stewie"],
+    "tts_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  },
+  {
+    "id": "brian_v1",
+    "display_name": "Brian",
+    "speaker_names": ["Brian"],
+    "tts_provider": "espeak",
+    "voice": "en-gb+m3",
+    "rate": 158,
+    "pitch": 46,
+    "word_gap": 1,
+    "amplitude": 145
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def write_wav(output_path: Path) -> None:
+        with wave.open(str(output_path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(22050)
+            handle.writeframes(b"\x00\x00" * 22050)
+
+    used_voices: list[str] = []
+    service = LocalSpeechService()
+    monkeypatch.setattr(LocalSpeechService, "_available_providers", lambda self: {"macos", "espeak"})
+    monkeypatch.setattr(
+        LocalSpeechService,
+        "_run_espeak",
+        lambda self, **kwargs: (used_voices.append(kwargs["voice"]), write_wav(kwargs["output_path"])),
+    )
+    monkeypatch.setattr(
+        LocalSpeechService,
+        "_run_say",
+        lambda self, **kwargs: (_ for _ in ()).throw(AssertionError("macOS say should not be used for espeak presets")),
+    )
+
+    segments = service.synthesize_dialogue(
+        [
+            {"speaker": "Stewie", "text": "This is my line.", "order": 0},
+            {"speaker": "Brian", "text": "And this is mine.", "order": 1},
+        ],
+        tmp_path,
+    )
+
+    assert [segment.voice for segment in segments] == ["en-us+f3", "en-gb+m3"]
+    assert used_voices == ["en-us+f3", "en-gb+m3"]
+
+
+def test_render_timing_prefers_actual_audio_clip_duration(monkeypatch):
+    service = ProjectRenderService()
+    segments = [
+        SpeechSegment(
+            speaker="Stewie",
+            text="Longer than the metadata says.",
+            voice="en-us+f3",
+            slot_index=0,
+            audio_path="unused.wav",
+            duration_seconds=1.0,
+        )
+    ]
+
+    class FakeAudioClip:
+        duration = 1.8
+
+    monkeypatch.setattr(service.speech_service, "build_audio_clip", lambda audio_path: FakeAudioClip())
+    timed_segments = service._build_timed_segments(segments)
+
+    assert timed_segments[0]["duration_seconds"] == 1.8
+
+
+def test_render_config_caps_preview_fps_for_large_backgrounds():
+    service = ProjectRenderService()
+
+    class FakeClip:
+        fps = 60
+
+    preview_config = service._render_config(FakeClip(), "preview")
+    final_config = service._render_config(FakeClip(), "final")
+
+    assert preview_config["fps"] == 24
+    assert final_config["fps"] == 30
 
 
 def _create_project_flow(client: TestClient) -> dict:

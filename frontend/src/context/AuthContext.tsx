@@ -3,29 +3,28 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 import apiClient from '../api/client';
 import type { AuthResponse, MeResponse } from '../api/models';
 
-interface AuthContextType {
-  user: MeResponse | null;
+type LoginPayload = {
+  username: string;
+  password: string;
+};
+
+type AuthContextValue = {
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (username: string, password: string) => Promise<void>;
-  register: (username: string, password: string) => Promise<void>;
+  user: MeResponse | null;
+  login: (payload: LoginPayload) => Promise<void>;
+  register: (payload: LoginPayload) => Promise<void>;
   logout: () => Promise<void>;
-}
+  refreshSession: () => Promise<void>;
+};
 
-const AuthContext = createContext<AuthContextType>({
-  user: null,
-  isAuthenticated: false,
-  isLoading: true,
-  login: async () => undefined,
-  register: async () => undefined,
-  logout: async () => undefined,
-});
+const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<MeResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  const loadCurrentUser = async () => {
+  const refreshSession = async () => {
     try {
       const response = await apiClient.get<MeResponse>('/auth/me');
       setUser(response.data);
@@ -37,47 +36,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
-    loadCurrentUser();
+    void refreshSession();
   }, []);
 
-  useEffect(() => {
-    const handleExpired = () => setUser(null);
-    window.addEventListener('omni-auth-expired', handleExpired);
-    return () => window.removeEventListener('omni-auth-expired', handleExpired);
-  }, []);
-
-  const login = async (username: string, password: string) => {
+  const login = async ({ username, password }: LoginPayload) => {
     await apiClient.post<AuthResponse>('/auth/login', { username, password });
-    await loadCurrentUser();
+    await refreshSession();
   };
 
-  const register = async (username: string, password: string) => {
+  const register = async ({ username, password }: LoginPayload) => {
     await apiClient.post<AuthResponse>('/auth/register', { username, password });
-    await loadCurrentUser();
+    await refreshSession();
   };
 
   const logout = async () => {
+    await apiClient.post('/auth/logout');
     setUser(null);
-    try {
-      await apiClient.post('/auth/logout');
-    } catch {
-      // noop: local state is already cleared
-    }
   };
 
-  const value = useMemo(
+  const value = useMemo<AuthContextValue>(
     () => ({
-      user,
       isAuthenticated: Boolean(user),
       isLoading,
+      user,
       login,
       register,
       logout,
+      refreshSession,
     }),
-    [user, isLoading]
+    [isLoading, user]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
-export const useAuth = (): AuthContextType => useContext(AuthContext);
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider.');
+  }
+  return context;
+};

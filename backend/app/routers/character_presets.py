@@ -23,7 +23,7 @@ from app.services.character_presets import (
     upsert_character_preset,
     voice_lab_preview_dir,
 )
-from app.services.tts import LocalSpeechService
+from app.services.tts import LocalSpeechService, TextToSpeechError
 
 router = APIRouter(tags=["character_presets"])
 
@@ -115,6 +115,7 @@ def create_voice_lab_preview(
     service = LocalSpeechService(
         speaker_voice_overrides={
             preset["display_name"]: {
+                "tts_provider": preset.get("tts_provider", "espeak"),
                 "voice": preset["voice"],
                 "rate": payload.rate or preset["rate"],
                 "pitch": payload.pitch or preset["pitch"],
@@ -123,10 +124,13 @@ def create_voice_lab_preview(
             }
         }
     )
-    segments = service.synthesize_dialogue(
-        [{"speaker": preset["display_name"], "text": payload.text, "order": 0}],
-        preview_dir,
-    )
+    try:
+        segments = service.synthesize_dialogue(
+            [{"speaker": preset["display_name"], "text": payload.text, "order": 0}],
+            preview_dir,
+        )
+    except TextToSpeechError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     audio_path = Path(segments[0].audio_path)
     return VoiceLabPreviewResponse(
         preset_id=preset["id"],

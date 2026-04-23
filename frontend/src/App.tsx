@@ -8,6 +8,7 @@ import AuthPage from './pages/AuthPage';
 import ProjectEditorPage from './pages/ProjectEditorPage';
 import ProjectsPage from './pages/ProjectsPage';
 import PublishHistoryPage from './pages/PublishHistoryPage';
+import VoiceLabPage from './pages/VoiceLabPage';
 
 
 const AppRoutes: React.FC = () => {
@@ -45,6 +46,14 @@ const AppRoutes: React.FC = () => {
         element={
           <ProtectedRoute>
             <PublishHistoryPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/voice-lab"
+        element={
+          <ProtectedRoute>
+            <VoiceLabPage />
           </ProtectedRoute>
         }
       />
