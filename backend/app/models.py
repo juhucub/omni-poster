@@ -1,101 +1,460 @@
-from pydantic import BaseModel, Field, HttpUrl, constr, validator
-from typing import Optional, Dict
+from __future__ import annotations
 
-# ─── Shared responses ────────────────────────────────────
+from datetime import datetime
 
-class UploadResponse(BaseModel):
-    project_id: str
-    urls: Dict[str, str]
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+from .db import Base
 
-class User(BaseModel):
-    username: str
-    hashed_password: str
-class UserResponse(BaseModel):
-    username: str
 
-# ─── Auth requests/responses ────────────────────────────
+def utcnow() -> datetime:
+    return datetime.utcnow()
 
-class RegisterRequest(BaseModel):
-    username: constr(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_]+$")
-    password: constr(min_length=8)
 
-    @validator("password")
-    def password_complexity(cls, v: str) -> str:
-        if not (
-            any(c.islower() for c in v)
-            and any(c.isupper() for c in v)
-            and any(c.isdigit() for c in v)
-        ):
-            raise ValueError(
-                "Password must be at least 8 chars and include upper, lower, digit."
-            )
-        return v
+class User(Base):
+    __tablename__ = "users"
 
-class LoginRequest(BaseModel):
-    username: constr(min_length=3)
-    password: constr(min_length=8)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-# Used internally by the client-side flow to re-auth on form-submit
-class MeRequest(BaseModel):
-    username: constr(min_length=3)
-    password: constr(min_length=8)
+    preferences: Mapped["UserPreference | None"] = relationship(
+        back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    social_accounts: Mapped[list["SocialAccount"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    projects: Mapped[list["Project"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    audit_logs: Mapped[list["AuditLog"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    submitted_reviews: Mapped[list["ReviewQueueItem"]] = relationship(
+        foreign_keys="ReviewQueueItem.submitted_by_user_id", back_populates="submitted_by"
+    )
+    assigned_reviews: Mapped[list["ReviewQueueItem"]] = relationship(
+        foreign_keys="ReviewQueueItem.reviewer_user_id", back_populates="reviewer"
+    )
+    review_comments: Mapped[list["ReviewComment"]] = relationship(
+        back_populates="author", cascade="all, delete-orphan"
+    )
+    notifications: Mapped[list["NotificationEvent"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
-class MeResponse(UserResponse):
-    access_token: str
-    token_type: str = "bearer"
 
-# ─── Account endpoints (stubs) ──────────────────────────
+class UserPreference(Base):
+    __tablename__ = "user_preferences"
 
-class AccountCreate(BaseModel):
-    platform: constr(pattern="^(youtube|tiktok|instagram)$")
-    oauth_code: str
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    default_platform: Mapped[str] = mapped_column(String(32), default="youtube", nullable=False)
+    default_social_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("social_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    metadata_style: Mapped[str] = mapped_column(String(32), default="default", nullable=False)
+    auto_select_default_account: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    automation_mode: Mapped[str] = mapped_column(String(32), default="assisted", nullable=False)
+    preferred_account_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    allowed_platforms_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    publish_windows_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
 
-class AccountOut(BaseModel):
-    id: int
-    platform: str
-    name: str
-    profile_picture: HttpUrl
-    stats: Dict[str, int]
-    status: constr(pattern="^(authorized|token_expired|rate_warning)$")
+    user: Mapped["User"] = relationship(back_populates="preferences")
 
-class MetricsOut(BaseModel):
-    followers: int
-    views: int
-    likes: int
 
-class GoalIn(BaseModel):
-    views: Optional[int]
-    likes: Optional[int]
-    followers: Optional[int]
+class SocialAccount(Base):
+    __tablename__ = "social_accounts"
+    __table_args__ = (
+        UniqueConstraint("platform", "channel_id", name="uq_social_account_platform_channel"),
+    )
 
-class Message(BaseModel):
-    detail: str
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    platform: Mapped[str] = mapped_column(String(32), default="youtube", nullable=False)
+    account_type: Mapped[str] = mapped_column(String(32), default="owned_channel", nullable=False)
+    channel_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    channel_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    capabilities_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    token_status: Mapped[str] = mapped_column(String(32), default="healthy", nullable=False)
+    default_preference_rank: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="linked", nullable=False)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
 
-# ─── Video Generation Models ────────────────────────────
+    user: Mapped["User"] = relationship(back_populates="social_accounts")
+    projects: Mapped[list["Project"]] = relationship(
+        back_populates="selected_social_account", foreign_keys="Project.selected_social_account_id"
+    )
+    publish_jobs: Mapped[list["PublishJob"]] = relationship(back_populates="social_account")
+    published_posts: Mapped[list["PublishedPost"]] = relationship(back_populates="social_account")
 
-class GenerateVideoRequest(BaseModel):
-    """Request model for video generation."""
-    project_id: str
-    output_format: Optional[str] = "mp4"
-    quality: Optional[str] = "high"  # low, medium, high
-    aspect_ratio: Optional[str] = "16:9"  # 16:9, 9:16, 1:1
 
-class GenerateVideoResponse(BaseModel):
-    """Response model for video generation."""
-    project_id: str
-    status: str  # processing, completed, failed
-    video_url: Optional[str] = None
-    progress: Optional[int] = None
-    message: str
-    processing_time_seconds: Optional[float] = None
-    output_file_size: Optional[int] = None
+class Project(Base):
+    __tablename__ = "projects"
 
-# ─── Enhanced Upload Response ────────────────────────────
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
+    target_platform: Mapped[str] = mapped_column(String(32), default="youtube", nullable=False)
+    background_style: Mapped[str] = mapped_column(String(32), default="none", nullable=False)
+    background_source_type: Mapped[str] = mapped_column(String(32), default="upload", nullable=False)
+    background_asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
+    )
+    selected_social_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("social_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    current_script_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("script_revisions.id", ondelete="SET NULL"), nullable=True
+    )
+    current_output_video_id: Mapped[int | None] = mapped_column(
+        ForeignKey("output_videos.id", ondelete="SET NULL"), nullable=True
+    )
+    automation_mode: Mapped[str] = mapped_column(String(32), default="assisted", nullable=False)
+    preferred_account_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    allowed_platforms_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    publish_windows_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
 
-class UploadResponse(BaseModel):
-    project_id: str
-    urls: Dict[str, str]
+    user: Mapped["User"] = relationship(back_populates="projects")
+    selected_social_account: Mapped["SocialAccount | None"] = relationship(
+        back_populates="projects", foreign_keys=[selected_social_account_id]
+    )
+    background_asset: Mapped["Asset | None"] = relationship(
+        foreign_keys=[background_asset_id], post_update=True
+    )
+    assets: Mapped[list["Asset"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        foreign_keys="Asset.project_id",
+    )
+    script_revisions: Mapped[list["ScriptRevision"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", foreign_keys="ScriptRevision.project_id"
+    )
+    generation_jobs: Mapped[list["GenerationJob"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    output_videos: Mapped[list["OutputVideo"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        foreign_keys="OutputVideo.project_id",
+    )
+    review_queue_items: Mapped[list["ReviewQueueItem"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", order_by="ReviewQueueItem.created_at.desc()"
+    )
+    publish_jobs: Mapped[list["PublishJob"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    published_posts: Mapped[list["PublishedPost"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    metadata_entries: Mapped[list["PlatformMetadata"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    current_script_revision: Mapped["ScriptRevision | None"] = relationship(
+        foreign_keys=[current_script_revision_id], post_update=True
+    )
+    current_output_video: Mapped["OutputVideo | None"] = relationship(
+        foreign_keys=[current_output_video_id], post_update=True
+    )
+    notifications: Mapped[list["NotificationEvent"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+
+
+class Asset(Base):
+    __tablename__ = "assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), default="upload", nullable=False)
+    preset_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship(back_populates="assets", foreign_keys=[project_id])
+    generation_jobs: Mapped[list["GenerationJob"]] = relationship(back_populates="input_asset")
+    output_videos: Mapped[list["OutputVideo"]] = relationship(back_populates="asset")
+
+
+class ScriptRevision(Base):
+    __tablename__ = "script_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    parent_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("script_revisions.id", ondelete="SET NULL"), nullable=True
+    )
+    raw_text: Mapped[str] = mapped_column(Text, nullable=False)
+    parsed_lines_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    characters_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    source: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
+    generation_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship(
+        back_populates="script_revisions", foreign_keys=[project_id]
+    )
+    parent_revision: Mapped["ScriptRevision | None"] = relationship(remote_side=[id])
+    line_items: Mapped[list["ScriptLineItem"]] = relationship(
+        back_populates="revision", cascade="all, delete-orphan", order_by="ScriptLineItem.line_order.asc()"
+    )
+    generation_jobs: Mapped[list["GenerationJob"]] = relationship(back_populates="script_revision")
+
+
+class ScriptLineItem(Base):
+    __tablename__ = "script_line_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision_id: Mapped[int] = mapped_column(
+        ForeignKey("script_revisions.id", ondelete="CASCADE"), index=True
+    )
+    line_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    speaker: Mapped[str] = mapped_column(String(128), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    revision: Mapped["ScriptRevision"] = relationship(back_populates="line_items")
+
+
+class GenerationJob(Base):
+    __tablename__ = "generation_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    input_asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"))
+    script_revision_id: Mapped[int] = mapped_column(ForeignKey("script_revisions.id", ondelete="CASCADE"))
+    style_preset: Mapped[str] = mapped_column(String(32), default="none", nullable=False)
+    output_kind: Mapped[str] = mapped_column(String(32), default="preview", nullable=False)
+    provider_name: Mapped[str] = mapped_column(String(64), default="local-compositor", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship(back_populates="generation_jobs")
+    input_asset: Mapped["Asset"] = relationship(back_populates="generation_jobs")
+    script_revision: Mapped["ScriptRevision"] = relationship(back_populates="generation_jobs")
+    output_video: Mapped["OutputVideo | None"] = relationship(
+        back_populates="generation_job", uselist=False
+    )
+
+
+class OutputVideo(Base):
+    __tablename__ = "output_videos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    generation_job_id: Mapped[int] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="CASCADE"), unique=True
+    )
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"))
+    output_kind: Mapped[str] = mapped_column(String(32), default="preview", nullable=False)
+    provider_name: Mapped[str] = mapped_column(String(64), default="local-compositor", nullable=False)
+    is_preview: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship(
+        back_populates="output_videos", foreign_keys=[project_id]
+    )
+    generation_job: Mapped["GenerationJob"] = relationship(back_populates="output_video")
+    asset: Mapped["Asset"] = relationship(back_populates="output_videos")
+    review_queue_items: Mapped[list["ReviewQueueItem"]] = relationship(back_populates="output_video")
+    publish_jobs: Mapped[list["PublishJob"]] = relationship(back_populates="output_video")
+
+
+class ReviewQueueItem(Base):
+    __tablename__ = "review_queue_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    output_video_id: Mapped[int] = mapped_column(ForeignKey("output_videos.id", ondelete="CASCADE"))
+    submitted_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    reviewer_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    decision_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="review_queue_items")
+    output_video: Mapped["OutputVideo"] = relationship(back_populates="review_queue_items")
+    submitted_by: Mapped["User"] = relationship(
+        foreign_keys=[submitted_by_user_id], back_populates="submitted_reviews"
+    )
+    reviewer: Mapped["User | None"] = relationship(
+        foreign_keys=[reviewer_user_id], back_populates="assigned_reviews"
+    )
+    comments: Mapped[list["ReviewComment"]] = relationship(
+        back_populates="review_queue_item", cascade="all, delete-orphan", order_by="ReviewComment.created_at.asc()"
+    )
+
+
+class ReviewComment(Base):
+    __tablename__ = "review_comments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    review_queue_item_id: Mapped[int] = mapped_column(
+        ForeignKey("review_queue_items.id", ondelete="CASCADE"), index=True
+    )
+    author_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(32), default="note", nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    review_queue_item: Mapped["ReviewQueueItem"] = relationship(back_populates="comments")
+    author: Mapped["User"] = relationship(back_populates="review_comments")
+
+
+class PlatformMetadata(Base):
+    __tablename__ = "platform_metadata"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    platform: Mapped[str] = mapped_column(String(32), default="youtube", nullable=False)
+    title: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    tags_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    extras_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    validation_errors_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    source: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="metadata_entries")
+    publish_jobs: Mapped[list["PublishJob"]] = relationship(back_populates="platform_metadata")
+
+
+class PublishJob(Base):
+    __tablename__ = "publish_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    social_account_id: Mapped[int] = mapped_column(
+        ForeignKey("social_accounts.id", ondelete="CASCADE")
+    )
+    output_video_id: Mapped[int] = mapped_column(ForeignKey("output_videos.id", ondelete="CASCADE"))
+    platform_metadata_id: Mapped[int] = mapped_column(
+        ForeignKey("platform_metadata.id", ondelete="CASCADE")
+    )
+    routing_platform: Mapped[str] = mapped_column(String(32), default="youtube", nullable=False)
+    automation_mode: Mapped[str] = mapped_column(String(32), default="assisted", nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship(back_populates="publish_jobs")
+    social_account: Mapped["SocialAccount"] = relationship(back_populates="publish_jobs")
+    output_video: Mapped["OutputVideo"] = relationship(back_populates="publish_jobs")
+    platform_metadata: Mapped["PlatformMetadata"] = relationship(back_populates="publish_jobs")
+    published_post: Mapped["PublishedPost | None"] = relationship(
+        back_populates="publish_job", uselist=False
+    )
+
+
+class PublishedPost(Base):
+    __tablename__ = "published_posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    publish_job_id: Mapped[int] = mapped_column(
+        ForeignKey("publish_jobs.id", ondelete="CASCADE"), unique=True
+    )
+    social_account_id: Mapped[int] = mapped_column(
+        ForeignKey("social_accounts.id", ondelete="CASCADE")
+    )
+    platform: Mapped[str] = mapped_column(String(32), default="youtube", nullable=False)
+    external_post_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    external_url: Mapped[str] = mapped_column(Text, nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship(back_populates="published_posts")
+    publish_job: Mapped["PublishJob"] = relationship(back_populates="published_post")
+    social_account: Mapped["SocialAccount"] = relationship(back_populates="published_posts")
+
+
+class NotificationEvent(Base):
+    __tablename__ = "notification_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="notifications")
+    project: Mapped["Project | None"] = relationship(back_populates="notifications")
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="audit_logs")

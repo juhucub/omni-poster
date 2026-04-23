@@ -201,7 +201,7 @@ const AuthPage: React.FC = () => {
 
   const afterSuccess = () => {
     // navigate + unmount form (password‑manager friendly)
-    nav('/dashboard', { replace: true });
+    nav('/projects', { replace: true });
   };
 
   return (

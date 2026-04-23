@@ -1,54 +1,78 @@
-import os
-import logging
+from __future__ import annotations
+
 from datetime import datetime, timedelta
-from fastapi import HTTPException, status, Depends
-from fastapi.security import OAuth2PasswordBearer
-from typing import Dict, Optional
 
 import jwt
+from fastapi import HTTPException, status
 from passlib.context import CryptContext
-from app.models import User
+from sqlalchemy.orm import Session
 
+from app.core.config import settings
+from app.models import AuditLog, User, UserPreference
 
-logger = logging.getLogger("uvicorn.error")
-
-# secrets & config
-SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-# password hashing context
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-# Simple in-memory user store for development
-_users_db: dict[str, User] = {}
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
 
-def create_user(username: str, password: str) -> User:
-    if username in _users_db:
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def create_access_token(user: User) -> tuple[str, datetime]:
+    expires_at = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": str(user.id), "username": user.username, "exp": expires_at}
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM), expires_at
+
+
+def create_user(db: Session, username: str, password: str) -> User:
+    existing = db.query(User).filter(User.username == username).one_or_none()
+    if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already registered"
+            detail="Username already registered",
         )
-    hashed = pwd_context.hash(password)
-    user = User(username=username, hashed_password=hashed)
-    _users_db[username] = user
+
+    user = User(username=username, password_hash=hash_password(password))
+    db.add(user)
+    db.flush()
+
+    preferences = UserPreference(user_id=user.id, allowed_platforms_json=["youtube"])
+    db.add(preferences)
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="user.registered",
+            entity_type="user",
+            entity_id=str(user.id),
+            metadata_json={"username": username},
+        )
+    )
+    db.commit()
+    db.refresh(user)
     return user
 
 
-def authenticate_user(username: str, password: str) -> str:
-    """Verify credentials and return a JWT access token."""
-    user = _users_db.get(username)
-    if not user or not pwd_context.verify(password, user.hashed_password):
+def authenticate_user(db: Session, username: str, password: str) -> User:
+    user = db.query(User).filter(User.username == username).one_or_none()
+    if not user or not verify_password(password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
+            detail="Invalid username or password",
         )
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"sub": username, "exp": expire}
-    token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return token
 
+    user.last_login_at = datetime.utcnow()
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="user.logged_in",
+            entity_type="user",
+            entity_id=str(user.id),
+            metadata_json={"username": username},
+        )
+    )
+    db.commit()
+    db.refresh(user)
+    return user

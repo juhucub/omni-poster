@@ -1,57 +1,36 @@
-// File: src/components/Sidebar.jsx
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import {
-
-  FaQuestionCircle
-} from 'react-icons/fa';
-
-import {
-  Aperture,
-  Clapperboard,
-  Users,
-  CalendarClock,
-  Settings
-} from 'lucide-react';
+import { History, Link as LinkIcon, LayoutDashboard } from 'lucide-react';
 
 const navItems = [
-  { icon: <Aperture />, label: 'Dashboard', path: '/dashboard' },
-  { icon: <Clapperboard />,            label: 'Media Creator',   path: '/upload'    },
-  { icon: <Users />,         label: 'Account(s) Manager', path: '/accounts'  },
-  { icon: <CalendarClock />,      label: 'Upload Schedule', path: '/schedule'  },
-  { icon: <Settings />,              label: 'Settings',        path: '/settings'  }
+  { icon: <LayoutDashboard size={18} />, label: 'Projects', path: '/projects' },
+  { icon: <LinkIcon size={18} />, label: 'Accounts', path: '/accounts' },
+  { icon: <History size={18} />, label: 'Publish History', path: '/history' },
 ];
 
-const Sidebar = () => (
-  <aside className="bg-[#17183D] border-b border-gray-100 sticky p-6 flex flex-col justify-between">
-    <div>
-      <h1 className="text-2xl font-bold mb-8 text-white ">Omniposter</h1>
-      <nav className="space-y-4">
-        {navItems.map(({ icon, label, path }) => (
-          <NavLink
-            key={path}
-            to={path}
-            className={({ isActive }) =>
-              `flex items-center space-x-3 p-2 rounded hover:border-1
-               ${isActive ? 'bg-purple-600 text-white' : 'text-gray-200'}`
-            }
-          >
-            <span className="text-lg">{icon}</span>
-            <span>{label}</span>
-          </NavLink>
-        ))}
-      </nav>
+const Sidebar: React.FC = () => (
+  <aside className="w-full max-w-60 bg-[#11162b] text-white p-6 border-r border-white/10">
+    <div className="mb-8">
+      <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Omni-poster</div>
+      <h1 className="mt-2 text-2xl font-semibold">Review-Driven Studio</h1>
     </div>
-    <div className="text-sm text-purple-900 mt-8">
-      <a
-        href="#"
-        className="flex items-center space-x-1 text-purple-500 hover:underline"
-      >
-        <FaQuestionCircle />
-        <span>Help Link</span>
-      </a>
-      <div className="mt-2">&copy; 2025</div>
-    </div>
+
+    <nav className="space-y-2">
+      {navItems.map((item) => (
+        <NavLink
+          key={item.path}
+          to={item.path}
+          className={({ isActive }) =>
+            `flex items-center gap-3 rounded-xl px-4 py-3 transition ${
+              isActive ? 'bg-cyan-400 text-slate-950' : 'text-slate-200 hover:bg-white/10'
+            }`
+          }
+        >
+          {item.icon}
+          <span>{item.label}</span>
+        </NavLink>
+      ))}
+    </nav>
   </aside>
 );
 

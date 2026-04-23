@@ -1,0 +1,94 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    env_file: ["../../.env.dev"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
+      REDIS_URL: redis://redis:6379/0
+      MEDIA_DIR: /data/uploads
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - api_uploads:/data/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    env_file: ["../../.env.dev"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
+      REDIS_URL: redis://redis:6379/0
+      MEDIA_DIR: /data/uploads
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: ["celery", "-A", "app.celery_app.celery", "worker", "-Q", "generation,publish", "--concurrency=2"]
+    volumes:
+      - api_uploads:/data/uploads
+
+  beat:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    env_file: ["../../.env.dev"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
+      REDIS_URL: redis://redis:6379/0
+      MEDIA_DIR: /data/uploads
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: ["celery", "-A", "app.celery_app.celery", "beat"]
+    volumes:
+      - api_uploads:/data/uploads
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: omni
+      POSTGRES_PASSWORD: omni
+      POSTGRES_DB: omni_dev
+    ports: ["5432:5432"]
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omni -d omni_dev"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pg_data: {}
+  api_uploads: {}
