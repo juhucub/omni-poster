@@ -34,6 +34,18 @@ RUN pip install -r requirements.txt
 
 RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
 RUN pip install git+https://github.com/myshell-ai/MeloTTS.git
+RUN python - <<'PY'
+import torch
+
+# Pre-trust and cache Silero VAD so runtime VAD calls stay non-interactive in Docker.
+torch.hub.load(
+    repo_or_dir="snakers4/silero-vad",
+    model="silero_vad",
+    trust_repo=True,
+    skip_validation=True,
+    onnx=False,
+)
+PY
 # Required for Melo/OpenVoice English g2p_en synthesis inside the container.
 RUN python - <<'PY'
 import os

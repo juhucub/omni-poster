@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
+import subprocess
 import uuid
 import wave
 from contextlib import contextmanager
@@ -19,6 +21,12 @@ from app.models import CharacterPreset, Project, ProjectSpeakerBinding, VoicePro
 logger = logging.getLogger(__name__)
 
 DEFAULT_SAMPLE_TEXT = "Hey, welcome back. Today we're testing a new character voice."
+REFERENCE_AUDIO_SAMPLE_RATE = 16000
+REFERENCE_AUDIO_MIN_DURATION_MS = 1200
+REFERENCE_AUDIO_SILENCE_FILTER = (
+    "silenceremove="
+    "start_periods=1:start_silence=0.25:start_threshold=-45dB"
+)
 
 
 def _runtime_lab_dir() -> Path:
@@ -41,6 +49,12 @@ def voice_reference_audio_dir() -> Path:
 
 def voice_cache_dir() -> Path:
     path = Path(settings.MEDIA_DIR) / "voice_cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def voice_embedding_dir() -> Path:
+    path = _runtime_lab_dir() / "embeddings"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -177,19 +191,69 @@ def _serialize_reference_audio(item: VoiceReferenceAudio) -> dict[str, Any]:
     }
 
 
+def _reference_audio_mode(reference_count: int) -> str:
+    if reference_count > 1:
+        return "average_all_clips"
+    if reference_count == 1:
+        return "single_clip"
+    return "none"
+
+
+def _voice_profile_provider_metadata(profile: VoiceProfile) -> dict[str, Any]:
+    metadata = dict(profile.provider_metadata_json or {})
+    reference_audios = list(profile.reference_audios or [])
+    active_reference_ids = [item.id for item in reference_audios]
+    resolved_embedding_path = Path(profile.embedding_path) if profile.embedding_path else voice_embedding_artifact_path(profile.id)
+    embedding_artifact_path = str(resolved_embedding_path) if resolved_embedding_path.exists() else (str(profile.embedding_path) if profile.embedding_path else None)
+    embedding_ready = bool(embedding_artifact_path and Path(embedding_artifact_path).exists())
+    if embedding_ready:
+        embedding_status = "ready"
+    elif not reference_audios:
+        embedding_status = "pending_reference_audio"
+    else:
+        stored_status = str(metadata.get("embedding_status") or "")
+        embedding_status = stored_status if stored_status in {"building", "not_prepared"} else "not_prepared"
+    performance_controls_supported = ["speaking_rate"] if profile.provider == "openvoice" else ["speaking_rate", "pitch", "energy", "pause_length"]
+    metadata.update(
+        {
+            "voice_identity_provider": profile.provider,
+            "embedding_status": embedding_status,
+            "embedding_ready": embedding_ready,
+            "embedding_artifact_path": embedding_artifact_path,
+            "active_reference_count": len(reference_audios),
+            "active_reference_audio_ids": active_reference_ids,
+            "reference_audio_mode": _reference_audio_mode(len(reference_audios)),
+            "performance_controls_supported": performance_controls_supported,
+        }
+    )
+    if profile.provider == "openvoice":
+        metadata["unsupported_controls"] = [
+            "accent",
+            "emotion",
+            "energy",
+            "expressiveness",
+            "intonation",
+            "pause_length",
+            "pitch",
+            "rhythm",
+        ]
+    return metadata
+
+
 def serialize_voice_profile(profile: VoiceProfile) -> dict[str, Any]:
+    provider_metadata = _voice_profile_provider_metadata(profile)
     return {
         "id": profile.id,
         "display_name": profile.display_name,
         "provider": profile.provider,
         "model_id": profile.model_id,
         "language": profile.language,
-        "embedding_path": profile.embedding_path,
+        "embedding_path": provider_metadata.get("embedding_artifact_path"),
         "fallback_provider": profile.fallback_provider,
         "fallback_voice_settings": dict(profile.fallback_voice_settings_json or {}),
         "style": dict(profile.style_json or {}),
         "controls": dict(profile.controls_json or {}),
-        "provider_metadata": dict(profile.provider_metadata_json or {}),
+        "provider_metadata": provider_metadata,
         "voice": profile.espeak_voice,
         "espeak_rate": profile.espeak_rate,
         "espeak_pitch": profile.espeak_pitch,
@@ -203,6 +267,7 @@ def serialize_voice_profile(profile: VoiceProfile) -> dict[str, Any]:
 
 
 def runtime_voice_profile_payload(profile: VoiceProfile, display_name: str) -> dict[str, Any]:
+    provider_metadata = _voice_profile_provider_metadata(profile)
     return {
         "id": profile.id,
         "display_name": display_name,
@@ -228,7 +293,8 @@ def runtime_voice_profile_payload(profile: VoiceProfile, display_name: str) -> d
         ],
         "language": profile.language,
         "model_id": profile.model_id,
-        "embedding_path": profile.embedding_path,
+        "embedding_path": provider_metadata.get("embedding_artifact_path"),
+        "provider_metadata": provider_metadata,
     }
 
 
@@ -267,8 +333,112 @@ def _can_mutate_preset(preset: CharacterPreset, current_user_id: int) -> bool:
 
 
 def _can_mutate_voice_profile(profile: VoiceProfile, current_user_id: int) -> bool:
-    preset_ids = {preset.id for preset in profile.presets}
-    return any(preset_id for preset_id in preset_ids) and profile.created_by_user_id in {None, current_user_id}
+    if profile.created_by_user_id in {None, current_user_id}:
+        return True
+    return any(_can_mutate_preset(preset, current_user_id) for preset in profile.presets)
+
+
+def ensure_voice_profile_editable(profile: VoiceProfile, current_user_id: int) -> None:
+    if not _can_mutate_voice_profile(profile, current_user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Voice profile is not editable by this user")
+
+
+def voice_embedding_artifact_path(profile_id: str) -> Path:
+    return voice_embedding_dir() / f"{profile_id}.pth"
+
+
+def update_voice_profile_preparation_metadata(
+    profile: VoiceProfile,
+    *,
+    embedding_path: str | None,
+    provider_metadata: dict[str, Any] | None,
+    db: Session,
+) -> VoiceProfile:
+    if embedding_path:
+        profile.embedding_path = embedding_path
+    next_metadata = dict(profile.provider_metadata_json or {})
+    next_metadata.update(provider_metadata or {})
+    profile.provider_metadata_json = next_metadata
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+def invalidate_voice_profile_embedding(profile: VoiceProfile, db: Session) -> None:
+    if profile.embedding_path:
+        Path(profile.embedding_path).unlink(missing_ok=True)
+    profile.embedding_path = None
+    next_metadata = dict(profile.provider_metadata_json or {})
+    next_metadata.update(
+        {
+            "embedding_status": "not_prepared",
+            "embedding_ready": False,
+            "embedding_artifact_path": None,
+        }
+    )
+    profile.provider_metadata_json = next_metadata
+    db.flush()
+
+
+def _ffmpeg_binary() -> str | None:
+    return shutil.which("ffmpeg")
+
+
+def _normalize_reference_audio_upload(content: bytes, filename: str) -> tuple[Path, int]:
+    ffmpeg_binary = _ffmpeg_binary()
+    if not ffmpeg_binary:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Reference audio normalization is unavailable because ffmpeg is not installed.",
+        )
+
+    source_suffix = Path(filename).suffix or ".bin"
+    source_path = voice_reference_audio_dir() / f"{uuid.uuid4().hex}_raw{source_suffix}"
+    output_path = voice_reference_audio_dir() / f"{uuid.uuid4().hex}.wav"
+    source_path.write_bytes(content)
+    command = [
+        ffmpeg_binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-map_metadata",
+        "-1",
+        "-ac",
+        "1",
+        "-ar",
+        str(REFERENCE_AUDIO_SAMPLE_RATE),
+        "-sample_fmt",
+        "s16",
+        "-af",
+        REFERENCE_AUDIO_SILENCE_FILTER,
+        str(output_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Reference audio could not be decoded or normalized: {exc.stderr.strip() or 'unknown ffmpeg error'}",
+        ) from exc
+    finally:
+        source_path.unlink(missing_ok=True)
+
+    duration_ms = _audio_duration_ms(output_path)
+    if duration_ms is None:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reference audio could not be decoded after normalization")
+    if duration_ms < REFERENCE_AUDIO_MIN_DURATION_MS:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Reference audio must contain at least {REFERENCE_AUDIO_MIN_DURATION_MS / 1000:.1f} seconds of usable speech after trimming silence.",
+        )
+    return output_path, duration_ms
 
 
 def ensure_seeded_voice_presets(db: Session) -> None:
@@ -376,12 +546,18 @@ def upsert_voice_profile(payload: dict[str, Any], current_user_id: int, db: Sess
     profile.provider = str(payload.get("provider") or normalized["provider"]).lower()
     profile.model_id = payload.get("model_id") or normalized["model_id"]
     profile.language = payload.get("language") or normalized["language"]
-    profile.embedding_path = payload.get("embedding_path") or normalized["embedding_path"]
+    if "embedding_path" in payload:
+        profile.embedding_path = payload.get("embedding_path")
+    elif not profile.embedding_path and normalized["embedding_path"]:
+        profile.embedding_path = normalized["embedding_path"]
     profile.fallback_provider = payload.get("fallback_provider") or normalized["fallback_provider"]
     profile.fallback_voice_settings_json = _fallback_voice_settings(payload or normalized)
     profile.style_json = dict(payload.get("style") or {})
     profile.controls_json = _normalize_controls(payload or normalized)
-    profile.provider_metadata_json = dict(payload.get("provider_metadata") or {})
+    if "provider_metadata" in payload:
+        profile.provider_metadata_json = dict(payload.get("provider_metadata") or {})
+    elif profile.provider_metadata_json is None:
+        profile.provider_metadata_json = dict(normalized["provider_metadata_json"] or {})
     profile.espeak_voice = payload.get("voice") or normalized["espeak_voice"]
     profile.espeak_rate = payload.get("espeak_rate") if payload.get("espeak_rate") is not None else normalized["espeak_rate"]
     profile.espeak_pitch = payload.get("espeak_pitch") if payload.get("espeak_pitch") is not None else normalized["espeak_pitch"]
@@ -553,6 +729,7 @@ def save_reference_audio_upload(
     profile = get_voice_profile_model(voice_profile_id, db)
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice profile not found")
+    ensure_voice_profile_editable(profile, current_user_id)
     allowed_types = {item.strip() for item in settings.VOICE_LAB_ALLOWED_AUDIO_TYPES.split(",") if item.strip()}
     if file.content_type not in allowed_types:
         raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported reference audio type")
@@ -563,20 +740,20 @@ def save_reference_audio_upload(
     if len(content) > settings.VOICE_LAB_MAX_REFERENCE_AUDIO_SIZE_BYTES:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Reference audio exceeds max size")
     sha256 = _sha256_bytes(content)
-    destination = voice_reference_audio_dir() / f"{uuid.uuid4().hex}_{Path(file.filename).name}"
-    destination.write_bytes(content)
+    destination, duration_ms = _normalize_reference_audio_upload(content, file.filename)
 
     reference = VoiceReferenceAudio(
         voice_profile_id=voice_profile_id,
         storage_path=str(destination),
-        mime_type=file.content_type or "application/octet-stream",
-        duration_ms=_audio_duration_ms(destination),
+        mime_type="audio/wav",
+        duration_ms=duration_ms,
         sha256=sha256,
         authorization_confirmed=True,
         authorization_note=authorization_note,
         created_by_user_id=current_user_id,
     )
     db.add(reference)
+    invalidate_voice_profile_embedding(profile, db)
     db.commit()
     db.refresh(reference)
     profile = get_voice_profile_model(voice_profile_id, db)

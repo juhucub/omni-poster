@@ -2,18 +2,20 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
+import subprocess
 import wave
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
 from app.db import SessionLocal
 from app.models import GenerationJob, SocialAccount, VoicePreviewJob
 from app.services.voice_preview_jobs import STALE_VOICE_PREVIEW_ERROR_CODE
 from app.services.character_presets import get_character_preset
 from app.services.crypto import decrypt_secret
 from app.services.rendering import ProjectRenderService
-from app.services.tts import LocalSpeechService, SpeechSegment, TTSOrchestrator, TextToSpeechError
+from app.services.tts import LocalSpeechService, OpenVoiceProvider, SpeechSegment, TTSOrchestrator, TextToSpeechError
 from app.tasks.generation import STALE_GENERATION_ERROR, process_generation_job, reconcile_stale_generation_jobs
 from app.tasks.publish import process_publish_job
 from app.tasks.scheduler import dispatch_due_publish_jobs
@@ -49,6 +51,16 @@ class StubProvider:
             "controls_applied": self.response.get("controls_applied", {}),
             "reference_audio_count": self.response.get("reference_audio_count", 0),
         }
+
+
+def _write_wav(path: Path, *, seconds: float = 1.6, sample_rate: int = 16000) -> None:
+    frame_count = int(seconds * sample_rate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(b"\x00\x00" * frame_count)
 
 
 def test_background_presets_are_loaded_from_bundled_media_dir(auth_client: TestClient):
@@ -317,6 +329,312 @@ def test_voice_lab_preview_disables_fallback_for_explicit_provider(auth_client: 
     assert isinstance(response.json()["job_id"], int)
     assert scheduled["kwargs"]["preview_job_id"] == response.json()["job_id"]
     assert scheduled["task_id"] == f"voice-preview-{response.json()['job_id']}"
+    db = SessionLocal()
+    try:
+        job = db.get(VoicePreviewJob, response.json()["job_id"])
+        assert job is not None
+        assert job.requested_provider == "openvoice"
+        assert job.fallback_allowed is False
+    finally:
+        db.close()
+
+
+def test_voice_lab_preview_auto_runs_sync_when_selection_resolves_to_espeak(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    output_path = Path("test_storage") / "voice_lab" / "previews" / "resolved_sync.wav"
+    _write_wav(output_path)
+    scheduled = {"called": False}
+
+    def fake_resolve_provider_selection(self, voice_profile, requested_provider=None, fallback_allowed=True):
+        return {
+            "selection_order": ["openvoice", "espeak"],
+            "selected_provider": "espeak",
+            "provider_state": {
+                "openvoice": {"available": False, "reason": "missing_models"},
+                "espeak": {"available": True, "reason": None},
+            },
+            "fallback_allowed": True,
+        }
+
+    def fake_synthesize_dialogue(self, *, lines, voice_profile_map, output_dir, requested_provider=None, fallback_allowed=True, options=None):
+        assert requested_provider == "espeak"
+        assert fallback_allowed is True
+        return [
+            SpeechSegment(
+                speaker=lines[0]["speaker"],
+                text=lines[0]["text"],
+                voice="en-us+f3",
+                slot_index=0,
+                audio_path=str(output_path),
+                duration_seconds=1.2,
+                voice_profile_id="vp_host_calm_v1",
+                provider_used="espeak",
+                fallback_used=True,
+                controls_applied={"speaking_rate": 1.0},
+                reference_audio_count=0,
+            )
+        ]
+
+    monkeypatch.setattr(TTSOrchestrator, "resolve_provider_selection", fake_resolve_provider_selection)
+    monkeypatch.setattr(TTSOrchestrator, "synthesize_dialogue", fake_synthesize_dialogue)
+    monkeypatch.setattr(process_voice_lab_preview, "apply_async", lambda **kwargs: scheduled.update(called=True))
+
+    response = auth_client.post(
+        "/voice-lab/preview",
+        json={
+            "preset_id": "host_calm_v1",
+            "provider_preference": "auto",
+            "text": "Use the best available provider.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert response.json()["provider_used"] == "espeak"
+    assert scheduled["called"] is False
+
+
+def test_reference_audio_upload_normalizes_audio_and_invalidates_embedding(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+
+    stale_embedding = Path("test_storage") / "voice_lab" / "embeddings" / "vp_host_calm_v1.pth"
+    stale_embedding.parent.mkdir(parents=True, exist_ok=True)
+    stale_embedding.write_bytes(b"stale")
+
+    db = SessionLocal()
+    try:
+        from app.models import VoiceProfile
+
+        profile = db.get(VoiceProfile, "vp_host_calm_v1")
+        assert profile is not None
+        profile.embedding_path = str(stale_embedding)
+        profile.provider_metadata_json = {"embedding_status": "ready", "embedding_ready": True}
+        db.commit()
+    finally:
+        db.close()
+
+    def fake_run(command, check, capture_output, text):
+        _write_wav(Path(command[-1]), seconds=1.8)
+        return None
+
+    monkeypatch.setattr("app.services.voice_profiles._ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("app.services.voice_profiles.subprocess.run", fake_run)
+
+    response = auth_client.post(
+        "/voice-profiles/reference-audio",
+        files={"file": ("reference.mp3", b"fake-mp3", "audio/mpeg")},
+        data={
+            "voice_profile_id": "vp_host_calm_v1",
+            "authorization_confirmed": "true",
+            "authorization_note": "owned",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["reference_audio"]["mime_type"] == "audio/wav"
+    assert response.json()["reference_audio"]["storage_path"].endswith(".wav")
+    assert response.json()["reference_audio"]["duration_ms"] >= 1800
+    assert response.json()["voice_profile"]["embedding_path"] is None
+    assert response.json()["voice_profile"]["provider_metadata"]["embedding_status"] == "not_prepared"
+    assert stale_embedding.exists() is False
+
+
+def test_reference_audio_upload_rejects_unreadable_audio(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+
+    def fake_run(command, check, capture_output, text):
+        raise subprocess.CalledProcessError(1, command, stderr="invalid data found when processing input")
+
+    monkeypatch.setattr("app.services.voice_profiles._ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("app.services.voice_profiles.subprocess.run", fake_run)
+
+    response = auth_client.post(
+        "/voice-profiles/reference-audio",
+        files={"file": ("broken.mp3", b"not-audio", "audio/mpeg")},
+        data={
+            "voice_profile_id": "vp_host_calm_v1",
+            "authorization_confirmed": "true",
+            "authorization_note": "owned",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "could not be decoded or normalized" in response.json()["detail"]
+
+
+def test_reference_audio_upload_only_trims_leading_silence(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    recorded: dict[str, object] = {}
+
+    def fake_run(command, check, capture_output, text):
+        recorded["command"] = command
+        _write_wav(Path(command[-1]), seconds=2.3)
+        return None
+
+    monkeypatch.setattr("app.services.voice_profiles._ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("app.services.voice_profiles.subprocess.run", fake_run)
+
+    response = auth_client.post(
+        "/voice-profiles/reference-audio",
+        files={"file": ("reference.mp3", b"fake-mp3", "audio/mpeg")},
+        data={
+            "voice_profile_id": "vp_host_calm_v1",
+            "authorization_confirmed": "true",
+            "authorization_note": "owned",
+        },
+    )
+
+    assert response.status_code == 201
+    command = recorded["command"]
+    assert "-af" in command
+    silence_filter = command[command.index("-af") + 1]
+    assert "start_periods=1" in silence_filter
+    assert "stop_periods" not in silence_filter
+
+
+def test_prepare_voice_profile_persists_embedding_metadata(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    artifact_path = Path("test_storage") / "voice_lab" / "embeddings" / "vp_host_calm_v1.pth"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(b"embedding")
+
+    def fake_prepare_voice_profile(self, voice_profile, requested_provider=None):
+        return {
+            "provider_used": "openvoice",
+            "provider_state": {"openvoice": {"available": True}},
+            "prepared": True,
+            "cached_artifact_path": str(artifact_path),
+            "message": "prepared",
+            "provider_metadata": {
+                "embedding_status": "ready",
+                "embedding_ready": True,
+                "embedding_artifact_path": str(artifact_path),
+                "active_reference_count": 2,
+                "reference_audio_mode": "average_all_clips",
+            },
+        }
+
+    monkeypatch.setattr(TTSOrchestrator, "prepare_voice_profile", fake_prepare_voice_profile)
+
+    response = auth_client.post("/voice-profiles/vp_host_calm_v1/prepare")
+
+    assert response.status_code == 200
+    assert response.json()["cached_artifact_path"] == str(artifact_path)
+    listed = auth_client.get("/voice-profiles")
+    profile = next(item for item in listed.json()["items"] if item["id"] == "vp_host_calm_v1")
+    assert profile["embedding_path"] == str(artifact_path)
+    assert profile["provider_metadata"]["embedding_status"] == "ready"
+    assert profile["provider_metadata"]["active_reference_count"] == 2
 
 
 def test_voice_lab_preview_job_status_returns_completed_payload(auth_client: TestClient):
@@ -568,6 +886,47 @@ def test_tts_orchestrator_returns_provider_error_when_explicit_provider_cannot_f
     assert exc_info.value.provider_failures["openvoice"]["code"] == "openvoice_runtime_failure"
 
 
+def test_openvoice_prepare_voice_profile_uses_all_reference_clips(monkeypatch, tmp_path: Path):
+    provider = OpenVoiceProvider()
+    ref_one = tmp_path / "ref_one.wav"
+    ref_two = tmp_path / "ref_two.wav"
+    _write_wav(ref_one)
+    _write_wav(ref_two)
+    converter_dir = tmp_path / "converter"
+    converter_dir.mkdir(parents=True, exist_ok=True)
+    recorded: dict[str, object] = {}
+
+    monkeypatch.setattr(settings, "OPENVOICE_CHECKPOINTS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        provider,
+        "healthcheck",
+        lambda: {"available": True, "reason": None, "metadata": {"device": "cpu"}},
+    )
+    monkeypatch.setattr(provider, "_import_runtime", lambda: (None, "se_extractor", "converter_cls", "torch_module"))
+    monkeypatch.setattr(provider, "_get_converter", lambda converter_dir, device, converter_cls: object())
+
+    def fake_get_target_embedding(reference_paths, converter, se_extractor, device, torch_module, artifact_path=None):
+        recorded["reference_paths"] = [str(path) for path in reference_paths]
+        recorded["artifact_path"] = str(artifact_path)
+        return "embedding"
+
+    monkeypatch.setattr(provider, "_get_target_embedding", fake_get_target_embedding)
+
+    result = provider.prepare_voice_profile(
+        {
+            "id": "vp_test",
+            "reference_audios": [
+                {"storage_path": str(ref_one)},
+                {"storage_path": str(ref_two)},
+            ],
+        }
+    )
+
+    assert recorded["reference_paths"] == [str(ref_one), str(ref_two)]
+    assert str(recorded["artifact_path"]).endswith("vp_test.pth")
+    assert result["provider_metadata"]["reference_audio_mode"] == "average_all_clips"
+
+
 def test_local_speech_service_discovers_espeak_provider(monkeypatch):
     service = LocalSpeechService()
 
@@ -718,8 +1077,11 @@ def test_tts_provider_capabilities_route_returns_registry_state(auth_client: Tes
     response = auth_client.get("/tts/providers")
 
     assert response.status_code == 200
-    providers = {item["provider"] for item in response.json()["items"]}
+    items = response.json()["items"]
+    providers = {item["provider"] for item in items}
     assert {"espeak", "openvoice"}.issubset(providers)
+    openvoice = next(item for item in items if item["provider"] == "openvoice")
+    assert openvoice["supported_controls"] == ["speaking_rate"]
 
 
 def test_project_speaker_bindings_round_trip(auth_client: TestClient):

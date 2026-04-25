@@ -14,7 +14,7 @@ from app.services.voice_preview_jobs import (
     build_voice_preview_failure,
     reconcile_stale_voice_preview_jobs,
 )
-from app.services.voice_profiles import runtime_voice_profile_payload, voice_lab_preview_dir
+from app.services.voice_profiles import runtime_voice_profile_payload, update_voice_profile_preparation_metadata, voice_lab_preview_dir
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,20 @@ def process_voice_lab_preview(preview_job_id: int) -> dict:
         job = db.get(VoicePreviewJob, preview_job_id)
         if not job:
             return {"ok": False, "reason": "missing_job_after_render"}
+        if result.provider_used == "openvoice" and profile_payload.get("embedding_path") and job.voice_profile is not None:
+            update_voice_profile_preparation_metadata(
+                job.voice_profile,
+                embedding_path=str(profile_payload.get("embedding_path")),
+                provider_metadata={
+                    "embedding_status": "ready",
+                    "embedding_ready": True,
+                    "embedding_artifact_path": str(profile_payload.get("embedding_path")),
+                    "active_reference_count": len(profile_payload.get("reference_audios") or []),
+                    "reference_audio_mode": "average_all_clips" if len(profile_payload.get("reference_audios") or []) > 1 else "single_clip",
+                },
+                db=db,
+            )
+            db.refresh(job)
         job.status = "completed"
         job.progress = 100
         job.stage = "completed"

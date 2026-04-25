@@ -31,6 +31,7 @@ from app.services.voice_preview_jobs import (
     to_voice_preview_response,
 )
 from app.services.voice_profiles import (
+    ensure_voice_profile_editable,
     get_character_preset,
     get_character_preset_model,
     get_voice_profile,
@@ -40,6 +41,7 @@ from app.services.voice_profiles import (
     resolve_character_portrait_path,
     runtime_voice_profile_payload,
     save_reference_audio_upload,
+    update_voice_profile_preparation_metadata,
     upsert_character_preset,
     upsert_voice_profile,
     voice_lab_preview_dir,
@@ -49,17 +51,26 @@ from app.tasks.voice_preview import process_voice_lab_preview
 router = APIRouter(tags=["character_presets"])
 
 
-def _preview_requires_worker(profile_payload: dict, payload: VoiceLabPreviewRequest) -> bool:
+def _preview_execution_policy(
+    profile_payload: dict[str, object],
+    payload: VoiceLabPreviewRequest,
+    orchestrator: TTSOrchestrator,
+) -> dict[str, object]:
     requested_provider = payload.provider_preference.strip().lower() or "auto"
-    profile_provider = str(profile_payload.get("provider") or "").strip().lower()
-    fallback_provider = str(profile_payload.get("fallback_provider") or "").strip().lower()
-    if requested_provider == "espeak":
-        return False
-    if requested_provider == "openvoice":
-        return True
-    if profile_provider == "openvoice":
-        return True
-    return payload.fallback_allowed and fallback_provider == "openvoice"
+    resolved_fallback_allowed = requested_provider in {"", "auto"} and payload.fallback_allowed
+    selection = orchestrator.resolve_provider_selection(
+        profile_payload,
+        requested_provider=requested_provider,
+        fallback_allowed=resolved_fallback_allowed,
+    )
+    selected_provider = str(selection.get("selected_provider") or requested_provider or profile_payload.get("provider") or "espeak").lower()
+    return {
+        "requested_provider": requested_provider,
+        "selected_provider": selected_provider,
+        "fallback_allowed": resolved_fallback_allowed if requested_provider in {"", "auto"} else False,
+        "requires_worker": selected_provider == "openvoice",
+        "provider_state": selection["provider_state"],
+    }
 
 
 @router.get("/character-presets", response_model=CharacterPresetListResponse)
@@ -174,17 +185,23 @@ def prepare_voice_profile(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ = current_user
     profile_model = get_voice_profile_model(voice_profile_id, db)
     if not profile_model:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice profile not found.")
+    ensure_voice_profile_editable(profile_model, current_user.id)
     orchestrator = TTSOrchestrator()
     payload = runtime_voice_profile_payload(profile_model, profile_model.display_name)
     try:
         result = orchestrator.prepare_voice_profile(payload)
     except TTSProviderError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.as_dict()) from exc
-    profile = get_voice_profile(voice_profile_id, db)
+    profile_model = update_voice_profile_preparation_metadata(
+        profile_model,
+        embedding_path=result.get("cached_artifact_path"),
+        provider_metadata=result.get("provider_metadata"),
+        db=db,
+    )
+    profile = get_voice_profile(profile_model.id, db)
     return VoiceProfilePrepareResponse(
         voice_profile=VoiceProfileSummary(**profile),
         provider_used=result["provider_used"],
@@ -229,15 +246,17 @@ def create_voice_lab_preview(
         amplitude=payload.amplitude,
     )
     orchestrator = TTSOrchestrator()
-    fallback_allowed = payload.provider_preference in {"", "auto"}
-    provider_state = orchestrator.provider_state()
+    execution_policy = _preview_execution_policy(profile_payload, payload, orchestrator)
+    provider_state = dict(execution_policy["provider_state"])
+    selected_provider = str(execution_policy["selected_provider"])
+    resolved_fallback_allowed = bool(execution_policy["fallback_allowed"])
 
-    if _preview_requires_worker(profile_payload, payload):
+    if execution_policy["requires_worker"]:
         preview_job = create_voice_preview_job(
             user_id=current_user.id,
             preset=preset_model,
-            requested_provider=payload.provider_preference,
-            fallback_allowed=payload.fallback_allowed,
+            requested_provider=selected_provider,
+            fallback_allowed=resolved_fallback_allowed,
             sample_text=payload.text,
             controls_applied=dict(profile_payload.get("controls") or {}),
             provider_state=provider_state,
@@ -276,12 +295,25 @@ def create_voice_lab_preview(
             lines=[{"speaker": preset_model.display_name, "text": payload.text, "order": 0}],
             voice_profile_map={preset_model.display_name: profile_payload},
             output_dir=preview_dir,
-            requested_provider=payload.provider_preference,
-            fallback_allowed=fallback_allowed and payload.fallback_allowed,
+            requested_provider=selected_provider,
+            fallback_allowed=resolved_fallback_allowed,
         )
     except TTSProviderError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.as_dict()) from exc
     result = segments[0]
+    if result.provider_used == "openvoice" and profile_payload.get("embedding_path"):
+        update_voice_profile_preparation_metadata(
+            preset_model.voice_profile,
+            embedding_path=str(profile_payload.get("embedding_path")),
+            provider_metadata={
+                "embedding_status": "ready",
+                "embedding_ready": True,
+                "embedding_artifact_path": str(profile_payload.get("embedding_path")),
+                "active_reference_count": len(profile_payload.get("reference_audios") or []),
+                "reference_audio_mode": "average_all_clips" if len(profile_payload.get("reference_audios") or []) > 1 else "single_clip",
+            },
+            db=db,
+        )
     audio_path = Path(result.audio_path)
     return VoiceLabPreviewResponse(
         status="completed",

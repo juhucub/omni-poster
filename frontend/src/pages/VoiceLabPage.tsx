@@ -64,6 +64,36 @@ const VoiceLabPage: React.FC = () => {
     [profiles, selectedPreset?.voice_profile_id]
   );
 
+  const selectedProviderCapability = useMemo(
+    () => providerCapabilities.find((capability) => capability.provider === form.provider) || null,
+    [providerCapabilities, form.provider]
+  );
+
+  const supportedControls = useMemo(
+    () => new Set((selectedProviderCapability?.supported_controls || []).map((item) => String(item))),
+    [selectedProviderCapability]
+  );
+
+  const embeddingStatus = String(
+    selectedVoiceProfile?.provider_metadata?.['embedding_status'] ||
+      (selectedVoiceProfile?.embedding_path ? 'ready' : selectedVoiceProfile?.reference_audio_count ? 'not_prepared' : 'pending_reference_audio')
+  );
+  const embeddingReady = Boolean(
+    selectedVoiceProfile?.provider_metadata?.['embedding_ready'] ?? selectedVoiceProfile?.embedding_path
+  );
+  const activeReferenceCount = Number(
+    selectedVoiceProfile?.provider_metadata?.['active_reference_count'] ?? selectedVoiceProfile?.reference_audio_count ?? 0
+  );
+  const referenceAudioMode = String(
+    selectedVoiceProfile?.provider_metadata?.['reference_audio_mode'] ||
+      (activeReferenceCount > 1 ? 'average_all_clips' : activeReferenceCount === 1 ? 'single_clip' : 'none')
+  );
+  const unsupportedControls = Array.isArray(selectedVoiceProfile?.provider_metadata?.['unsupported_controls'])
+    ? selectedVoiceProfile?.provider_metadata?.['unsupported_controls'].map((item) => String(item))
+    : [];
+
+  const supportsControl = (controlName: string) => supportedControls.has(controlName);
+
   const hydrateForm = (preset: CharacterPreset | null, profile: VoiceProfile | null) => {
     if (!preset) {
       setForm(emptyForm);
@@ -322,7 +352,7 @@ const VoiceLabPage: React.FC = () => {
             <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Character presets</div>
             <h1 className="mt-2 text-4xl font-semibold">Voice Lab</h1>
             <p className="mt-3 text-slate-400">
-              Build provider-backed character voices with authorized reference audio, provider-aware previews, and reusable fallback settings for final renders.
+              Build character voices with a clear split between voice identity and performance. Reference audio drives OpenVoice tone color cloning; performance controls only affect providers that actually support them today.
             </p>
 
             {info && <div className="mt-4 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-3 text-emerald-200">{info}</div>}
@@ -409,7 +439,36 @@ const VoiceLabPage: React.FC = () => {
           </section>
 
           <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="text-xs uppercase tracking-[0.25em] text-cyan-200/70">Voice Identity</div>
+            <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+              <div className="grid gap-3 md:grid-cols-2">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Embedding Status</div>
+                  <div className="mt-2 text-lg font-medium text-slate-100">{embeddingStatus.replaceAll('_', ' ')}</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    {embeddingReady ? 'Cached speaker embedding is ready to reuse.' : 'Prepare Voice will build or refresh the cached speaker embedding.'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Reference Aggregation</div>
+                  <div className="mt-2 text-lg font-medium text-slate-100">{referenceAudioMode.replaceAll('_', ' ')}</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    {activeReferenceCount > 1
+                      ? `OpenVoice now averages ${activeReferenceCount} active reference clips for speaker identity.`
+                      : activeReferenceCount === 1
+                        ? 'OpenVoice is using 1 active reference clip for speaker identity.'
+                        : 'No active reference clips yet.'}
+                  </div>
+                </div>
+              </div>
+              {unsupportedControls.length > 0 && (
+                <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-500/10 px-3 py-3 text-sm text-amber-100">
+                  OpenVoice identity cloning is active, but these style controls are not implemented yet: {unsupportedControls.join(', ')}.
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 grid gap-4 md:grid-cols-2">
               <label className="text-sm text-slate-300">
                 Display Name
                 <input
@@ -464,6 +523,16 @@ const VoiceLabPage: React.FC = () => {
                   className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
                 />
               </label>
+            </div>
+
+            <div className="mt-6">
+              <div className="text-xs uppercase tracking-[0.25em] text-cyan-200/70">Fallback Voice Settings</div>
+              <p className="mt-2 text-sm text-slate-400">
+                These settings are used by the espeak fallback path. They are not the same thing as OpenVoice speaker identity.
+              </p>
+            </div>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
               <label className="text-sm text-slate-300">
                 Fallback Voice
                 <input
@@ -510,7 +579,14 @@ const VoiceLabPage: React.FC = () => {
               </label>
             </div>
 
-            <div className="mt-6 grid gap-4 md:grid-cols-2">
+            <div className="mt-6">
+              <div className="text-xs uppercase tracking-[0.25em] text-cyan-200/70">Performance</div>
+              <p className="mt-2 text-sm text-slate-400">
+                Performance controls change delivery only when the active provider supports them. Right now, OpenVoice only applies speaking rate from this panel.
+              </p>
+            </div>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
               <label className="text-sm text-slate-300">
                 Speaking Rate
                 <input
@@ -532,8 +608,10 @@ const VoiceLabPage: React.FC = () => {
                   step="0.05"
                   value={Number(form.controls.energy)}
                   onChange={(event) => setControl('energy', Number(event.target.value))}
+                  disabled={!supportsControl('energy')}
                   className="mt-3 w-full"
                 />
+                {!supportsControl('energy') && <div className="mt-2 text-xs text-amber-300">Unavailable for {form.provider} previews right now.</div>}
               </label>
               <label className="text-sm text-slate-300">
                 Pause Length
@@ -544,8 +622,10 @@ const VoiceLabPage: React.FC = () => {
                   step="0.25"
                   value={Number(form.controls.pause_length)}
                   onChange={(event) => setControl('pause_length', Number(event.target.value))}
+                  disabled={!supportsControl('pause_length')}
                   className="mt-3 w-full"
                 />
+                {!supportsControl('pause_length') && <div className="mt-2 text-xs text-amber-300">Unavailable for {form.provider} previews right now.</div>}
               </label>
               <label className="text-sm text-slate-300">
                 Expressiveness
@@ -556,14 +636,17 @@ const VoiceLabPage: React.FC = () => {
                   step="0.05"
                   value={Number(form.controls.expressiveness)}
                   onChange={(event) => setControl('expressiveness', Number(event.target.value))}
+                  disabled={!supportsControl('expressiveness')}
                   className="mt-3 w-full"
                 />
+                {!supportsControl('expressiveness') && <div className="mt-2 text-xs text-amber-300">Unavailable for {form.provider} previews right now.</div>}
               </label>
               <label className="text-sm text-slate-300">
                 Emotion
                 <select
                   value={String(form.controls.emotion)}
                   onChange={(event) => setControl('emotion', event.target.value)}
+                  disabled={!supportsControl('emotion')}
                   className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
                 >
                   <option value="neutral">Neutral</option>
@@ -571,14 +654,17 @@ const VoiceLabPage: React.FC = () => {
                   <option value="serious">Serious</option>
                   <option value="upbeat">Upbeat</option>
                 </select>
+                {!supportsControl('emotion') && <div className="mt-2 text-xs text-amber-300">Unavailable for {form.provider} previews right now.</div>}
               </label>
               <label className="text-sm text-slate-300">
                 Accent
                 <input
                   value={String(form.controls.accent)}
                   onChange={(event) => setControl('accent', event.target.value)}
+                  disabled={!supportsControl('accent')}
                   className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
                 />
+                {!supportsControl('accent') && <div className="mt-2 text-xs text-amber-300">Unavailable for {form.provider} previews right now.</div>}
               </label>
             </div>
 
