@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import shutil
 import tempfile
 import textwrap
@@ -27,9 +28,11 @@ class ProjectRenderService:
     BASE_HEIGHT = 620
     ACTIVE_HEIGHT = 780
 
-    def __init__(self) -> None:
+    def __init__(self, *, db=None, project_id: int | None = None) -> None:
+        self.db = db
+        self.project_id = project_id
         self.video_service = VideoGenerationService(output_dir="./generated_videos")
-        self.speech_service = LocalSpeechService()
+        self.speech_service = LocalSpeechService(db=db, project_id=project_id)
         self.output_dir = Path("./generated_videos")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.audio_export_fps = settings.TTS_AUDIO_EXPORT_FPS
@@ -42,6 +45,7 @@ class ProjectRenderService:
         parsed_lines: list[dict],
         style_preset: str,
         output_kind: str = "preview",
+        progress_callback=None,
     ) -> dict:
         try:
             return self._render_speaker_video(
@@ -50,6 +54,7 @@ class ProjectRenderService:
                 parsed_lines=parsed_lines,
                 style_preset=style_preset,
                 output_kind=output_kind,
+                progress_callback=progress_callback,
             )
         except RuntimeError as exc:
             logger.warning("Falling back to overlay-only render for project %s: %s", project_id, exc)
@@ -70,6 +75,7 @@ class ProjectRenderService:
         parsed_lines: list[dict],
         style_preset: str,
         output_kind: str,
+        progress_callback,
     ) -> dict:
         from moviepy import (
             CompositeVideoClip,
@@ -87,33 +93,41 @@ class ProjectRenderService:
         audio_clips: list = []
         try:
             segments = self.speech_service.synthesize_dialogue(parsed_lines, work_dir / "speech")
-            total_duration = sum(segment.duration_seconds for segment in segments)
-            if total_duration <= 0:
-                raise RuntimeError("Generated speech audio has no duration.")
+            self._emit_progress(progress_callback, "tts_ready", 46)
 
             background_clip = VideoFileClip(clean_video_path).without_audio()
             background_clip = self.video_service._apply_background_style(background_clip, style_preset)
             background_clip = self._fit_to_canvas(background_clip)
+            self._emit_progress(progress_callback, "background_ready", 58)
+
+            timed_segments = self._build_timed_segments(segments)
+            audio_clips.extend(item["audio_clip"] for item in timed_segments)
+
+            total_duration = sum(item["duration_seconds"] for item in timed_segments)
+            if total_duration <= 0:
+                raise RuntimeError("Generated speech audio has no duration.")
+
             background_clip = self._extend_background(background_clip, total_duration)
             clips_to_close.append(background_clip)
 
             cast = self._primary_cast(segments)
             timeline_layers = [background_clip]
 
-            for slot_index, segment in enumerate(cast):
-                portrait_path = self._resolve_character_portrait(segment.speaker, segment.slot_index, work_dir)
+            for cast_member in cast:
+                portrait_path = self._resolve_character_portrait(cast_member.speaker, cast_member.slot_index, work_dir)
                 base_clip = (
                     ImageClip(str(portrait_path))
                     .resized(height=self.BASE_HEIGHT)
                     .with_opacity(0.26)
-                    .with_position(self.BASE_POSITIONS[min(segment.slot_index, 1)])
+                    .with_position(self.BASE_POSITIONS[min(cast_member.slot_index, 1)])
                     .with_duration(total_duration)
                 )
                 timeline_layers.append(base_clip)
                 clips_to_close.append(base_clip)
 
             cursor = 0.0
-            for segment in segments:
+            for item in timed_segments:
+                segment = item["segment"]
                 portrait_path = self._resolve_character_portrait(segment.speaker, segment.slot_index, work_dir)
                 speaker_slot = min(segment.slot_index, 1)
                 active_clip = (
@@ -121,20 +135,20 @@ class ProjectRenderService:
                     .resized(height=self.ACTIVE_HEIGHT)
                     .with_position(self.ACTIVE_POSITIONS[speaker_slot])
                     .with_start(cursor)
-                    .with_duration(segment.duration_seconds)
+                    .with_duration(item["duration_seconds"])
                 )
                 caption_path = self._build_dialogue_card(segment, work_dir)
                 caption_clip = (
                     ImageClip(str(caption_path))
                     .with_position((90, 1320))
                     .with_start(cursor)
-                    .with_duration(segment.duration_seconds)
+                    .with_duration(item["duration_seconds"])
                 )
-                audio_clip = self.speech_service.build_audio_clip(segment.audio_path)
                 timeline_layers.extend([active_clip, caption_clip])
                 clips_to_close.extend([active_clip, caption_clip])
-                audio_clips.append(audio_clip)
-                cursor += segment.duration_seconds
+                cursor += item["duration_seconds"]
+
+            self._emit_progress(progress_callback, "timeline_ready", 68)
 
             composite_audio = concatenate_audioclips(audio_clips)
             composite = (
@@ -148,31 +162,45 @@ class ProjectRenderService:
             clips_to_close.append(composite)
             clips_to_close.append(composite_audio)
 
+            render_config = self._render_config(background_clip, output_kind)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_filename = f"{project_id}_{output_kind}_{timestamp}.mp4"
             output_path = self.output_dir / output_filename
             logger.info(
-                "Writing composite video project=%s output=%s audio_fps=%s audio_bitrate=%s segment_count=%s duration=%.2fs",
+                "Writing composite video project=%s output=%s audio_fps=%s audio_bitrate=%s render_fps=%s preset=%s crf=%s segment_count=%s duration=%.2fs",
                 project_id,
                 output_path,
                 self.audio_export_fps,
                 self.audio_export_bitrate,
+                render_config["fps"],
+                render_config["preset"],
+                render_config["crf"],
                 len(segments),
                 total_duration,
             )
+            self._emit_progress(progress_callback, "encoding", 80)
             composite.write_videofile(
                 str(output_path),
-                fps=max(int(getattr(background_clip, "fps", 24) or 24), 24),
+                fps=render_config["fps"],
                 codec="libx264",
                 audio_codec="aac",
                 audio_fps=self.audio_export_fps,
                 audio_bitrate=self.audio_export_bitrate,
                 temp_audiofile=str(work_dir / "temp_audio.m4a"),
                 remove_temp=True,
-                preset="medium",
-                ffmpeg_params=["-crf", "22"],
+                preset=render_config["preset"],
+                ffmpeg_params=[
+                    "-crf",
+                    str(render_config["crf"]),
+                    "-movflags",
+                    "+faststart",
+                    "-pix_fmt",
+                    "yuv420p",
+                ],
+                threads=render_config["threads"],
                 logger=None,
             )
+            self._emit_progress(progress_callback, "encoded", 88)
 
             return {
                 "output_path": f"file://{output_path.absolute()}",
@@ -184,7 +212,27 @@ class ProjectRenderService:
                 "processing_time_seconds": None,
                 "metadata": {
                     "render_mode": "speaker_dialogue",
-                    "voices": {segment.speaker: segment.voice for segment in segments},
+                    "voices": {
+                        segment.speaker: {
+                            "voice": segment.voice,
+                            "provider_used": segment.provider_used,
+                            "voice_profile_id": segment.voice_profile_id,
+                            "fallback_used": segment.fallback_used,
+                        }
+                        for segment in segments
+                    },
+                    "line_timing_seconds": [
+                        {
+                            "speaker": item["segment"].speaker,
+                            "text": item["segment"].text,
+                            "duration_seconds": item["duration_seconds"],
+                            "provider_used": item["segment"].provider_used,
+                            "voice_profile_id": item["segment"].voice_profile_id,
+                        }
+                        for item in timed_segments
+                    ],
+                    "render_fps": render_config["fps"],
+                    "encode_preset": render_config["preset"],
                     "portrait_resolution": "backend/storage/characters/<speaker>.png or speaker_<slot>.png",
                 },
             }
@@ -219,6 +267,34 @@ class ProjectRenderService:
         still = ImageClip(frozen_frame).with_duration(remaining)
         return concatenate_videoclips([clip, still])
 
+    def _build_timed_segments(self, segments: list[SpeechSegment]) -> list[dict]:
+        timed_segments: list[dict] = []
+        for segment in segments:
+            audio_clip = self.speech_service.build_audio_clip(segment.audio_path)
+            timed_segments.append(
+                {
+                    "segment": segment,
+                    "audio_clip": audio_clip,
+                    "duration_seconds": max(float(getattr(audio_clip, "duration", 0) or 0), segment.duration_seconds, 0.6),
+                }
+            )
+        return timed_segments
+
+    def _render_config(self, background_clip, output_kind: str) -> dict[str, int | str]:
+        source_fps = float(getattr(background_clip, "fps", 24) or 24)
+        fps_cap = 24 if output_kind == "preview" else 30
+        target_fps = max(24, min(int(round(source_fps)), fps_cap))
+        return {
+            "fps": target_fps,
+            "preset": "veryfast" if output_kind == "preview" else "faster",
+            "crf": 24 if output_kind == "preview" else 22,
+            "threads": max(2, min(os.cpu_count() or 4, 8)),
+        }
+
+    def _emit_progress(self, progress_callback, stage: str, progress: int) -> None:
+        if callable(progress_callback):
+            progress_callback(stage, progress)
+
     def _primary_cast(self, segments: list[SpeechSegment]) -> list[SpeechSegment]:
         cast: list[SpeechSegment] = []
         seen: set[str] = set()
@@ -233,7 +309,7 @@ class ProjectRenderService:
 
     def _resolve_character_portrait(self, speaker: str, slot_index: int, work_dir: Path) -> Path:
         slug = self._slugify(speaker)
-        preset = resolve_character_preset_for_speaker(speaker)
+        preset = resolve_character_preset_for_speaker(speaker, self.db) if self.db is not None else resolve_character_preset_for_speaker(speaker)
         preset_portrait = resolve_character_portrait_path(preset)
         if preset_portrait:
             logger.info(

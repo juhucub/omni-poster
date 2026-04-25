@@ -20,6 +20,15 @@ from app.services.storage import (
 router = APIRouter(tags=["assets"])
 
 
+def _video_response(path: str, *, media_type: str, filename: str):
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=filename,
+        headers={"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=3600"},
+    )
+
+
 @router.get("/background-presets", response_model=list[BackgroundPresetSummary])
 def get_background_presets():
     return [
@@ -37,7 +46,7 @@ def get_background_presets():
 @router.get("/background-presets/{preset_key}/content")
 def get_background_preset_content(preset_key: str):
     preset = resolve_background_preset(preset_key)
-    return FileResponse(
+    return _video_response(
         preset["path"],
         media_type="video/mp4",
         filename=preset["filename"],
@@ -148,4 +157,6 @@ def get_asset_content(
     asset = db.query(Asset).filter(Asset.id == asset_id, Asset.user_id == current_user.id).one_or_none()
     if not asset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    if asset.mime_type.startswith("video/"):
+        return _video_response(asset.storage_key, media_type=asset.mime_type, filename=asset.original_filename)
     return FileResponse(asset.storage_key, media_type=asset.mime_type, filename=asset.original_filename)

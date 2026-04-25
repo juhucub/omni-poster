@@ -64,6 +64,20 @@ def _set_job_progress(db: Session, job: GenerationJob, project: Project, progres
     db.commit()
 
 
+def _render_progress_callback(db: Session, job: GenerationJob, project: Project):
+    last_progress = job.progress
+
+    def callback(stage: str, progress: int) -> None:
+        nonlocal last_progress
+        if progress <= last_progress:
+            return
+        logger.info("Generation job %s advanced to stage=%s progress=%s", job.id, stage, progress)
+        _set_job_progress(db, job, project, progress)
+        last_progress = progress
+
+    return callback
+
+
 @celery.task(name="app.tasks.generation.process_generation_job")
 def process_generation_job(job_id: int) -> dict:
     db: Session = SessionLocal()
@@ -89,7 +103,8 @@ def process_generation_job(job_id: int) -> dict:
         db.commit()
         logger.info("Generation job %s started for project %s", job.id, project.id)
 
-        render_service = ProjectRenderService()
+        render_service = ProjectRenderService(db=db, project_id=project.id)
+        progress_callback = _render_progress_callback(db, job, project)
         try:
             _set_job_progress(db, job, project, 35)
             logger.info("Generation job %s entering render pipeline", job.id)
@@ -99,6 +114,7 @@ def process_generation_job(job_id: int) -> dict:
                 parsed_lines=script_revision.parsed_lines_json,
                 style_preset=job.style_preset,
                 output_kind=job.output_kind,
+                progress_callback=progress_callback,
             )
         except TypeError:
             # Compatibility for tests and legacy local monkeypatches that still use the older signature.

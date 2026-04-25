@@ -23,8 +23,14 @@ Services:
 - Health: `http://localhost:8000/health`
 - Postgres: `localhost:5432`
 - Redis: `localhost:6379`
+- Voice preview worker: processes OpenVoice previews on a dedicated single-concurrency queue
 
 The API container runs `alembic upgrade head` before starting Uvicorn.
+
+## OpenVoice Runtime Notes
+- OpenVoice previews now run on the dedicated `voice_worker` service instead of inside the FastAPI process.
+- `espeak` previews still run synchronously in the API for fast local feedback.
+- If Docker Desktop is memory-constrained, the `voice_worker` may still hit OOM during OpenVoice loads on CPU. Increase Docker memory if you see worker exits with code `137`.
 
 ## Required YouTube Settings
 - `YOUTUBE_CLIENT_ID`

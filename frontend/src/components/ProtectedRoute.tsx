@@ -1,16 +1,20 @@
-import React from 'react'
+import React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
 import { Loader2 } from 'lucide-react';
 
+import { useAuth } from '../context/AuthContext';
 
-export function ProtectedRoute({ children }: { children: JSX.Element }) {
+export function ProtectedRoute({ children }: { children: React.ReactElement }) {
   const { isLoading, isAuthenticated } = useAuth();
-  const loc = useLocation();
+  const location = useLocation();
 
-  if (isLoading) return <Loader2 />;
-  if (!isAuthenticated) {
-    return <Navigate to="/login" state={{ from: loc }} replace />;
+  if (isLoading) {
+    return <Loader2 />;
   }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
   return children;
 }
