@@ -6,7 +6,7 @@ const waiters = [];
 function startProcess(name, command, args) {
   const child = spawn(command, args, {
     cwd: process.cwd(),
-    env: { ...process.env, HOST: process.env.HOST || 'localhost', PORT: process.env.PORT || '3000' },
+    env: { ...process.env, PORT: process.env.PORT || '3000' },
     stdio: 'inherit',
     shell: process.platform === 'win32',
   });
@@ -59,7 +59,7 @@ process.on('SIGTERM', () => {
 
 const cssBuild = spawnSync('npm', ['run', 'build:css'], {
   cwd: process.cwd(),
-  env: { ...process.env, HOST: process.env.HOST || 'localhost', PORT: process.env.PORT || '3000' },
+  env: { ...process.env, PORT: process.env.PORT || '3000' },
   stdio: 'inherit',
   shell: process.platform === 'win32',
 });

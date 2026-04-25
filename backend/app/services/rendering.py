@@ -28,9 +28,11 @@ class ProjectRenderService:
     BASE_HEIGHT = 620
     ACTIVE_HEIGHT = 780
 
-    def __init__(self) -> None:
+    def __init__(self, *, db=None, project_id: int | None = None) -> None:
+        self.db = db
+        self.project_id = project_id
         self.video_service = VideoGenerationService(output_dir="./generated_videos")
-        self.speech_service = LocalSpeechService()
+        self.speech_service = LocalSpeechService(db=db, project_id=project_id)
         self.output_dir = Path("./generated_videos")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.audio_export_fps = settings.TTS_AUDIO_EXPORT_FPS
@@ -210,12 +212,22 @@ class ProjectRenderService:
                 "processing_time_seconds": None,
                 "metadata": {
                     "render_mode": "speaker_dialogue",
-                    "voices": {segment.speaker: segment.voice for segment in segments},
+                    "voices": {
+                        segment.speaker: {
+                            "voice": segment.voice,
+                            "provider_used": segment.provider_used,
+                            "voice_profile_id": segment.voice_profile_id,
+                            "fallback_used": segment.fallback_used,
+                        }
+                        for segment in segments
+                    },
                     "line_timing_seconds": [
                         {
                             "speaker": item["segment"].speaker,
                             "text": item["segment"].text,
                             "duration_seconds": item["duration_seconds"],
+                            "provider_used": item["segment"].provider_used,
+                            "voice_profile_id": item["segment"].voice_profile_id,
                         }
                         for item in timed_segments
                     ],
@@ -297,7 +309,7 @@ class ProjectRenderService:
 
     def _resolve_character_portrait(self, speaker: str, slot_index: int, work_dir: Path) -> Path:
         slug = self._slugify(speaker)
-        preset = resolve_character_preset_for_speaker(speaker)
+        preset = resolve_character_preset_for_speaker(speaker, self.db) if self.db is not None else resolve_character_preset_for_speaker(speaker)
         preset_portrait = resolve_character_portrait_path(preset)
         if preset_portrait:
             logger.info(

@@ -71,3 +71,4 @@ websockets==15.0.1
 celery==5.4.0
 psycopg[binary]==3.2.9
 redis==5.0.8
+soundfile==0.13.1

@@ -11,6 +11,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       BUNDLED_MEDIA_DIR: /app/backend/storage
       MEDIA_DIR: /data/uploads
+      OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
+      OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
+      OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
+      OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     ports: ["8000:8000"]
     depends_on:
@@ -21,6 +25,9 @@ services:
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
+      - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
+
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 10s
@@ -37,6 +44,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       BUNDLED_MEDIA_DIR: /app/backend/storage
       MEDIA_DIR: /data/uploads
+      OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
+      OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
+      OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
+      OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
     depends_on:
       api:
         condition: service_healthy
@@ -48,6 +59,36 @@ services:
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
+      - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
+
+  voice_worker:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    env_file: ["../../.env.dev"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
+      REDIS_URL: redis://redis:6379/0
+      BUNDLED_MEDIA_DIR: /app/backend/storage
+      MEDIA_DIR: /data/uploads
+      OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
+      OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
+      OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
+      OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: ["celery", "-A", "app.celery_app.celery", "worker", "-Q", "voice_preview", "--concurrency=1"]
+    volumes:
+      - ../../backend/storage:/app/backend/storage:ro
+      - api_uploads:/data/uploads
+      - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
+      - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 
   beat:
     build:
@@ -59,6 +100,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       BUNDLED_MEDIA_DIR: /app/backend/storage
       MEDIA_DIR: /data/uploads
+      OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
+      OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
+      OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
+      OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
     depends_on:
       api:
         condition: service_healthy
@@ -70,6 +115,8 @@ services:
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
+      - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 
   redis:
     image: redis:7

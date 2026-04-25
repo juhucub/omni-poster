@@ -17,6 +17,7 @@ const AccountManager: React.FC = () => {
         setError(err.response?.data?.detail || 'Failed to load accounts.');
       }
     };
+
     void load();
   }, []);
 
@@ -27,15 +28,23 @@ const AccountManager: React.FC = () => {
         <div className="mx-auto max-w-5xl rounded-3xl border border-white/10 bg-white/[0.04] p-6">
           <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Accounts</div>
           <h1 className="mt-2 text-4xl font-semibold">Connected destinations</h1>
-          {error ? <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div> : null}
+          {error ? (
+            <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+              {error}
+            </div>
+          ) : null}
           <div className="mt-6 space-y-3">
             {accounts.map((account) => (
               <div key={account.id} className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
                 <div className="font-medium">{account.channel_title}</div>
-                <div className="mt-1 text-sm text-slate-400">{account.platform} · {account.token_status}</div>
+                <div className="mt-1 text-sm text-slate-400">
+                  {account.platform} · {account.token_status}
+                </div>
               </div>
             ))}
-            {accounts.length === 0 ? <div className="text-sm text-slate-400">No social accounts connected yet.</div> : null}
+            {accounts.length === 0 ? (
+              <div className="text-sm text-slate-400">No social accounts connected yet.</div>
+            ) : null}
           </div>
         </div>
       </main>

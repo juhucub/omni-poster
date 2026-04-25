@@ -7,9 +7,18 @@ from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
 from app.models import Project, SocialAccount, User
-from app.schemas import OkResponse, ProjectCreateRequest, ProjectListResponse, ProjectSummary, ProjectUpdateRequest
+from app.schemas import (
+    OkResponse,
+    ProjectCreateRequest,
+    ProjectListResponse,
+    ProjectSummary,
+    ProjectUpdateRequest,
+    SpeakerBindingListResponse,
+    SpeakerBindingRequest,
+)
 from app.services.audit import record_audit
 from app.services.project_state import sync_project_state, to_project_summary
+from app.services.voice_profiles import list_project_speaker_bindings, suggest_project_speaker_bindings, upsert_project_speaker_bindings
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -158,3 +167,34 @@ def archive_project(
     )
     db.commit()
     return OkResponse()
+
+
+@router.get("/{project_id}/speaker-bindings", response_model=SpeakerBindingListResponse)
+def get_project_speaker_bindings(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = get_owned_project(db, current_user.id, project_id)
+    bindings = list_project_speaker_bindings(project.id, db)
+    if not bindings:
+        suggested = suggest_project_speaker_bindings(project, db)
+        if suggested:
+            bindings = upsert_project_speaker_bindings(project.id, suggested, db)
+    return SpeakerBindingListResponse(items=bindings)
+
+
+@router.put("/{project_id}/speaker-bindings", response_model=SpeakerBindingListResponse)
+def update_project_speaker_bindings(
+    project_id: int,
+    payload: SpeakerBindingRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = get_owned_project(db, current_user.id, project_id)
+    bindings = upsert_project_speaker_bindings(
+        project.id,
+        [item.model_dump() for item in payload.items],
+        db,
+    )
+    return SpeakerBindingListResponse(items=bindings)

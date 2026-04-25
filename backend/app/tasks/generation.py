@@ -103,7 +103,7 @@ def process_generation_job(job_id: int) -> dict:
         db.commit()
         logger.info("Generation job %s started for project %s", job.id, project.id)
 
-        render_service = ProjectRenderService()
+        render_service = ProjectRenderService(db=db, project_id=project.id)
         progress_callback = _render_progress_callback(db, job, project)
         try:
             _set_job_progress(db, job, project, 35)

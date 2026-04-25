@@ -93,23 +93,104 @@ export interface CharacterPreset {
   speaker_names: string[];
   portrait_filename: string | null;
   portrait_url: string | null;
+  voice_profile_id: string;
   tts_provider: string;
+  provider_preference: string;
+  fallback_provider: string | null;
   voice: string;
   rate: number;
   pitch: number;
   word_gap: number;
   amplitude: number;
+  language: string | null;
+  model_id: string | null;
+  controls: Record<string, unknown>;
+  fallback_voice_settings: Record<string, unknown>;
+  reference_audio_count: number;
   notes: string;
   sample_text: string;
   source: string;
 }
 
+export interface VoiceReferenceAudio {
+  id: number;
+  voice_profile_id: string;
+  storage_path: string;
+  mime_type: string;
+  duration_ms: number | null;
+  sha256: string;
+  authorization_confirmed: boolean;
+  authorization_note: string | null;
+  created_at: string;
+}
+
+export interface VoiceProfile {
+  id: string;
+  display_name: string;
+  provider: string;
+  model_id: string | null;
+  language: string | null;
+  embedding_path: string | null;
+  fallback_provider: string | null;
+  fallback_voice_settings: Record<string, unknown>;
+  style: Record<string, unknown>;
+  controls: Record<string, unknown>;
+  provider_metadata: Record<string, unknown>;
+  voice: string | null;
+  espeak_rate: number | null;
+  espeak_pitch: number | null;
+  espeak_word_gap: number | null;
+  espeak_amplitude: number | null;
+  reference_audio_count: number;
+  reference_audios: VoiceReferenceAudio[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VoiceProviderCapability {
+  provider: string;
+  available: boolean;
+  reason: string | null;
+  supports_voice_cloning: boolean;
+  supports_prepare: boolean;
+  supported_controls: string[];
+  metadata: Record<string, unknown>;
+}
+
+export interface TTSFailure {
+  code: string;
+  message: string;
+  provider_state: Record<string, unknown>;
+  fallback_attempted: boolean;
+  attempted_providers: string[];
+  provider_failures: Record<string, unknown>;
+  suggested_action: string;
+}
+
 export interface VoiceLabPreview {
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  job_id: number | null;
   preset_id: string;
-  voice: string;
-  duration_seconds: number;
+  voice_profile_id: string;
+  voice: string | null;
+  provider_used: string | null;
+  fallback_used: boolean;
+  controls_applied: Record<string, unknown>;
+  reference_audio_count: number;
+  provider_state: Record<string, unknown>;
+  duration_seconds: number | null;
   sample_text: string;
-  content_url: string;
+  content_url: string | null;
+  error: TTSFailure | null;
+}
+
+export interface SpeakerBinding {
+  id: number;
+  speaker_name: string;
+  character_preset_id: string;
+  character_display_name: string;
+  voice_profile_id: string;
+  provider: string;
 }
 
 export interface GenerationJob {
@@ -244,4 +325,5 @@ export interface Project {
   latest_output: OutputVideo | null;
   latest_review: ReviewQueueItem | null;
   latest_notifications: NotificationSummary[];
+  speaker_bindings: SpeakerBinding[];
 }

@@ -8,14 +8,47 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
-from app.models import GenerationJob, SocialAccount
+from app.models import GenerationJob, SocialAccount, VoicePreviewJob
+from app.services.voice_preview_jobs import STALE_VOICE_PREVIEW_ERROR_CODE
 from app.services.character_presets import get_character_preset
 from app.services.crypto import decrypt_secret
 from app.services.rendering import ProjectRenderService
-from app.services.tts import LocalSpeechService, SpeechSegment, TextToSpeechError
+from app.services.tts import LocalSpeechService, SpeechSegment, TTSOrchestrator, TextToSpeechError
 from app.tasks.generation import STALE_GENERATION_ERROR, process_generation_job, reconcile_stale_generation_jobs
 from app.tasks.publish import process_publish_job
 from app.tasks.scheduler import dispatch_due_publish_jobs
+from app.tasks.voice_preview import process_voice_lab_preview
+
+
+class StubRegistry:
+    def __init__(self, providers, state):
+        self.providers = providers
+        self.state = state
+
+    def get(self, provider_name):
+        return self.providers.get(provider_name)
+
+    def healthcheck(self):
+        return self.state
+
+
+class StubProvider:
+    def __init__(self, *, response=None, error: TextToSpeechError | None = None):
+        self.response = response
+        self.error = error
+
+    def synthesize_line(self, *, text, voice_profile, output_path, options=None):
+        if self.error:
+            raise self.error
+        output_path.write_bytes(b"RIFF")
+        return {
+            "audio_path": str(output_path),
+            "voice": self.response.get("voice", voice_profile.get("voice", "stub")),
+            "duration_seconds": self.response.get("duration_seconds", 1.0),
+            "provider_used": self.response["provider_used"],
+            "controls_applied": self.response.get("controls_applied", {}),
+            "reference_audio_count": self.response.get("reference_audio_count", 0),
+        }
 
 
 def test_background_presets_are_loaded_from_bundled_media_dir(auth_client: TestClient):
@@ -123,7 +156,7 @@ def test_character_portrait_prefers_bundled_media_dir_over_runtime(auth_client: 
     assert resolved == bundled_portrait
 
 
-def test_voice_lab_preview_uses_preset_settings(auth_client: TestClient, monkeypatch):
+def test_voice_lab_preview_uses_provider_metadata(auth_client: TestClient, monkeypatch):
     bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
     bundled_file.write_text(
         """
@@ -146,30 +179,33 @@ def test_voice_lab_preview_uses_preset_settings(auth_client: TestClient, monkeyp
         encoding="utf-8",
     )
 
-    def fake_synthesize(self, parsed_lines, work_dir):
-        work_dir.mkdir(parents=True, exist_ok=True)
-        output_path = work_dir / "sample.wav"
-        output_path.write_bytes(b"RIFF")
+    output_path = Path("test_storage") / "voice_lab" / "previews" / "sample.wav"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"RIFF")
+
+    def fake_synthesize_dialogue(self, *, lines, voice_profile_map, output_dir, requested_provider=None, fallback_allowed=True, options=None):
         return [
-            type(
-                "Segment",
-                (),
-                {
-                    "speaker": parsed_lines[0]["speaker"],
-                    "text": parsed_lines[0]["text"],
-                    "voice": "en-us+f3",
-                    "slot_index": 0,
-                    "audio_path": str(output_path),
-                    "duration_seconds": 1.25,
-                },
-            )()
+            SpeechSegment(
+                speaker=lines[0]["speaker"],
+                text=lines[0]["text"],
+                voice="en-us+f3",
+                slot_index=0,
+                audio_path=str(output_path),
+                duration_seconds=1.25,
+                voice_profile_id="vp_host_calm_v1",
+                provider_used="espeak",
+                fallback_used=False,
+                controls_applied={"speaking_rate": 0.96},
+                reference_audio_count=0,
+            )
         ]
 
-    monkeypatch.setattr("app.routers.character_presets.LocalSpeechService.synthesize_dialogue", fake_synthesize)
+    monkeypatch.setattr(TTSOrchestrator, "synthesize_dialogue", fake_synthesize_dialogue)
     response = auth_client.post(
         "/voice-lab/preview",
         json={
             "preset_id": "host_calm_v1",
+            "provider_preference": "auto",
             "text": "This is a quick voice lab check.",
             "rate": 149,
             "pitch": 41,
@@ -178,11 +214,14 @@ def test_voice_lab_preview_uses_preset_settings(auth_client: TestClient, monkeyp
         },
     )
     assert response.status_code == 200
+    assert response.json()["status"] == "completed"
     assert response.json()["preset_id"] == "host_calm_v1"
+    assert response.json()["provider_used"] == "espeak"
+    assert response.json()["voice_profile_id"] == "vp_host_calm_v1"
     assert response.json()["content_url"].endswith("/voice-lab/previews/sample.wav")
 
 
-def test_voice_lab_preview_returns_clear_error_when_no_provider_available(auth_client: TestClient, monkeypatch):
+def test_voice_lab_preview_returns_structured_error_when_no_provider_available(auth_client: TestClient, monkeypatch):
     bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
     bundled_file.write_text(
         """
@@ -205,7 +244,19 @@ def test_voice_lab_preview_returns_clear_error_when_no_provider_available(auth_c
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(LocalSpeechService, "_available_providers", lambda self: set())
+    def fake_synthesize_dialogue(self, *, lines, voice_profile_map, output_dir, requested_provider=None, fallback_allowed=True, options=None):
+        raise TextToSpeechError(
+            code="no_provider_available",
+            message="No configured TTS provider is currently usable.",
+            provider_state={
+                "openvoice": {"available": False, "reason": "missing_models"},
+                "espeak": {"available": False, "reason": "missing_binary"},
+            },
+            fallback_attempted=True,
+            suggested_action="Install OpenVoice checkpoints or espeak-ng.",
+        )
+
+    monkeypatch.setattr(TTSOrchestrator, "synthesize_dialogue", fake_synthesize_dialogue)
     response = auth_client.post(
         "/voice-lab/preview",
         json={
@@ -215,8 +266,306 @@ def test_voice_lab_preview_returns_clear_error_when_no_provider_available(auth_c
     )
 
     assert response.status_code == 503
-    assert "no supported local TTS provider is installed" in response.json()["detail"]
-    assert "espeak-ng" in response.json()["detail"]
+    assert response.json()["detail"]["code"] == "no_provider_available"
+    assert response.json()["detail"]["fallback_attempted"] is True
+    assert response.json()["detail"]["provider_state"]["openvoice"]["reason"] == "missing_models"
+
+
+def test_voice_lab_preview_disables_fallback_for_explicit_provider(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    scheduled = {}
+
+    def fake_apply_async(*, kwargs=None, task_id=None, **_extra):
+        scheduled["kwargs"] = kwargs
+        scheduled["task_id"] = task_id
+        return None
+
+    monkeypatch.setattr(process_voice_lab_preview, "apply_async", fake_apply_async)
+    response = auth_client.post(
+        "/voice-lab/preview",
+        json={
+            "preset_id": "host_calm_v1",
+            "provider_preference": "openvoice",
+            "text": "Use OpenVoice only.",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert isinstance(response.json()["job_id"], int)
+    assert scheduled["kwargs"]["preview_job_id"] == response.json()["job_id"]
+    assert scheduled["task_id"] == f"voice-preview-{response.json()['job_id']}"
+
+
+def test_voice_lab_preview_job_status_returns_completed_payload(auth_client: TestClient):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    db = SessionLocal()
+    try:
+        job = VoicePreviewJob(
+            user_id=1,
+            preset_id="host_calm_v1",
+            voice_profile_id="vp_host_calm_v1",
+            requested_provider="openvoice",
+            fallback_allowed=False,
+            sample_text="Queued preview.",
+            status="completed",
+            progress=100,
+            stage="completed",
+            voice="en-us+f3",
+            provider_used="openvoice",
+            fallback_used=False,
+            controls_applied_json={"speaking_rate": 1.0},
+            provider_state_json={"openvoice": {"available": True}},
+            reference_audio_count=1,
+            duration_seconds=1.5,
+            preview_audio_path="test_storage/voice_lab/previews/sample.wav",
+            finished_at=datetime.utcnow(),
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.id
+    finally:
+        db.close()
+
+    response = auth_client.get(f"/voice-lab/preview-jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert response.json()["provider_used"] == "openvoice"
+    assert response.json()["content_url"].endswith("/voice-lab/previews/sample.wav")
+
+
+def test_voice_lab_preview_job_status_reconciles_stale_processing_job(auth_client: TestClient):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    db = SessionLocal()
+    try:
+        job = VoicePreviewJob(
+            user_id=1,
+            preset_id="host_calm_v1",
+            voice_profile_id="vp_host_calm_v1",
+            requested_provider="openvoice",
+            fallback_allowed=False,
+            sample_text="Queued preview.",
+            status="processing",
+            progress=20,
+            stage="tts_started",
+            provider_state_json={"openvoice": {"available": True}},
+            started_at=datetime.utcnow() - timedelta(seconds=100),
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.id
+    finally:
+        db.close()
+
+    response = auth_client.get(f"/voice-lab/preview-jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert response.json()["error"]["code"] == STALE_VOICE_PREVIEW_ERROR_CODE
+    assert "likely due to running out of memory" in response.json()["error"]["message"]
+
+
+def test_voice_lab_preview_job_status_keeps_recent_processing_job_active(auth_client: TestClient):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    db = SessionLocal()
+    try:
+        job = VoicePreviewJob(
+            user_id=1,
+            preset_id="host_calm_v1",
+            voice_profile_id="vp_host_calm_v1",
+            requested_provider="openvoice",
+            fallback_allowed=False,
+            sample_text="Queued preview.",
+            status="processing",
+            progress=20,
+            stage="tts_started",
+            provider_state_json={"openvoice": {"available": True}},
+            started_at=datetime.utcnow() - timedelta(seconds=30),
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.id
+    finally:
+        db.close()
+
+    response = auth_client.get(f"/voice-lab/preview-jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "processing"
+    assert response.json()["error"] is None
+
+
+def test_tts_orchestrator_marks_fallback_used_when_second_provider_succeeds(tmp_path: Path):
+    orchestrator = TTSOrchestrator(
+        registry=StubRegistry(
+            {
+                "openvoice": StubProvider(
+                    error=TextToSpeechError(
+                        code="openvoice_runtime_failure",
+                        message="OpenVoice synthesis failed.",
+                        provider_state={"openvoice": {"available": True}},
+                    )
+                ),
+                "espeak": StubProvider(response={"provider_used": "espeak", "voice": "en-us+f3"}),
+            },
+            {
+                "openvoice": {"available": True, "reason": None},
+                "espeak": {"available": True, "reason": None},
+            },
+        )
+    )
+
+    result = orchestrator.synthesize_line(
+        text="Fallback to espeak.",
+        voice_profile={
+            "id": "vp_test",
+            "display_name": "Host",
+            "provider": "openvoice",
+            "fallback_provider": "espeak",
+            "voice": "en-us+f3",
+            "reference_audios": [],
+            "controls": {},
+        },
+        output_path=tmp_path / "preview.wav",
+        requested_provider="openvoice",
+        fallback_allowed=True,
+    )
+
+    assert result.provider_used == "espeak"
+    assert result.fallback_used is True
+
+
+def test_tts_orchestrator_returns_provider_error_when_explicit_provider_cannot_fallback(tmp_path: Path):
+    orchestrator = TTSOrchestrator(
+        registry=StubRegistry(
+            {
+                "openvoice": StubProvider(
+                    error=TextToSpeechError(
+                        code="openvoice_runtime_failure",
+                        message="OpenVoice synthesis failed.",
+                        provider_state={"openvoice": {"available": True}},
+                        suggested_action="Check the OpenVoice runtime logs.",
+                    )
+                )
+            },
+            {
+                "openvoice": {"available": True, "reason": None},
+            },
+        )
+    )
+
+    with pytest.raises(TextToSpeechError) as exc_info:
+        orchestrator.synthesize_line(
+            text="OpenVoice only.",
+            voice_profile={
+                "id": "vp_test",
+                "display_name": "Host",
+                "provider": "openvoice",
+                "fallback_provider": "espeak",
+                "voice": "en-us+f3",
+                "reference_audios": [],
+                "controls": {},
+            },
+            output_path=tmp_path / "preview.wav",
+            requested_provider="openvoice",
+            fallback_allowed=False,
+        )
+
+    assert exc_info.value.code == "openvoice_runtime_failure"
+    assert exc_info.value.attempted_providers == ["openvoice"]
+    assert exc_info.value.provider_failures["openvoice"]["code"] == "openvoice_runtime_failure"
 
 
 def test_local_speech_service_discovers_espeak_provider(monkeypatch):
@@ -254,10 +603,10 @@ def test_local_speech_service_raises_clear_error_when_no_provider_available():
     with pytest.raises(TextToSpeechError) as exc_info:
         service._provider_for_voice_profile({"tts_provider": "espeak", "voice": "en-us+f3"}, set())
 
-    assert "no supported local TTS provider is installed" in str(exc_info.value)
+    assert exc_info.value.code == "no_provider_available"
 
 
-def test_local_speech_service_respects_requested_provider_per_character(monkeypatch, tmp_path: Path):
+def test_local_speech_service_uses_persisted_voice_profiles(monkeypatch, tmp_path: Path):
     bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
     bundled_file.write_text(
         """
@@ -290,26 +639,33 @@ def test_local_speech_service_respects_requested_provider_per_character(monkeypa
         encoding="utf-8",
     )
 
-    def write_wav(output_path: Path) -> None:
+    service = LocalSpeechService()
+
+    def fake_synthesize_line(*, text, voice_profile, output_path, requested_provider=None, fallback_allowed=True, options=None):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         with wave.open(str(output_path), "wb") as handle:
             handle.setnchannels(1)
             handle.setsampwidth(2)
             handle.setframerate(22050)
             handle.writeframes(b"\x00\x00" * 22050)
+        return type(
+            "Result",
+            (),
+            {
+                "audio_path": str(output_path),
+                "voice": voice_profile["voice"],
+                "duration_seconds": 1.0,
+                "provider_used": "espeak",
+                "fallback_used": False,
+                "controls_applied": voice_profile["controls"],
+                "reference_audio_count": 0,
+                "provider_state": {"espeak": {"available": True}},
+                "cache_hit": False,
+                "voice_profile_id": voice_profile["id"],
+            },
+        )()
 
-    used_voices: list[str] = []
-    service = LocalSpeechService()
-    monkeypatch.setattr(LocalSpeechService, "_available_providers", lambda self: {"macos", "espeak"})
-    monkeypatch.setattr(
-        LocalSpeechService,
-        "_run_espeak",
-        lambda self, **kwargs: (used_voices.append(kwargs["voice"]), write_wav(kwargs["output_path"])),
-    )
-    monkeypatch.setattr(
-        LocalSpeechService,
-        "_run_say",
-        lambda self, **kwargs: (_ for _ in ()).throw(AssertionError("macOS say should not be used for espeak presets")),
-    )
+    monkeypatch.setattr(service.orchestrator, "synthesize_line", fake_synthesize_line)
 
     segments = service.synthesize_dialogue(
         [
@@ -320,7 +676,7 @@ def test_local_speech_service_respects_requested_provider_per_character(monkeypa
     )
 
     assert [segment.voice for segment in segments] == ["en-us+f3", "en-gb+m3"]
-    assert used_voices == ["en-us+f3", "en-gb+m3"]
+    assert [segment.voice_profile_id for segment in segments] == ["vp_stewie_v1", "vp_brian_v1"]
 
 
 def test_render_timing_prefers_actual_audio_clip_duration(monkeypatch):
@@ -356,6 +712,82 @@ def test_render_config_caps_preview_fps_for_large_backgrounds():
 
     assert preview_config["fps"] == 24
     assert final_config["fps"] == 30
+
+
+def test_tts_provider_capabilities_route_returns_registry_state(auth_client: TestClient):
+    response = auth_client.get("/tts/providers")
+
+    assert response.status_code == 200
+    providers = {item["provider"] for item in response.json()["items"]}
+    assert {"espeak", "openvoice"}.issubset(providers)
+
+
+def test_project_speaker_bindings_round_trip(auth_client: TestClient):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  },
+  {
+    "id": "guest_sharp_v1",
+    "display_name": "Guest",
+    "speaker_names": ["Guest"],
+    "portrait_filename": "speaker_2.png",
+    "tts_provider": "espeak",
+    "voice": "en-gb+m3",
+    "rate": 158,
+    "pitch": 46,
+    "word_gap": 1,
+    "amplitude": 145
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project = auth_client.post("/projects", json={"name": "Binding Test", "target_platform": "youtube"})
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+
+    script = auth_client.put(
+        f"/projects/{project_id}/script",
+        json={"raw_text": "<Host> Hello there\n<Guest> General Kenobi", "source": "manual"},
+    )
+    assert script.status_code == 200
+
+    listed = auth_client.get(f"/projects/{project_id}/speaker-bindings")
+    assert listed.status_code == 200
+    assert {item["speaker_name"] for item in listed.json()["items"]} == {"Host", "Guest"}
+
+    updated = auth_client.put(
+        f"/projects/{project_id}/speaker-bindings",
+        json={
+          "items": [
+            {"speaker_name": "Host", "character_preset_id": "guest_sharp_v1"},
+            {"speaker_name": "Guest", "character_preset_id": "host_calm_v1"},
+          ]
+        },
+    )
+    assert updated.status_code == 200
+    assert {
+        item["speaker_name"]: item["character_preset_id"]
+        for item in updated.json()["items"]
+    } == {
+        "Host": "guest_sharp_v1",
+        "Guest": "host_calm_v1",
+    }
 
 
 def _create_project_flow(client: TestClient) -> dict:

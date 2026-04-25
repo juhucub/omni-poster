@@ -15,6 +15,7 @@ import apiClient, { apiBaseUrl } from '../api/client';
 import type {
   Asset,
   BackgroundPreset,
+  CharacterPreset,
   GenerationJob,
   OutputVideo,
   PlatformMetadata,
@@ -23,6 +24,7 @@ import type {
   PublishedPost,
   ReviewQueueItem,
   RoutingSuggestion,
+  SpeakerBinding,
   ScriptLine,
   ScriptRevision,
   SocialAccount,
@@ -93,6 +95,7 @@ const ProjectEditorPage: React.FC = () => {
   const [project, setProject] = useState<Project | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [presets, setPresets] = useState<BackgroundPreset[]>([]);
+  const [characterPresets, setCharacterPresets] = useState<CharacterPreset[]>([]);
   const [script, setScript] = useState<ScriptRevision | null>(null);
   const [scriptRevisions, setScriptRevisions] = useState<ScriptRevision[]>([]);
   const [scriptDraft, setScriptDraft] = useState(defaultScript);
@@ -104,6 +107,7 @@ const ProjectEditorPage: React.FC = () => {
   const [reviews, setReviews] = useState<ReviewQueueItem[]>([]);
   const [routing, setRouting] = useState<RoutingSuggestion | null>(null);
   const [history, setHistory] = useState<{ jobs: PublishJob[]; posts: PublishedPost[] }>({ jobs: [], posts: [] });
+  const [speakerBindings, setSpeakerBindings] = useState<SpeakerBinding[]>([]);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
   const [publishJob, setPublishJob] = useState<PublishJob | null>(null);
@@ -133,6 +137,10 @@ const ProjectEditorPage: React.FC = () => {
   const generationStage = useMemo(() => generationStageLabel(generationJob), [generationJob]);
   const savedDraft = useMemo(() => normalizeDraft(script?.raw_text || defaultScript), [script?.raw_text]);
   const scriptIsDirty = useMemo(() => normalizeDraft(scriptDraft) !== savedDraft, [scriptDraft, savedDraft]);
+  const detectedSpeakers = useMemo(() => {
+    const names = (scriptLines.length ? scriptLines : script?.parsed_lines || []).map((line) => line.speaker.trim()).filter(Boolean);
+    return Array.from(new Set(names));
+  }, [script?.parsed_lines, scriptLines]);
 
   const toUtcIso = (value: string) => (value ? new Date(value).toISOString() : null);
   const apiBase = apiBaseUrl;
@@ -152,6 +160,7 @@ const ProjectEditorPage: React.FC = () => {
         projectResponse,
         assetsResponse,
         presetsResponse,
+        characterPresetsResponse,
         scriptResponse,
         revisionsResponse,
         outputsResponse,
@@ -159,10 +168,12 @@ const ProjectEditorPage: React.FC = () => {
         metadataResponse,
         accountsResponse,
         historyResponse,
+        speakerBindingsResponse,
       ] = await Promise.all([
         apiClient.get<Project>(`/projects/${id}`),
         apiClient.get<Asset[]>(`/projects/${id}/assets`),
         apiClient.get<BackgroundPreset[]>('/background-presets'),
+        apiClient.get<{ items: CharacterPreset[] }>('/character-presets'),
         apiClient.get<{ current_revision: ScriptRevision | null }>(`/projects/${id}/script`),
         apiClient.get<{ items: ScriptRevision[] }>(`/projects/${id}/script-revisions`),
         apiClient.get<{ items: OutputVideo[] }>(`/projects/${id}/outputs`),
@@ -170,11 +181,13 @@ const ProjectEditorPage: React.FC = () => {
         apiClient.get<PlatformMetadata | null>(`/projects/${id}/metadata/youtube`),
         apiClient.get<{ items: SocialAccount[] }>('/social-accounts'),
         apiClient.get<{ jobs: PublishJob[]; posts: PublishedPost[] }>(`/projects/${id}/publish-history`),
+        apiClient.get<{ items: SpeakerBinding[] }>(`/projects/${id}/speaker-bindings`),
       ]);
 
       setProject(projectResponse.data);
       setAssets(assetsResponse.data);
       setPresets(presetsResponse.data);
+      setCharacterPresets(characterPresetsResponse.data.items);
       hydrateScriptState(scriptResponse.data.current_revision);
       setScriptRevisions(revisionsResponse.data.items);
       setOutputs(outputsResponse.data.items);
@@ -182,6 +195,7 @@ const ProjectEditorPage: React.FC = () => {
       setMetadata(metadataResponse.data);
       setAccounts(accountsResponse.data.items);
       setHistory(historyResponse.data);
+      setSpeakerBindings(speakerBindingsResponse.data.items);
       try {
         const activeGenerationResponse = await apiClient.get<GenerationJob>(`/projects/${id}/generation-jobs/active`);
         setGenerationJob(activeGenerationResponse.data);
@@ -348,6 +362,49 @@ const ProjectEditorPage: React.FC = () => {
     }
   };
 
+  const saveSpeakerBindings = async (items: SpeakerBinding[]) => {
+    const response = await apiClient.put<{ items: SpeakerBinding[] }>(`/projects/${id}/speaker-bindings`, {
+      items: items.map((item) => ({
+        speaker_name: item.speaker_name,
+        character_preset_id: item.character_preset_id,
+      })),
+    });
+    setSpeakerBindings(response.data.items);
+    return response.data.items;
+  };
+
+  const updateSpeakerBinding = async (speakerName: string, characterPresetId: string) => {
+    try {
+      setBusy(`binding-${speakerName}`);
+      const nextBindings = [...speakerBindings];
+      const existing = nextBindings.find((item) => item.speaker_name === speakerName);
+      const preset = characterPresets.find((item) => item.id === characterPresetId);
+      if (!preset) {
+        return;
+      }
+      if (existing) {
+        existing.character_preset_id = characterPresetId;
+        existing.character_display_name = preset.display_name;
+        existing.voice_profile_id = preset.voice_profile_id;
+        existing.provider = preset.tts_provider;
+      } else {
+        nextBindings.push({
+          id: 0,
+          speaker_name: speakerName,
+          character_preset_id: characterPresetId,
+          character_display_name: preset.display_name,
+          voice_profile_id: preset.voice_profile_id,
+          provider: preset.tts_provider,
+        });
+      }
+      await saveSpeakerBindings(nextBindings);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save speaker binding.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const generatePreview = async (outputKind: 'preview' | 'final' = 'preview') => {
     if (activeGeneration) {
       return;
@@ -358,6 +415,31 @@ const ProjectEditorPage: React.FC = () => {
       if (scriptIsDirty) {
         const savedRevision = await persistScriptRevision();
         scriptRevisionId = savedRevision.id;
+      }
+      if (detectedSpeakers.length > 0) {
+        const ensuredBindings = detectedSpeakers.map((speakerName) => {
+          const existing = speakerBindings.find((item) => item.speaker_name === speakerName);
+          if (existing) {
+            return existing;
+          }
+          const suggestedPreset =
+            characterPresets.find((item) => item.display_name.toLowerCase() === speakerName.toLowerCase()) ||
+            characterPresets.find((item) => item.speaker_names.some((name) => name.toLowerCase() === speakerName.toLowerCase())) ||
+            characterPresets[0];
+          return {
+            id: 0,
+            speaker_name: speakerName,
+            character_preset_id: suggestedPreset?.id || '',
+            character_display_name: suggestedPreset?.display_name || '',
+            voice_profile_id: suggestedPreset?.voice_profile_id || '',
+            provider: suggestedPreset?.tts_provider || 'espeak',
+          };
+        });
+        if (ensuredBindings.some((item) => !item.character_preset_id)) {
+          setError('Assign a character preset to each detected speaker before rendering.');
+          return;
+        }
+        await saveSpeakerBindings(ensuredBindings);
       }
       const response = await apiClient.post<GenerationJob>(`/projects/${id}/renders`, {
         background_style: project?.background_style || 'none',
@@ -716,6 +798,50 @@ const ProjectEditorPage: React.FC = () => {
                   <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-4 text-sm text-cyan-100">
                     Detected cast: {(script?.characters || scriptLines.map((line) => line.speaker)).slice(0, 2).join(' vs ') || 'Add two dialogue speakers first'}.
                     The local renderer now voices each line and pops the active speaker portrait. It checks bundled character PNGs in <code>backend/storage/characters</code> first using <code>&lt;speaker&gt;.png</code> or <code>speaker_1.png</code> and <code>speaker_2.png</code>, then falls back to runtime overrides and finally generated portraits.
+                  </div>
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium text-slate-100">Speaker Voice Bindings</div>
+                        <div className="mt-1 text-sm text-slate-400">
+                          Final generation uses these explicit preset bindings so Voice Lab previews and renders stay consistent.
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-4 space-y-3">
+                      {detectedSpeakers.map((speakerName) => {
+                        const binding = speakerBindings.find((item) => item.speaker_name === speakerName);
+                        return (
+                          <div key={speakerName} className="grid gap-3 rounded-2xl border border-white/10 bg-black/20 p-3 md:grid-cols-[0.4fr_0.6fr]">
+                            <div>
+                              <div className="text-sm font-medium text-slate-200">{speakerName}</div>
+                              <div className="mt-1 text-xs text-slate-500">
+                                {binding ? `${binding.character_display_name} · ${binding.provider}` : 'No preset selected yet'}
+                              </div>
+                            </div>
+                            <select
+                              value={binding?.character_preset_id || ''}
+                              onChange={(event) => updateSpeakerBinding(speakerName, event.target.value)}
+                              className="rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm"
+                            >
+                              <option value="" disabled>
+                                Select a character preset
+                              </option>
+                              {characterPresets.map((preset) => (
+                                <option key={preset.id} value={preset.id}>
+                                  {preset.display_name} · {preset.tts_provider}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        );
+                      })}
+                      {detectedSpeakers.length === 0 && (
+                        <div className="rounded-2xl border border-dashed border-white/10 px-3 py-4 text-sm text-slate-500">
+                          Add named dialogue lines first so OmniPoster can bind each speaker to a saved preset.
+                        </div>
+                      )}
+                    </div>
                   </div>
                   {scriptIsDirty && (
                     <div className="mt-4 rounded-2xl border border-amber-300/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">

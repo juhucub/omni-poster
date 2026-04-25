@@ -20,6 +20,7 @@ from app.schemas import (
     PublishJobSummary,
     ReviewCommentSummary,
     ReviewQueueItemSummary,
+    SpeakerBindingSummary,
     ScriptLine,
     ScriptRevisionSummary,
 )
@@ -162,6 +163,17 @@ def to_publish_job_summary(job: PublishJob) -> PublishJobSummary:
     )
 
 
+def to_speaker_binding_summary(binding) -> SpeakerBindingSummary:
+    return SpeakerBindingSummary(
+        id=binding.id,
+        speaker_name=binding.speaker_name,
+        character_preset_id=binding.character_preset_id,
+        character_display_name=binding.character_preset.display_name,
+        voice_profile_id=binding.character_preset.voice_profile_id,
+        provider=binding.character_preset.voice_profile.provider,
+    )
+
+
 def latest_preview_asset(project: Project) -> Asset | None:
     if not project.current_output_video or not project.current_output_video.asset:
         return None
@@ -200,6 +212,7 @@ def to_project_summary(project: Project) -> ProjectSummary:
         latest_output=to_output_video_summary(project.current_output_video) if project.current_output_video else None,
         latest_review=to_review_summary(latest_review(project)),
         latest_notifications=[to_notification_summary(item) for item in recent_notifications],
+        speaker_bindings=[to_speaker_binding_summary(item) for item in project.speaker_bindings],
     )
 
 

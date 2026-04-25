@@ -6,6 +6,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -53,6 +54,18 @@ class User(Base):
         back_populates="author", cascade="all, delete-orphan"
     )
     notifications: Mapped[list["NotificationEvent"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    voice_profiles: Mapped[list["VoiceProfile"]] = relationship(
+        back_populates="created_by", cascade="all, delete-orphan"
+    )
+    character_presets: Mapped[list["CharacterPreset"]] = relationship(
+        back_populates="created_by", cascade="all, delete-orphan"
+    )
+    voice_reference_audios: Mapped[list["VoiceReferenceAudio"]] = relationship(
+        back_populates="created_by", cascade="all, delete-orphan"
+    )
+    voice_preview_jobs: Mapped[list["VoicePreviewJob"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -190,6 +203,120 @@ class Project(Base):
     notifications: Mapped[list["NotificationEvent"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+    speaker_bindings: Mapped[list["ProjectSpeakerBinding"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", order_by="ProjectSpeakerBinding.speaker_name.asc()"
+    )
+
+
+class VoiceProfile(Base):
+    __tablename__ = "voice_profiles"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), default="espeak", nullable=False)
+    model_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    language: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    embedding_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fallback_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    fallback_voice_settings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    style_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    controls_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    provider_metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    espeak_voice: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    espeak_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    espeak_pitch: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    espeak_word_gap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    espeak_amplitude: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    created_by: Mapped["User | None"] = relationship(back_populates="voice_profiles")
+    presets: Mapped[list["CharacterPreset"]] = relationship(back_populates="voice_profile")
+    reference_audios: Mapped[list["VoiceReferenceAudio"]] = relationship(
+        back_populates="voice_profile", cascade="all, delete-orphan", order_by="VoiceReferenceAudio.created_at.asc()"
+    )
+    voice_preview_jobs: Mapped[list["VoicePreviewJob"]] = relationship(back_populates="voice_profile")
+
+
+class CharacterPreset(Base):
+    __tablename__ = "character_presets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    speaker_names_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    portrait_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    voice_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("voice_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sample_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="runtime", nullable=False)
+    is_seeded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    voice_profile: Mapped["VoiceProfile"] = relationship(back_populates="presets")
+    created_by: Mapped["User | None"] = relationship(back_populates="character_presets")
+    project_bindings: Mapped[list["ProjectSpeakerBinding"]] = relationship(back_populates="character_preset")
+    voice_preview_jobs: Mapped[list["VoicePreviewJob"]] = relationship(back_populates="preset")
+
+
+class VoiceReferenceAudio(Base):
+    __tablename__ = "voice_reference_audios"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    voice_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("voice_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    authorization_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    authorization_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    voice_profile: Mapped["VoiceProfile"] = relationship(back_populates="reference_audios")
+    created_by: Mapped["User | None"] = relationship(back_populates="voice_reference_audios")
+
+
+class ProjectSpeakerBinding(Base):
+    __tablename__ = "project_speaker_bindings"
+    __table_args__ = (
+        UniqueConstraint("project_id", "speaker_name", name="uq_project_speaker_binding"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    speaker_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    character_preset_id: Mapped[str] = mapped_column(
+        ForeignKey("character_presets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="speaker_bindings")
+    character_preset: Mapped["CharacterPreset"] = relationship(back_populates="project_bindings")
 
 
 class Asset(Base):
@@ -281,6 +408,39 @@ class GenerationJob(Base):
     output_video: Mapped["OutputVideo | None"] = relationship(
         back_populates="generation_job", uselist=False
     )
+
+
+class VoicePreviewJob(Base):
+    __tablename__ = "voice_preview_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    preset_id: Mapped[str] = mapped_column(ForeignKey("character_presets.id", ondelete="CASCADE"), index=True)
+    voice_profile_id: Mapped[str] = mapped_column(ForeignKey("voice_profiles.id", ondelete="CASCADE"), index=True)
+    requested_provider: Mapped[str] = mapped_column(String(32), default="auto", nullable=False)
+    fallback_allowed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sample_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    celery_task_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    voice: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_used: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    controls_applied_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    provider_state_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reference_audio_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    preview_audio_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="voice_preview_jobs")
+    preset: Mapped["CharacterPreset"] = relationship(back_populates="voice_preview_jobs")
+    voice_profile: Mapped["VoiceProfile"] = relationship(back_populates="voice_preview_jobs")
 
 
 class OutputVideo(Base):
