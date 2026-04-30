@@ -194,6 +194,18 @@ def prepare_voice_profile(
     try:
         result = orchestrator.prepare_voice_profile(payload)
     except TTSProviderError as exc:
+        profile_model.embedding_path = None
+        metadata = dict(profile_model.provider_metadata_json or {})
+        metadata.update(
+            {
+                "embedding_status": "failed",
+                "embedding_ready": False,
+                "embedding_artifact_path": None,
+                "last_error": exc.as_dict(),
+            }
+        )
+        profile_model.provider_metadata_json = metadata
+        db.commit()
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.as_dict()) from exc
     profile_model = update_voice_profile_preparation_metadata(
         profile_model,
@@ -299,13 +311,27 @@ def create_voice_lab_preview(
             fallback_allowed=resolved_fallback_allowed,
         )
     except TTSProviderError as exc:
+        preset_model.voice_profile.embedding_path = None
+        metadata = dict(preset_model.voice_profile.provider_metadata_json or {})
+        metadata.update(
+            {
+                "embedding_status": "failed",
+                "embedding_ready": False,
+                "embedding_artifact_path": None,
+                "last_error": exc.as_dict(),
+            }
+        )
+        preset_model.voice_profile.provider_metadata_json = metadata
+        db.commit()
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.as_dict()) from exc
     result = segments[0]
     if result.provider_used == "openvoice" and profile_payload.get("embedding_path"):
+        provider_metadata = dict(profile_payload.get("provider_metadata") or {})
         update_voice_profile_preparation_metadata(
             preset_model.voice_profile,
             embedding_path=str(profile_payload.get("embedding_path")),
             provider_metadata={
+                **provider_metadata,
                 "embedding_status": "ready",
                 "embedding_ready": True,
                 "embedding_artifact_path": str(profile_payload.get("embedding_path")),

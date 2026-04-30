@@ -21,9 +21,10 @@ import numpy as np
 from app.core.config import settings
 from app.services.voice_profiles import (
     get_character_preset_model,
+    reference_audio_content_hash_from_paths,
     resolve_character_preset_for_speaker,
     resolve_preset_for_project_speaker,
-    voice_embedding_artifact_path,
+    voice_embedding_artifact_path_for_reference,
     voice_cache_dir,
 )
 
@@ -428,18 +429,11 @@ class OpenVoiceProvider(BaseTTSProvider):
         logger.info("openvoice.memory stage=%s rss_mb=%.1f metadata=%s", stage, self._memory_mb(), metadata)
 
     def _reference_audio_cache_key(self, reference_paths: list[Path], device: str) -> str:
-        payload = [
-            "|".join(
-                [
-                    str(path.resolve()),
-                    str(int(path.stat().st_mtime_ns)),
-                    str(path.stat().st_size),
-                ]
-            )
-            for path in reference_paths
-        ]
-        payload.append(device)
-        return hashlib.sha256("||".join(payload).encode("utf-8")).hexdigest()
+        reference_hash = reference_audio_content_hash_from_paths(reference_paths)
+        return hashlib.sha256(f"{reference_hash}|{device}".encode("utf-8")).hexdigest()
+
+    def _reference_audio_hash(self, reference_paths: list[Path]) -> str:
+        return reference_audio_content_hash_from_paths(reference_paths)
 
     def _get_melo_model(self, language_code: str, device: str, tts_cls: Any) -> Any:
         cache_key = (language_code, device)
@@ -490,13 +484,54 @@ class OpenVoiceProvider(BaseTTSProvider):
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _reference_audio_paths(self, voice_profile: dict[str, Any]) -> list[Path]:
-        return [Path(item["storage_path"]) for item in voice_profile.get("reference_audios") or [] if item.get("storage_path")]
+        metadata = dict(voice_profile.get("provider_metadata") or {})
+        processed_paths = [Path(str(path)) for path in metadata.get("processed_reference_paths") or [] if path]
+        processed_reference_ids = {int(item) for item in metadata.get("processed_reference_audio_ids") or [] if str(item).isdigit()}
+        fallback_paths = []
+        for item in voice_profile.get("reference_audios") or []:
+            if not item.get("storage_path"):
+                continue
+            try:
+                reference_id = int(item.get("id") or 0)
+            except (TypeError, ValueError):
+                reference_id = 0
+            if reference_id not in processed_reference_ids:
+                fallback_paths.append(Path(item["storage_path"]))
+        return processed_paths + fallback_paths if processed_paths else fallback_paths
 
-    def _embedding_artifact_path(self, voice_profile: dict[str, Any]) -> Path:
-        explicit = voice_profile.get("embedding_path")
-        if explicit:
-            return Path(str(explicit))
-        return voice_embedding_artifact_path(str(voice_profile.get("id") or uuid.uuid4().hex))
+    def _embedding_artifact_path(self, voice_profile: dict[str, Any], reference_hash: str) -> Path:
+        return voice_embedding_artifact_path_for_reference(str(voice_profile.get("id") or uuid.uuid4().hex), reference_hash)
+
+    def _embedding_fingerprint(self, target_embedding: Any) -> str:
+        try:
+            tensor = target_embedding.detach().cpu().contiguous()
+            payload = tensor.numpy().tobytes()
+        except Exception:
+            payload = repr(target_embedding).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def _embedding_stats(self, target_embedding: Any) -> dict[str, Any]:
+        stats: dict[str, Any] = {"target_embedding_hash": self._embedding_fingerprint(target_embedding)}
+        try:
+            tensor = target_embedding.detach().float().cpu()
+            stats.update(
+                {
+                    "embedding_shape": list(getattr(tensor, "shape", []) or []),
+                    "embedding_mean": float(tensor.mean().item()),
+                    "embedding_std": float(tensor.std().item()),
+                    "embedding_norm": float(tensor.norm().item()),
+                }
+            )
+        except Exception:
+            stats.update(
+                {
+                    "embedding_shape": list(getattr(target_embedding, "shape", []) or []),
+                    "embedding_mean": None,
+                    "embedding_std": None,
+                    "embedding_norm": None,
+                }
+            )
+        return stats
 
     def _applied_controls(self, voice_profile: dict[str, Any]) -> dict[str, Any]:
         speaking_rate = (voice_profile.get("controls") or {}).get("speaking_rate")
@@ -541,13 +576,34 @@ class OpenVoiceProvider(BaseTTSProvider):
         with self._cache_lock:
             target_embedding = self._target_embedding_cache.get(cache_key)
             if target_embedding is not None:
-                self._log_memory_stage("target_embedding_cache_hit", device=device)
+                self._log_memory_stage("target_embedding_cache_hit", device=device, reference_audio_path=str(reference_path))
                 return target_embedding
-        self._log_memory_stage("target_embedding_extract_begin", device=device)
-        target_embedding, _ = se_extractor.get_se(str(reference_path), converter, vad=True)
+        reference_hash = self._reference_audio_hash([reference_path])
+        self._log_memory_stage(
+            "target_embedding_extract_begin",
+            device=device,
+            reference_audio_path=str(reference_path),
+            reference_audio_sha256=reference_hash,
+            reference_audio_size_bytes=reference_path.stat().st_size,
+        )
+        try:
+            target_embedding, _ = se_extractor.get_se(str(reference_path), converter, vad=False)
+        except Exception as exc:
+            raise TTSProviderError(
+                code="reference_embedding_extraction_failed",
+                message=f"OpenVoice could not extract a speaker embedding from the selected reference audio: {exc}",
+                provider_state={self.provider_name: self.healthcheck()},
+                suggested_action="Try a clearer authorized reference clip or check the OpenVoice runtime logs.",
+            ) from exc
         with self._cache_lock:
             self._target_embedding_cache[cache_key] = target_embedding
-        self._log_memory_stage("target_embedding_extract_end", device=device)
+        self._log_memory_stage(
+            "target_embedding_extract_end",
+            device=device,
+            reference_audio_path=str(reference_path),
+            reference_audio_sha256=reference_hash,
+            **self._embedding_stats(target_embedding),
+        )
         return target_embedding
 
     def _load_cached_target_embedding(self, artifact_path: Path, device: str, torch_module: Any) -> Any | None:
@@ -559,16 +615,26 @@ class OpenVoiceProvider(BaseTTSProvider):
             if target_embedding is not None:
                 self._log_memory_stage("target_embedding_artifact_cache_hit", device=device)
                 return target_embedding
-        self._log_memory_stage("target_embedding_artifact_load_begin", device=device)
+        self._log_memory_stage("target_embedding_artifact_load_begin", device=device, target_embedding_path=str(artifact_path))
         target_embedding = torch_module.load(str(artifact_path), map_location=device)
         with self._cache_lock:
             self._target_embedding_cache[cache_key] = target_embedding
-        self._log_memory_stage("target_embedding_artifact_load_end", device=device)
+        self._log_memory_stage(
+            "target_embedding_artifact_load_end",
+            device=device,
+            target_embedding_path=str(artifact_path),
+            target_embedding_hash=self._embedding_fingerprint(target_embedding),
+        )
         return target_embedding
 
     def _persist_target_embedding(self, target_embedding: Any, artifact_path: Path, torch_module: Any) -> None:
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         torch_module.save(target_embedding.detach().cpu(), str(artifact_path))
+        self._log_memory_stage(
+            "target_embedding_artifact_saved",
+            target_embedding_path=str(artifact_path),
+            target_embedding_hash=self._embedding_fingerprint(target_embedding),
+        )
 
     def _get_target_embedding(
         self,
@@ -580,16 +646,31 @@ class OpenVoiceProvider(BaseTTSProvider):
         artifact_path: Path | None = None,
     ) -> Any:
         cache_key = self._reference_audio_cache_key(reference_paths, device)
+        reference_hash = self._reference_audio_hash(reference_paths)
         with self._cache_lock:
             target_embedding = self._target_embedding_cache.get(cache_key)
             if target_embedding is not None:
-                self._log_memory_stage("target_embedding_multi_cache_hit", device=device, references=len(reference_paths))
+                self._log_memory_stage(
+                    "target_embedding_multi_cache_hit",
+                    device=device,
+                    references=len(reference_paths),
+                    reference_audio_sha256=reference_hash,
+                    target_embedding_hash=self._embedding_fingerprint(target_embedding),
+                )
                 return target_embedding
         if artifact_path:
             target_embedding = self._load_cached_target_embedding(artifact_path, device, torch_module)
             if target_embedding is not None:
                 with self._cache_lock:
                     self._target_embedding_cache[cache_key] = target_embedding
+                self._log_memory_stage(
+                    "target_embedding_artifact_reused",
+                    device=device,
+                    references=len(reference_paths),
+                    reference_audio_sha256=reference_hash,
+                    target_embedding_path=str(artifact_path),
+                    target_embedding_hash=self._embedding_fingerprint(target_embedding),
+                )
                 return target_embedding
         embeddings = [
             self._extract_reference_embedding(reference_path, converter, se_extractor, device)
@@ -600,6 +681,14 @@ class OpenVoiceProvider(BaseTTSProvider):
             self._persist_target_embedding(target_embedding, artifact_path, torch_module)
         with self._cache_lock:
             self._target_embedding_cache[cache_key] = target_embedding
+        self._log_memory_stage(
+            "target_embedding_ready",
+            device=device,
+            references=len(reference_paths),
+            reference_audio_sha256=reference_hash,
+            target_embedding_path=str(artifact_path) if artifact_path else None,
+            **self._embedding_stats(target_embedding),
+        )
         return target_embedding
 
     def prepare_voice_profile(self, voice_profile: dict[str, Any]) -> dict[str, Any]:
@@ -640,10 +729,21 @@ class OpenVoiceProvider(BaseTTSProvider):
                 suggested_action="Install OpenVoice checkpoints or preview with espeak.",
             )
 
-        artifact_path = self._embedding_artifact_path(voice_profile)
+        reference_hash = self._reference_audio_hash(reference_paths)
+        artifact_path = self._embedding_artifact_path(voice_profile, reference_hash)
         converter = self._get_converter(converter_dir, device, converter_cls)
-        self._ensure_silero_vad_ready(torch)
-        self._get_target_embedding(reference_paths, converter, se_extractor, device, torch, artifact_path=artifact_path)
+        target_embedding = self._get_target_embedding(reference_paths, converter, se_extractor, device, torch, artifact_path=artifact_path)
+        target_embedding_hash = self._embedding_fingerprint(target_embedding)
+        logger.info(
+            "openvoice.voice_profile_prepared metadata=%s",
+            {
+                "voice_profile_id": voice_profile.get("id"),
+                "reference_audio_path": [str(path) for path in reference_paths],
+                "reference_audio_sha256": reference_hash,
+                "target_embedding_path": str(artifact_path),
+                "target_embedding_hash": target_embedding_hash,
+            },
+        )
         return {
             "prepared": True,
             "cached_artifact_path": str(artifact_path),
@@ -652,6 +752,8 @@ class OpenVoiceProvider(BaseTTSProvider):
                 "embedding_status": "ready",
                 "embedding_ready": True,
                 "embedding_artifact_path": str(artifact_path),
+                "reference_audio_sha256": reference_hash,
+                "target_embedding_hash": target_embedding_hash,
                 "active_reference_count": len(reference_paths),
                 "reference_audio_mode": "average_all_clips" if len(reference_paths) > 1 else "single_clip",
             },
@@ -704,31 +806,87 @@ class OpenVoiceProvider(BaseTTSProvider):
                 provider_state={self.provider_name: self.healthcheck()},
                 suggested_action="Install OpenVoice checkpoints or preview with espeak.",
             )
+        if not base_speaker_path.exists():
+            raise TTSProviderError(
+                code="openvoice_source_embedding_missing",
+                message=f"OpenVoice source speaker embedding is missing: {base_speaker_path}",
+                provider_state={self.provider_name: self.healthcheck()},
+                suggested_action="Install the OpenVoice base speaker embeddings before generating cloned previews.",
+            )
 
         temp_src_path = output_path.with_name(f"{output_path.stem}_src.wav")
         stage_callback = options.get("stage_callback")
         try:
             model = self._get_melo_model(language_code, device, TTS)
             speaker_id = self._melo_speaker_id(model, language_code)
-            speed = float((voice_profile.get("controls") or {}).get("speaking_rate") or 1.0)
+            controls = dict(voice_profile.get("controls") or {})
+            unsupported_controls = {
+                key: value
+                for key, value in controls.items()
+                if value is not None and key not in self.supported_control_names
+            }
+            if unsupported_controls:
+                logger.info(
+                    "openvoice.performance_controls_unsupported metadata=%s",
+                    {
+                        "voice_profile_id": voice_profile.get("id"),
+                        "unsupported_controls": sorted(unsupported_controls.keys()),
+                        "supported_controls": list(self.supported_control_names),
+                    },
+                )
+            speed = float(controls.get("speaking_rate") or 1.0)
             self._log_memory_stage("tts_infer_begin", language=language_code, device=device)
             model.tts_to_file(text, speaker_id, str(temp_src_path), speed=speed)
             self._log_memory_stage("tts_infer_end", language=language_code, device=device)
 
             converter = self._get_converter(converter_dir, device, ToneColorConverter)
-            self._ensure_silero_vad_ready(torch)
-            artifact_path = self._embedding_artifact_path(voice_profile)
+            reference_hash = self._reference_audio_hash(reference_paths)
+            artifact_path = self._embedding_artifact_path(voice_profile, reference_hash)
             if callable(stage_callback):
                 stage_callback("extracting_reference", 55)
             target_se = self._get_target_embedding(reference_paths, converter, se_extractor, device, torch, artifact_path=artifact_path)
             voice_profile["embedding_path"] = str(artifact_path)
-            if base_speaker_path.exists():
-                source_se = self._get_source_embedding(base_speaker_path, device, torch)
-            else:
-                source_se = target_se
+            source_se = self._get_source_embedding(base_speaker_path, device, torch)
             if callable(stage_callback):
                 stage_callback("converting", 70)
-            self._log_memory_stage("voice_conversion_begin", device=device)
+            target_embedding_hash = self._embedding_fingerprint(target_se)
+            voice_profile["provider_metadata"] = {
+                **dict(voice_profile.get("provider_metadata") or {}),
+                "embedding_status": "ready",
+                "embedding_ready": True,
+                "embedding_artifact_path": str(artifact_path),
+                "reference_audio_sha256": reference_hash,
+                "target_embedding_hash": target_embedding_hash,
+                "active_reference_count": len(reference_paths),
+                "reference_audio_mode": "average_all_clips" if len(reference_paths) > 1 else "single_clip",
+                "last_preview_source_audio_path": str(temp_src_path),
+                "last_preview_output_path": str(output_path),
+                "openvoice_conversion_applied": True,
+            }
+            logger.info(
+                "openvoice.preview_conversion metadata=%s",
+                {
+                    "voice_profile_id": voice_profile.get("id"),
+                    "reference_audio_path": [str(path) for path in reference_paths],
+                    "reference_audio_sha256": reference_hash,
+                    "target_embedding_path": str(artifact_path),
+                    "target_embedding_hash": target_embedding_hash,
+                    "source_audio_path": str(temp_src_path),
+                    "converted_output_path": str(output_path),
+                    "openvoice_conversion_applied": True,
+                    "fallback_default_voice_used": False,
+                },
+            )
+            logger.info(
+                "OpenVoice conversion applied: true metadata=%s",
+                {
+                    "source_audio_path": str(temp_src_path),
+                    "converted_audio_path": str(output_path),
+                    "target_voice_profile_id": voice_profile.get("id"),
+                    "target_embedding_hash": target_embedding_hash,
+                },
+            )
+            self._log_memory_stage("voice_conversion_begin", device=device, target_embedding_hash=target_embedding_hash)
             converter.convert(
                 audio_src_path=str(temp_src_path),
                 src_se=source_se,
