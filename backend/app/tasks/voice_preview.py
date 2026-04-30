@@ -91,10 +91,12 @@ def process_voice_lab_preview(preview_job_id: int) -> dict:
         if not job:
             return {"ok": False, "reason": "missing_job_after_render"}
         if result.provider_used == "openvoice" and profile_payload.get("embedding_path") and job.voice_profile is not None:
+            provider_metadata = dict(profile_payload.get("provider_metadata") or {})
             update_voice_profile_preparation_metadata(
                 job.voice_profile,
                 embedding_path=str(profile_payload.get("embedding_path")),
                 provider_metadata={
+                    **provider_metadata,
                     "embedding_status": "ready",
                     "embedding_ready": True,
                     "embedding_artifact_path": str(profile_payload.get("embedding_path")),
@@ -125,6 +127,18 @@ def process_voice_lab_preview(preview_job_id: int) -> dict:
         db = SessionLocal()
         job = db.get(VoicePreviewJob, preview_job_id)
         if job:
+            if job.voice_profile is not None:
+                job.voice_profile.embedding_path = None
+                metadata = dict(job.voice_profile.provider_metadata_json or {})
+                metadata.update(
+                    {
+                        "embedding_status": "failed",
+                        "embedding_ready": False,
+                        "embedding_artifact_path": None,
+                        "last_error": exc.as_dict(),
+                    }
+                )
+                job.voice_profile.provider_metadata_json = metadata
             job.status = "failed"
             job.progress = 0
             job.stage = "failed"

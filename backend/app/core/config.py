@@ -43,8 +43,13 @@ class Settings(BaseSettings):
     OPENVOICE_CHECKPOINTS_DIR: str = ""
     OPENVOICE_DEVICE: str = "auto"
     OPENVOICE_DEFAULT_MODEL_ID: str = "openvoice_v2"
-    VOICE_LAB_MAX_REFERENCE_AUDIO_SIZE_BYTES: int = 20 * 1024 * 1024
+    VOICE_LAB_MAX_REFERENCE_AUDIO_SIZE_BYTES: int = 150 * 1024 * 1024
     VOICE_LAB_ALLOWED_AUDIO_TYPES: str = "audio/wav,audio/x-wav,audio/mpeg,audio/mp3,audio/flac,audio/mp4,audio/x-m4a"
+    VOICE_LAB_MAX_REFERENCE_EMBEDDING_SECONDS: float = 60.0
+    VOICE_LAB_REFERENCE_CHUNK_SECONDS: float = 10.0
+    VOICE_LAB_MIN_REFERENCE_CHUNK_SECONDS: float = 2.0
+    VOICE_LAB_REFERENCE_SILENCE_THRESHOLD_DB: str = "-40dB"
+    VOICE_LAB_REFERENCE_SILENCE_MIN_SECONDS: float = 0.35
 
     YOUTUBE_CLIENT_ID: str | None = None
     YOUTUBE_CLIENT_SECRET: str | None = None

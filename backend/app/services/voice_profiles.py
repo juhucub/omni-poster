@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import shutil
 import subprocess
 import uuid
@@ -27,6 +28,7 @@ REFERENCE_AUDIO_SILENCE_FILTER = (
     "silenceremove="
     "start_periods=1:start_silence=0.25:start_threshold=-45dB"
 )
+REFERENCE_AUDIO_NORMALIZATION_FILTER = f"{REFERENCE_AUDIO_SILENCE_FILTER},loudnorm=I=-18:TP=-3:LRA=11"
 
 
 def _runtime_lab_dir() -> Path:
@@ -43,6 +45,12 @@ def voice_lab_preview_dir() -> Path:
 
 def voice_reference_audio_dir() -> Path:
     path = _runtime_lab_dir() / "reference_audio"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def voice_reference_chunk_dir(voice_profile_id: str) -> Path:
+    path = _runtime_lab_dir() / "reference_chunks" / voice_profile_id
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -199,19 +207,69 @@ def _reference_audio_mode(reference_count: int) -> str:
     return "none"
 
 
+def _active_processed_reference_payload(metadata: dict[str, Any], reference_audios: list[VoiceReferenceAudio]) -> dict[str, Any]:
+    processed_by_id = dict(metadata.get("processed_reference_audio") or {})
+    chunks: list[dict[str, Any]] = []
+    paths: list[str] = []
+    processed_reference_ids: set[int] = set()
+    for item in reference_audios:
+        payload = processed_by_id.get(str(item.id))
+        if not isinstance(payload, dict):
+            continue
+        for chunk in payload.get("chunks") or []:
+            if not isinstance(chunk, dict) or not chunk.get("path"):
+                continue
+            path = Path(str(chunk["path"]))
+            if not path.exists():
+                continue
+            chunk_payload = dict(chunk)
+            chunk_payload["reference_audio_id"] = item.id
+            chunks.append(chunk_payload)
+            paths.append(str(path))
+            processed_reference_ids.add(item.id)
+    return {
+        "processed_reference_paths": paths,
+        "processed_reference_chunks": chunks,
+        "processed_reference_audio_ids": sorted(processed_reference_ids),
+        "selected_chunk_durations": [float(chunk.get("duration_seconds") or 0) for chunk in chunks],
+        "processed_reference_duration_seconds": round(sum(float(chunk.get("duration_seconds") or 0) for chunk in chunks), 3),
+    }
+
+
 def _voice_profile_provider_metadata(profile: VoiceProfile) -> dict[str, Any]:
     metadata = dict(profile.provider_metadata_json or {})
     reference_audios = list(profile.reference_audios or [])
     active_reference_ids = [item.id for item in reference_audios]
-    resolved_embedding_path = Path(profile.embedding_path) if profile.embedding_path else voice_embedding_artifact_path(profile.id)
-    embedding_artifact_path = str(resolved_embedding_path) if resolved_embedding_path.exists() else (str(profile.embedding_path) if profile.embedding_path else None)
-    embedding_ready = bool(embedding_artifact_path and Path(embedding_artifact_path).exists())
+    reference_paths = [Path(item.storage_path) for item in reference_audios if item.storage_path]
+    processed_payload = _active_processed_reference_payload(metadata, reference_audios)
+    processed_paths = [Path(path) for path in processed_payload["processed_reference_paths"]]
+    processed_ids = set(processed_payload["processed_reference_audio_ids"])
+    unprocessed_reference_paths = [Path(item.storage_path) for item in reference_audios if item.storage_path and item.id not in processed_ids]
+    hash_paths = processed_paths + unprocessed_reference_paths
+    reference_files_exist = bool(hash_paths) and all(path.exists() for path in hash_paths)
+    active_reference_hash = reference_audio_content_hash_from_paths(hash_paths) if reference_files_exist else None
+    stored_reference_hash = str(metadata.get("reference_audio_sha256") or "")
+    expected_artifact_path = voice_embedding_artifact_path_for_reference(profile.id, active_reference_hash) if active_reference_hash else None
+    explicit_embedding_path = Path(profile.embedding_path) if profile.embedding_path else None
+    embedding_path_candidates = [path for path in [explicit_embedding_path, expected_artifact_path] if path is not None]
+    embedding_artifact_path = None
+    for candidate in embedding_path_candidates:
+        if not candidate.exists() or not active_reference_hash:
+            continue
+        filename_matches_reference = active_reference_hash[:16] in candidate.stem
+        metadata_matches_reference = stored_reference_hash == active_reference_hash
+        if filename_matches_reference or metadata_matches_reference:
+            embedding_artifact_path = str(candidate)
+            break
+    embedding_ready = bool(embedding_artifact_path)
+    stored_status = str(metadata.get("embedding_status") or "")
     if embedding_ready:
         embedding_status = "ready"
+    elif stored_status == "failed":
+        embedding_status = "failed"
     elif not reference_audios:
         embedding_status = "pending_reference_audio"
     else:
-        stored_status = str(metadata.get("embedding_status") or "")
         embedding_status = stored_status if stored_status in {"building", "not_prepared"} else "not_prepared"
     performance_controls_supported = ["speaking_rate"] if profile.provider == "openvoice" else ["speaking_rate", "pitch", "energy", "pause_length"]
     metadata.update(
@@ -222,8 +280,10 @@ def _voice_profile_provider_metadata(profile: VoiceProfile) -> dict[str, Any]:
             "embedding_artifact_path": embedding_artifact_path,
             "active_reference_count": len(reference_audios),
             "active_reference_audio_ids": active_reference_ids,
+            "reference_audio_sha256": active_reference_hash,
             "reference_audio_mode": _reference_audio_mode(len(reference_audios)),
             "performance_controls_supported": performance_controls_supported,
+            **processed_payload,
         }
     )
     if profile.provider == "openvoice":
@@ -347,6 +407,15 @@ def voice_embedding_artifact_path(profile_id: str) -> Path:
     return voice_embedding_dir() / f"{profile_id}.pth"
 
 
+def voice_embedding_artifact_path_for_reference(profile_id: str, reference_audio_sha256: str) -> Path:
+    return voice_embedding_dir() / f"{profile_id}_{reference_audio_sha256[:16]}.pth"
+
+
+def reference_audio_content_hash_from_paths(reference_paths: list[Path]) -> str:
+    digests = sorted(_sha256_path(path) for path in reference_paths)
+    return hashlib.sha256("||".join(digests).encode("utf-8")).hexdigest()
+
+
 def update_voice_profile_preparation_metadata(
     profile: VoiceProfile,
     *,
@@ -365,8 +434,14 @@ def update_voice_profile_preparation_metadata(
 
 
 def invalidate_voice_profile_embedding(profile: VoiceProfile, db: Session) -> None:
+    paths_to_remove: set[Path] = set()
     if profile.embedding_path:
-        Path(profile.embedding_path).unlink(missing_ok=True)
+        paths_to_remove.add(Path(profile.embedding_path))
+    paths_to_remove.add(voice_embedding_artifact_path(profile.id))
+    paths_to_remove.update(path for path in voice_embedding_dir().glob("*.pth") if path.name.startswith(f"{profile.id}_"))
+    for path in paths_to_remove:
+        path.unlink(missing_ok=True)
+    shutil.rmtree(voice_reference_chunk_dir(profile.id), ignore_errors=True)
     profile.embedding_path = None
     next_metadata = dict(profile.provider_metadata_json or {})
     next_metadata.update(
@@ -374,6 +449,8 @@ def invalidate_voice_profile_embedding(profile: VoiceProfile, db: Session) -> No
             "embedding_status": "not_prepared",
             "embedding_ready": False,
             "embedding_artifact_path": None,
+            "reference_audio_sha256": None,
+            "target_embedding_hash": None,
         }
     )
     profile.provider_metadata_json = next_metadata
@@ -396,6 +473,9 @@ def _normalize_reference_audio_upload(content: bytes, filename: str) -> tuple[Pa
     source_path = voice_reference_audio_dir() / f"{uuid.uuid4().hex}_raw{source_suffix}"
     output_path = voice_reference_audio_dir() / f"{uuid.uuid4().hex}.wav"
     source_path.write_bytes(content)
+    source_size_bytes = source_path.stat().st_size
+    source_sha256 = _sha256_path(source_path)
+    source_duration_ms = _audio_duration_ms(source_path)
     command = [
         ffmpeg_binary,
         "-hide_banner",
@@ -414,7 +494,7 @@ def _normalize_reference_audio_upload(content: bytes, filename: str) -> tuple[Pa
         "-sample_fmt",
         "s16",
         "-af",
-        REFERENCE_AUDIO_SILENCE_FILTER,
+        REFERENCE_AUDIO_NORMALIZATION_FILTER,
         str(output_path),
     ]
     try:
@@ -438,7 +518,221 @@ def _normalize_reference_audio_upload(content: bytes, filename: str) -> tuple[Pa
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Reference audio must contain at least {REFERENCE_AUDIO_MIN_DURATION_MS / 1000:.1f} seconds of usable speech after trimming silence.",
         )
+    logger.info(
+        "voice.reference_audio.normalized metadata=%s",
+        {
+            "reference_audio_path": str(source_path),
+            "normalized_reference_path": str(output_path),
+            "reference_audio_sha256": source_sha256,
+            "normalized_reference_sha256": _sha256_path(output_path),
+            "duration_before_seconds": round(source_duration_ms / 1000, 3) if source_duration_ms is not None else None,
+            "normalized_audio_duration_seconds": round(duration_ms / 1000, 3),
+            "input_file_size_bytes": source_size_bytes,
+            "normalized_file_size_bytes": output_path.stat().st_size,
+            "ffmpeg_filter": REFERENCE_AUDIO_NORMALIZATION_FILTER,
+        },
+    )
     return output_path, duration_ms
+
+
+def _parse_silencedetect_windows(stderr: str, duration_seconds: float) -> list[dict[str, float]]:
+    silence_events: list[tuple[str, float]] = []
+    for line in stderr.splitlines():
+        start_match = re.search(r"silence_start:\s*([0-9.]+)", line)
+        if start_match:
+            silence_events.append(("start", float(start_match.group(1))))
+            continue
+        end_match = re.search(r"silence_end:\s*([0-9.]+)", line)
+        if end_match:
+            silence_events.append(("end", float(end_match.group(1))))
+
+    windows: list[dict[str, float]] = []
+    speech_start = 0.0
+    in_silence = False
+    for event, timestamp in silence_events:
+        timestamp = max(0.0, min(float(timestamp), duration_seconds))
+        if event == "start" and not in_silence:
+            if timestamp > speech_start:
+                windows.append({"start_seconds": speech_start, "end_seconds": timestamp, "duration_seconds": timestamp - speech_start})
+            in_silence = True
+        elif event == "end" and in_silence:
+            speech_start = timestamp
+            in_silence = False
+    if not in_silence and speech_start < duration_seconds:
+        windows.append({"start_seconds": speech_start, "end_seconds": duration_seconds, "duration_seconds": duration_seconds - speech_start})
+    if not windows and duration_seconds > 0:
+        windows.append({"start_seconds": 0.0, "end_seconds": duration_seconds, "duration_seconds": duration_seconds})
+    return windows
+
+
+def _detect_reference_speech_windows(path: Path, duration_ms: int) -> list[dict[str, float]]:
+    ffmpeg_binary = _ffmpeg_binary()
+    duration_seconds = max(duration_ms / 1000, 0.0)
+    if not ffmpeg_binary or duration_seconds <= 0:
+        return []
+    command = [
+        ffmpeg_binary,
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(path),
+        "-af",
+        f"silencedetect=n={settings.VOICE_LAB_REFERENCE_SILENCE_THRESHOLD_DB}:d={settings.VOICE_LAB_REFERENCE_SILENCE_MIN_SECONDS}",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            "voice.reference_audio.silencedetect_failed metadata=%s",
+            {"normalized_reference_path": str(path), "error": exc.stderr.strip() if exc.stderr else str(exc)},
+        )
+        return [{"start_seconds": 0.0, "end_seconds": duration_seconds, "duration_seconds": duration_seconds}]
+    return _parse_silencedetect_windows(getattr(result, "stderr", "") or "", duration_seconds)
+
+
+def _select_reference_chunks(speech_windows: list[dict[str, float]], duration_ms: int) -> list[dict[str, float]]:
+    duration_seconds = max(duration_ms / 1000, 0.0)
+    max_total = max(float(settings.VOICE_LAB_MAX_REFERENCE_EMBEDDING_SECONDS), 1.0)
+    max_chunk = max(float(settings.VOICE_LAB_REFERENCE_CHUNK_SECONDS), 1.0)
+    min_chunk = max(float(settings.VOICE_LAB_MIN_REFERENCE_CHUNK_SECONDS), 0.25)
+    candidates: list[dict[str, float]] = []
+    for window in speech_windows or [{"start_seconds": 0.0, "end_seconds": duration_seconds, "duration_seconds": duration_seconds}]:
+        start = float(window["start_seconds"])
+        end = float(window["end_seconds"])
+        cursor = start
+        while cursor < end:
+            chunk_end = min(cursor + max_chunk, end)
+            chunk_duration = chunk_end - cursor
+            if chunk_duration >= min_chunk:
+                candidates.append(
+                    {
+                        "start_seconds": round(cursor, 3),
+                        "end_seconds": round(chunk_end, 3),
+                        "duration_seconds": round(chunk_duration, 3),
+                    }
+                )
+            cursor = chunk_end
+    if not candidates and duration_seconds > 0:
+        chunk_duration = min(duration_seconds, max_total, max_chunk)
+        candidates.append({"start_seconds": 0.0, "end_seconds": round(chunk_duration, 3), "duration_seconds": round(chunk_duration, 3)})
+
+    selected: list[dict[str, float]] = []
+    total = 0.0
+    for candidate in sorted(candidates, key=lambda item: (-item["duration_seconds"], item["start_seconds"])):
+        if total >= max_total:
+            break
+        remaining = max_total - total
+        if candidate["duration_seconds"] > remaining:
+            if remaining < min_chunk:
+                continue
+            candidate = {
+                "start_seconds": candidate["start_seconds"],
+                "end_seconds": round(candidate["start_seconds"] + remaining, 3),
+                "duration_seconds": round(remaining, 3),
+            }
+        selected.append(candidate)
+        total += candidate["duration_seconds"]
+    return sorted(selected, key=lambda item: item["start_seconds"])
+
+
+def _extract_reference_chunks(path: Path, voice_profile_id: str, reference_audio_id: int, selected_chunks: list[dict[str, float]]) -> list[dict[str, Any]]:
+    ffmpeg_binary = _ffmpeg_binary()
+    if not ffmpeg_binary:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Reference audio chunking is unavailable because ffmpeg is not installed.",
+        )
+    chunk_dir = voice_reference_chunk_dir(voice_profile_id)
+    chunks: list[dict[str, Any]] = []
+    for index, chunk in enumerate(selected_chunks):
+        output_path = chunk_dir / f"ref_{reference_audio_id}_{index:03d}_{uuid.uuid4().hex[:8]}.wav"
+        command = [
+            ffmpeg_binary,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            f"{chunk['start_seconds']:.3f}",
+            "-t",
+            f"{chunk['duration_seconds']:.3f}",
+            "-i",
+            str(path),
+            "-vn",
+            "-map_metadata",
+            "-1",
+            "-ac",
+            "1",
+            "-ar",
+            str(REFERENCE_AUDIO_SAMPLE_RATE),
+            "-sample_fmt",
+            "s16",
+            str(output_path),
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            output_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Reference audio chunk could not be extracted: {exc.stderr.strip() or 'unknown ffmpeg error'}",
+            ) from exc
+        duration_ms = _audio_duration_ms(output_path)
+        if not duration_ms:
+            output_path.unlink(missing_ok=True)
+            continue
+        chunks.append(
+            {
+                "path": str(output_path),
+                "sha256": _sha256_path(output_path),
+                "start_seconds": chunk["start_seconds"],
+                "end_seconds": chunk["end_seconds"],
+                "duration_seconds": round(duration_ms / 1000, 3),
+                "file_size_bytes": output_path.stat().st_size,
+            }
+        )
+    return chunks
+
+
+def _process_reference_audio_for_embedding(path: Path, *, voice_profile_id: str, reference_audio_id: int, duration_ms: int) -> dict[str, Any]:
+    speech_windows = _detect_reference_speech_windows(path, duration_ms)
+    selected_windows = _select_reference_chunks(speech_windows, duration_ms)
+    chunks = _extract_reference_chunks(path, voice_profile_id, reference_audio_id, selected_windows)
+    if not chunks:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reference audio did not contain usable speech chunks after processing.")
+    payload = {
+        "status": "ready",
+        "normalized_reference_path": str(path),
+        "normalized_reference_sha256": _sha256_path(path),
+        "normalized_duration_seconds": round(duration_ms / 1000, 3),
+        "speech_windows": speech_windows,
+        "chunks": chunks,
+        "selected_duration_seconds": round(sum(float(chunk["duration_seconds"]) for chunk in chunks), 3),
+        "max_reference_embedding_seconds": float(settings.VOICE_LAB_MAX_REFERENCE_EMBEDDING_SECONDS),
+    }
+    logger.info(
+        "voice.reference_audio.chunks_selected metadata=%s",
+        {
+            "voice_profile_id": voice_profile_id,
+            "reference_audio_id": reference_audio_id,
+            "normalized_reference_path": str(path),
+            "normalized_reference_sha256": payload["normalized_reference_sha256"],
+            "selected_duration_seconds": payload["selected_duration_seconds"],
+            "chunks": [
+                {
+                    "path": chunk["path"],
+                    "start_seconds": chunk["start_seconds"],
+                    "end_seconds": chunk["end_seconds"],
+                    "duration_seconds": chunk["duration_seconds"],
+                }
+                for chunk in chunks
+            ],
+        },
+    )
+    return payload
 
 
 def ensure_seeded_voice_presets(db: Session) -> None:
@@ -701,6 +995,14 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _audio_duration_ms(path: Path) -> int | None:
     try:
         with wave.open(str(path), "rb") as handle:
@@ -753,7 +1055,51 @@ def save_reference_audio_upload(
         created_by_user_id=current_user_id,
     )
     db.add(reference)
+    db.flush()
     invalidate_voice_profile_embedding(profile, db)
+    processed_reference = _process_reference_audio_for_embedding(
+        destination,
+        voice_profile_id=voice_profile_id,
+        reference_audio_id=reference.id,
+        duration_ms=duration_ms,
+    )
+    next_metadata = dict(profile.provider_metadata_json or {})
+    processed_by_id = dict(next_metadata.get("processed_reference_audio") or {})
+    processed_by_id[str(reference.id)] = {
+        **processed_reference,
+        "original_filename": file.filename,
+        "uploaded_file_size_bytes": len(content),
+        "uploaded_file_sha256": sha256,
+    }
+    next_metadata.update(
+        {
+            "reference_processing_status": "ready",
+            "processed_reference_audio": processed_by_id,
+            "last_reference_audio_id": reference.id,
+            "last_reference_original_filename": file.filename,
+            "last_reference_audio_path": str(destination),
+            "last_reference_audio_sha256": sha256,
+            "last_reference_normalized_sha256": processed_reference["normalized_reference_sha256"],
+            "last_reference_duration_seconds": round(duration_ms / 1000, 3),
+            "last_reference_selected_duration_seconds": processed_reference["selected_duration_seconds"],
+            "last_error": None,
+        }
+    )
+    profile.provider_metadata_json = next_metadata
+    logger.info(
+        "voice.reference_audio.uploaded metadata=%s",
+        {
+            "voice_profile_id": voice_profile_id,
+            "original_uploaded_filename": file.filename,
+            "stored_reference_path": str(destination),
+            "file_size_bytes": len(content),
+            "reference_audio_sha256": sha256,
+            "normalized_reference_sha256": processed_reference["normalized_reference_sha256"],
+            "detected_duration_seconds": round(duration_ms / 1000, 3),
+            "selected_chunk_count": len(processed_reference["chunks"]),
+            "selected_duration_seconds": processed_reference["selected_duration_seconds"],
+        },
+    )
     db.commit()
     db.refresh(reference)
     profile = get_voice_profile_model(voice_profile_id, db)
