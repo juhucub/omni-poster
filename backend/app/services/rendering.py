@@ -14,7 +14,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.core.config import settings
 from app.services.character_presets import resolve_character_portrait_path, resolve_character_preset_for_speaker
-from app.services.tts import LocalSpeechService, SpeechSegment
+from app.services.storage import generated_job_artifact_url, generated_job_segment_dir
+from app.services.tts import LocalSpeechService, SpeechSegment, TTSProviderError
 from app.services.vid_gen import VideoGenerationService
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,8 @@ class ProjectRenderService:
         style_preset: str,
         output_kind: str = "preview",
         progress_callback=None,
+        voice_manifest: dict | None = None,
+        job_id: int | None = None,
     ) -> dict:
         try:
             return self._render_speaker_video(
@@ -55,7 +58,12 @@ class ProjectRenderService:
                 style_preset=style_preset,
                 output_kind=output_kind,
                 progress_callback=progress_callback,
+                voice_manifest=voice_manifest,
+                job_id=job_id,
             )
+        except TTSProviderError:
+            logger.warning("Speaker render failed during TTS for project %s", project_id, exc_info=True)
+            raise
         except RuntimeError as exc:
             logger.warning("Falling back to overlay-only render for project %s: %s", project_id, exc)
             return self.video_service.generate_video(
@@ -76,6 +84,8 @@ class ProjectRenderService:
         style_preset: str,
         output_kind: str,
         progress_callback,
+        voice_manifest: dict | None,
+        job_id: int | None,
     ) -> dict:
         from moviepy import (
             CompositeVideoClip,
@@ -92,7 +102,9 @@ class ProjectRenderService:
         clips_to_close: list = []
         audio_clips: list = []
         try:
-            segments = self.speech_service.synthesize_dialogue(parsed_lines, work_dir / "speech")
+            self.speech_service = LocalSpeechService(db=self.db, project_id=project_id, voice_manifest=voice_manifest)
+            speech_dir = self._speech_output_dir(job_id, work_dir)
+            segments = self.speech_service.synthesize_dialogue(parsed_lines, speech_dir)
             self._emit_progress(progress_callback, "tts_ready", 46)
 
             background_clip = VideoFileClip(clean_video_path).without_audio()
@@ -202,6 +214,21 @@ class ProjectRenderService:
             )
             self._emit_progress(progress_callback, "encoded", 88)
 
+            segment_metadata = [
+                self._segment_artifact_metadata(
+                    index=index,
+                    item=item,
+                    voice_manifest=voice_manifest,
+                    job_id=job_id,
+                )
+                for index, item in enumerate(timed_segments)
+            ]
+            tts_result = {
+                "status": "completed",
+                "provider_state": (segments[-1].provider_state or {}) if segments else {},
+                "segments": segment_metadata,
+            }
+
             return {
                 "output_path": f"file://{output_path.absolute()}",
                 "filename": output_filename,
@@ -218,18 +245,23 @@ class ProjectRenderService:
                             "provider_used": segment.provider_used,
                             "voice_profile_id": segment.voice_profile_id,
                             "fallback_used": segment.fallback_used,
+                            "reference_audio_count": segment.reference_audio_count,
                         }
                         for segment in segments
                     },
+                    "tts_result": tts_result,
                     "line_timing_seconds": [
                         {
                             "speaker": item["segment"].speaker,
                             "text": item["segment"].text,
                             "duration_seconds": item["duration_seconds"],
+                            "audio_path": item["segment"].audio_path,
+                            "artifact_url": segment_metadata[index].get("artifact_url"),
                             "provider_used": item["segment"].provider_used,
                             "voice_profile_id": item["segment"].voice_profile_id,
+                            "fallback_used": item["segment"].fallback_used,
                         }
-                        for item in timed_segments
+                        for index, item in enumerate(timed_segments)
                     ],
                     "render_fps": render_config["fps"],
                     "encode_preset": render_config["preset"],
@@ -245,6 +277,34 @@ class ProjectRenderService:
                     except Exception:
                         logger.debug("Failed to close clip cleanly", exc_info=True)
             shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _segment_artifact_metadata(self, *, index: int, item: dict, voice_manifest: dict | None, job_id: int | None) -> dict:
+        segment: SpeechSegment = item["segment"]
+        audio_path = Path(segment.audio_path)
+        manifest_entry = dict(((voice_manifest or {}).get("speakers") or {}).get(segment.speaker) or {})
+        voice_profile = dict(manifest_entry.get("voice_profile") or {})
+        payload = {
+            "segment_index": index,
+            "segment_id": f"{index:03d}_{self._slugify(segment.speaker)}",
+            "speaker": segment.speaker,
+            "text": segment.text,
+            "voice_profile_id": segment.voice_profile_id,
+            "voice_profile_name": voice_profile.get("display_name") or manifest_entry.get("character_display_name"),
+            "tts_provider": segment.provider_used,
+            "provider_used": segment.provider_used,
+            "fallback_used": segment.fallback_used,
+            "fallback_reason": segment.fallback_reason,
+            "provider_failures": segment.provider_failures or {},
+            "local_file_path": str(audio_path),
+            "audio_path": str(audio_path),
+            "artifact_url": generated_job_artifact_url(job_id, audio_path) if job_id is not None else None,
+            "duration_seconds": item["duration_seconds"],
+            "reference_audio_count": segment.reference_audio_count,
+        }
+        return payload
+
+    def _speech_output_dir(self, job_id: int | None, work_dir: Path) -> Path:
+        return generated_job_segment_dir(job_id) if job_id is not None else work_dir / "speech"
 
     def _fit_to_canvas(self, clip):
         scale = max(self.CANVAS_WIDTH / clip.w, self.CANVAS_HEIGHT / clip.h)

@@ -202,6 +202,9 @@ export interface GenerationJob {
   output_kind: string;
   provider_name: string;
   error_message: string | null;
+  voice_manifest: Record<string, unknown>;
+  tts_result: Record<string, unknown>;
+  provider_state: Record<string, unknown>;
   output_video_id: number | null;
   started_at: string | null;
   finished_at: string | null;

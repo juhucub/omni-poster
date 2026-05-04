@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -12,6 +13,7 @@ from app.models import Asset, GenerationJob, OutputVideo, Project, User
 from app.routers.projects import get_owned_project
 from app.schemas import (
     GenerationJobCreateRequest,
+    GenerationJobListResponse,
     GenerationJobSummary,
     OkResponse,
     OutputVideoListResponse,
@@ -19,6 +21,8 @@ from app.schemas import (
 from app.services.audit import record_audit
 from app.services.notifications import create_notification
 from app.services.project_state import sync_project_state, to_generation_summary, to_output_video_summary
+from app.services.storage import guess_mime_type, resolve_generated_job_artifact
+from app.services.voice_profiles import get_character_preset_model, resolve_preset_for_project_speaker, runtime_voice_profile_payload
 from app.tasks.generation import (
     ACTIVE_GENERATION_STATUSES,
     process_generation_job,
@@ -28,12 +32,100 @@ from app.tasks.generation import (
 router = APIRouter(tags=["generation"])
 
 
+def _slugify(value: str) -> str:
+    slug = "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_")
+    return slug or "speaker"
+
+
 def latest_background_asset(project: Project) -> Asset | None:
     if project.background_asset_id:
         return next((asset for asset in project.assets if asset.id == project.background_asset_id), None)
     assets = [asset for asset in project.assets if asset.kind in {"background_video", "background_preset"}]
     assets.sort(key=lambda asset: asset.created_at, reverse=True)
     return assets[0] if assets else None
+
+
+def _default_voice_profile_payload(speaker: str, slot_index: int) -> dict:
+    default_voice = settings.TTS_ESPEAK_VOICE_SLOT_1 if slot_index % 2 == 0 else settings.TTS_ESPEAK_VOICE_SLOT_2
+    return {
+        "id": f"ephemeral_{_slugify(speaker)}",
+        "display_name": speaker,
+        "provider": "espeak",
+        "fallback_provider": "espeak",
+        "voice": default_voice,
+        "espeak_voice": default_voice,
+        "espeak_rate": settings.TTS_ESPEAK_RATE,
+        "espeak_pitch": settings.TTS_ESPEAK_PITCH,
+        "espeak_word_gap": settings.TTS_ESPEAK_WORD_GAP,
+        "espeak_amplitude": settings.TTS_ESPEAK_AMPLITUDE,
+        "controls": {},
+        "style": {},
+        "fallback_voice_settings": {
+            "voice": default_voice,
+            "rate": settings.TTS_ESPEAK_RATE,
+            "pitch": settings.TTS_ESPEAK_PITCH,
+            "word_gap": settings.TTS_ESPEAK_WORD_GAP,
+            "amplitude": settings.TTS_ESPEAK_AMPLITUDE,
+        },
+        "reference_audios": [],
+        "language": "en",
+        "model_id": None,
+        "embedding_path": None,
+        "provider_metadata": {},
+    }
+
+
+def build_generation_voice_manifest(project_id: int, parsed_lines: list[dict], db: Session) -> dict:
+    speakers: dict[str, dict] = {}
+    speaker_order: list[str] = []
+    for index, line in enumerate(parsed_lines):
+        speaker = str(line.get("speaker") or f"Speaker {index + 1}").strip()
+        text = str(line.get("text") or "").strip()
+        if not speaker or not text or speaker in speakers:
+            continue
+
+        slot_index = len(speaker_order)
+        speaker_order.append(speaker)
+        preset = resolve_preset_for_project_speaker(project_id, speaker, db)
+        profile_payload: dict
+        character_preset_id = None
+        character_display_name = speaker
+        if preset:
+            character_preset_id = preset["id"]
+            character_display_name = preset["display_name"]
+            preset_model = get_character_preset_model(preset["id"], db)
+            if preset_model:
+                profile_payload = runtime_voice_profile_payload(preset_model.voice_profile, preset_model.display_name)
+            else:
+                profile_payload = _default_voice_profile_payload(speaker, slot_index)
+        else:
+            profile_payload = _default_voice_profile_payload(speaker, slot_index)
+
+        provider = str(profile_payload.get("provider") or "espeak").strip().lower()
+        fallback_allowed = provider != "openvoice"
+        profile_payload = {
+            **profile_payload,
+            "requested_provider": provider,
+            "fallback_allowed": fallback_allowed,
+        }
+        speakers[speaker] = {
+            "speaker": speaker,
+            "slot_index": slot_index,
+            "character_preset_id": character_preset_id,
+            "character_display_name": character_display_name,
+            "voice_profile_id": profile_payload.get("id"),
+            "provider": provider,
+            "requested_provider": provider,
+            "fallback_allowed": fallback_allowed,
+            "voice_profile": profile_payload,
+        }
+
+    return {
+        "version": 1,
+        "policy": "openvoice_fail_closed",
+        "speaker_order": speaker_order,
+        "speakers": speakers,
+    }
 
 
 @router.post("/projects/{project_id}/generation-jobs", response_model=GenerationJobSummary, status_code=status.HTTP_201_CREATED)
@@ -91,6 +183,7 @@ def create_generation_job(
         style_preset=payload.background_style,
         output_kind=payload.output_kind,
         provider_name=payload.provider_name,
+        voice_manifest_json=build_generation_voice_manifest(project.id, script_revision.parsed_lines_json, db),
         status="queued",
         progress=0,
     )
@@ -134,6 +227,50 @@ def get_generation_job(job_id: int, current_user: User = Depends(get_current_use
         db.commit()
         db.refresh(job)
     return to_generation_summary(job)
+
+
+@router.get("/generation-jobs/{job_id}/artifacts/{artifact_path:path}")
+def get_generation_job_artifact(
+    job_id: int,
+    artifact_path: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = (
+        db.query(GenerationJob)
+        .join(Project, Project.id == GenerationJob.project_id)
+        .filter(GenerationJob.id == job_id, Project.user_id == current_user.id)
+        .one_or_none()
+    )
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation job not found")
+    artifact = resolve_generated_job_artifact(job.id, artifact_path)
+    return FileResponse(
+        artifact,
+        media_type=guess_mime_type(str(artifact)),
+        filename=artifact.name,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+@router.get("/projects/{project_id}/generation-jobs", response_model=GenerationJobListResponse)
+def list_project_generation_jobs(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = get_owned_project(db, current_user.id, project_id)
+    reconciled = reconcile_stale_generation_jobs(db, project_id=project.id)
+    if reconciled:
+        db.commit()
+    jobs = (
+        db.query(GenerationJob)
+        .filter(GenerationJob.project_id == project.id)
+        .order_by(GenerationJob.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    return GenerationJobListResponse(items=[to_generation_summary(job) for job in jobs])
 
 
 @router.get("/projects/{project_id}/generation-jobs/active", response_model=GenerationJobSummary)

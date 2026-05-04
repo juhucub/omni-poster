@@ -1,8 +1,68 @@
 # Omniposter Known Mistakes
 
-Last updated: 2026-05-01
+Last updated: 2026-05-04
 
 This file is regression memory. Add to it when bugs are found or fixed. Do not remove entries unless they are obsolete and clearly replaced by a better rule.
+
+## Completed Render Diagnostics Hidden After Active Job Ends
+
+Date found:
+2026-05-04
+
+Symptom:
+The Project Editor had render segment WAV links, but completed jobs disappeared from the visible render panel after refresh because only the active generation job endpoint was loaded.
+
+Root cause:
+The frontend set `generationJob` to `null` when `/projects/{project_id}/generation-jobs/active` returned 404, and there was no project-scoped generation job list used as a completed-job fallback.
+
+Fix:
+Added a project generation-job list endpoint and updated Project Editor to load the latest completed job when no active job exists. The latest render job panel is also visible outside the Generate tab.
+
+Regression test:
+`backend/app/tests/test_vertical_slice.py::test_generation_job_list_exposes_latest_completed_job`.
+
+Rule:
+Do not make render diagnostics depend only on active jobs; completed jobs must remain visible enough to inspect status, provider metadata, and segment artifacts.
+
+## Render Segment Audio Hidden In Deleted Temp Directories
+
+Date found:
+2026-05-02
+
+Symptom:
+Voice Lab previews could sound correct while final video output sounded wrong, but the exact render segment WAVs were deleted after video assembly and could not be compared.
+
+Root cause:
+The render pipeline generated segment audio inside a temporary render work directory and removed that directory after ffmpeg/MoviePy assembly.
+
+Fix:
+Render segment WAVs are now written to stable generated job artifact storage and exposed through scoped job artifact URLs in job metadata.
+
+Regression test:
+`backend/app/tests/test_vertical_slice.py::test_render_speech_output_dir_uses_persisted_job_artifact_storage`, `test_render_segment_metadata_exposes_safe_artifact_url`, `test_generation_job_artifact_endpoint_serves_scoped_segment_wav`, and `test_render_audio_assembly_uses_segment_audio_paths`.
+
+Rule:
+Do not hide or delete render segment audio before it can be compared against Voice Lab previews and final video output.
+
+## Selected OpenVoice Profiles Silently Replaced During Render
+
+Date found:
+2026-05-02
+
+Symptom:
+OpenVoice voice presets appeared selectable and previewable in Voice Lab, but generated videos could render with default/local TTS or overlay-only fallback instead of the selected OpenVoice profile.
+
+Root cause:
+Generation jobs did not persist a per-speaker voice profile/provider snapshot, and render-level fallback could hide TTS provider failures.
+
+Fix:
+Generation jobs now store a voice manifest, pass it through Celery into rendering, honor per-profile provider/fallback policy, and fail closed for OpenVoice-selected profiles.
+
+Regression test:
+`backend/app/tests/test_vertical_slice.py::test_generation_job_snapshots_selected_voice_profiles`, `test_generation_worker_uses_persisted_voice_manifest_after_binding_changes`, `test_generation_worker_persists_tts_provider_failure`, and `test_project_render_service_does_not_overlay_fallback_for_tts_errors`.
+
+Rule:
+Never render a video with a different TTS provider than the selected OpenVoice profile without failing the job or explicitly recording fallback status.
 
 ## Marking Features Complete Without Evidence
 

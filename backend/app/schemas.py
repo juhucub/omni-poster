@@ -424,10 +424,17 @@ class GenerationJobSummary(BaseModel):
     output_kind: str
     provider_name: str
     error_message: str | None = None
+    voice_manifest: dict = Field(default_factory=dict)
+    tts_result: dict = Field(default_factory=dict)
+    provider_state: dict = Field(default_factory=dict)
     output_video_id: int | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     created_at: datetime
+
+
+class GenerationJobListResponse(BaseModel):
+    items: list[GenerationJobSummary]
 
 
 class OutputVideoSummary(BaseModel):

@@ -12,6 +12,7 @@ from app.services.notifications import create_notification
 from app.services.project_state import sync_project_state
 from app.services.rendering import ProjectRenderService
 from app.services.storage import guess_mime_type, store_generated_file
+from app.services.tts import TTSProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,8 @@ def process_generation_job(job_id: int) -> dict:
                 style_preset=job.style_preset,
                 output_kind=job.output_kind,
                 progress_callback=progress_callback,
+                voice_manifest=job.voice_manifest_json or {},
+                job_id=job.id,
             )
         except TypeError:
             # Compatibility for tests and legacy local monkeypatches that still use the older signature.
@@ -124,6 +127,11 @@ def process_generation_job(job_id: int) -> dict:
                 script_revision.parsed_lines_json,
                 job.style_preset,
             )
+        metadata = dict(result.get("metadata") or {})
+        tts_result = dict(metadata.get("tts_result") or {})
+        if tts_result:
+            job.tts_result_json = tts_result
+            job.provider_state_json = dict(tts_result.get("provider_state") or {})
         _set_job_progress(db, job, project, 70)
         logger.info("Generation job %s render pipeline produced output %s", job.id, result.get("output_path"))
 
@@ -141,6 +149,7 @@ def process_generation_job(job_id: int) -> dict:
             mime_type=guess_mime_type(str(stored_path)),
             size_bytes=stored_path.stat().st_size,
             duration_ms=int((result.get("duration_seconds") or 0) * 1000) or None,
+            metadata_json=metadata,
         )
         db.add(output_asset)
         db.flush()
@@ -179,6 +188,31 @@ def process_generation_job(job_id: int) -> dict:
         db.commit()
         logger.info("Generation job %s completed with output video %s", job.id, output_video.id)
         return {"ok": True, "status": job.status, "output_video_id": output_video.id}
+    except TTSProviderError as exc:
+        logger.exception("Generation job %s failed during TTS provider selection", job_id)
+        db.rollback()
+        job = db.get(GenerationJob, job_id)
+        if job:
+            project = db.get(Project, job.project_id)
+            error_payload = exc.as_dict()
+            job.status = "failed"
+            job.progress = 0
+            job.error_message = exc.message
+            job.tts_result_json = {"status": "failed", "error": error_payload}
+            job.provider_state_json = dict(exc.provider_state or {})
+            job.finished_at = datetime.utcnow()
+            if project:
+                project.status = "failed"
+                create_notification(
+                    db,
+                    user_id=project.user_id,
+                    project_id=project.id,
+                    category="render.failed",
+                    message="A render job failed because the selected TTS provider was unavailable.",
+                    payload={"job_id": job.id, "error": error_payload},
+                )
+            db.commit()
+        return {"ok": False, "reason": exc.message, "error": exc.as_dict()}
     except Exception as exc:
         logger.exception("Generation job %s failed", job_id)
         db.rollback()

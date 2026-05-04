@@ -132,6 +132,9 @@ class SpeechSegment:
     fallback_used: bool = False
     controls_applied: dict[str, Any] | None = None
     reference_audio_count: int = 0
+    provider_state: dict[str, Any] | None = None
+    provider_failures: dict[str, Any] | None = None
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,8 @@ class SynthesisResult:
     provider_state: dict[str, Any]
     cache_hit: bool
     voice_profile_id: str
+    provider_failures: dict[str, Any] | None = None
+    fallback_reason: str | None = None
 
 
 class BaseTTSProvider:
@@ -1149,6 +1154,8 @@ class TTSOrchestrator:
                     provider_state=state,
                     cache_hit=True,
                     voice_profile_id=str(voice_profile.get("id") or ""),
+                    provider_failures=dict(provider_failures),
+                    fallback_reason=next(iter(provider_failures.values()), {}).get("code") if index > 0 and provider_failures else None,
                 )
             try:
                 logger.info(
@@ -1172,6 +1179,8 @@ class TTSOrchestrator:
                     provider_state=state,
                     cache_hit=False,
                     voice_profile_id=str(voice_profile.get("id") or ""),
+                    provider_failures=dict(provider_failures),
+                    fallback_reason=next(iter(provider_failures.values()), {}).get("code") if index > 0 and provider_failures else None,
                 )
             except TTSProviderError as exc:
                 last_error = exc
@@ -1233,13 +1242,19 @@ class TTSOrchestrator:
                 continue
             slot_index = slot_map.setdefault(speaker, len(slot_map))
             voice_profile = voice_profile_map[speaker]
+            effective_requested_provider = requested_provider
+            if effective_requested_provider is None:
+                effective_requested_provider = voice_profile.get("requested_provider")
+            effective_fallback_allowed = fallback_allowed
+            if "fallback_allowed" in voice_profile:
+                effective_fallback_allowed = bool(voice_profile.get("fallback_allowed"))
             output_path = output_dir / f"{index:03d}_{_slugify(speaker)}_{uuid.uuid4().hex}.wav"
             result = self.synthesize_line(
                 text=text,
                 voice_profile=voice_profile,
                 output_path=output_path,
-                requested_provider=requested_provider,
-                fallback_allowed=fallback_allowed,
+                requested_provider=effective_requested_provider,
+                fallback_allowed=effective_fallback_allowed,
                 options=options,
             )
             segments.append(
@@ -1255,6 +1270,9 @@ class TTSOrchestrator:
                     fallback_used=result.fallback_used,
                     controls_applied=result.controls_applied,
                     reference_audio_count=result.reference_audio_count,
+                    provider_state=result.provider_state,
+                    provider_failures=getattr(result, "provider_failures", None),
+                    fallback_reason=getattr(result, "fallback_reason", None),
                 )
             )
         if not segments:
@@ -1274,11 +1292,19 @@ class LocalSpeechService:
         db=None,
         project_id: int | None = None,
         speaker_voice_overrides: dict[str, dict[str, Any]] | None = None,
+        voice_manifest: dict[str, Any] | None = None,
     ) -> None:
         self.db = db
         self.project_id = project_id
         self.speaker_voice_overrides = {
             _slugify(speaker): dict(config) for speaker, config in (speaker_voice_overrides or {}).items()
+        }
+        manifest_speakers = dict((voice_manifest or {}).get("speakers") or {})
+        self.voice_manifest = {
+            str(speaker): dict(config) for speaker, config in manifest_speakers.items()
+        }
+        self.voice_manifest_by_slug = {
+            _slugify(str(speaker)): dict(config) for speaker, config in manifest_speakers.items()
         }
         self.orchestrator = TTSOrchestrator()
 
@@ -1330,7 +1356,25 @@ class LocalSpeechService:
             "embedding_path": payload.get("embedding_path"),
         }
 
+    def _manifest_profile_for_speaker(self, speaker: str) -> dict[str, Any] | None:
+        manifest_entry = self.voice_manifest.get(speaker) or self.voice_manifest_by_slug.get(_slugify(speaker))
+        if not manifest_entry:
+            return None
+        voice_profile = dict(manifest_entry.get("voice_profile") or {})
+        if not voice_profile:
+            return None
+        provider = str(manifest_entry.get("requested_provider") or voice_profile.get("provider") or "espeak").lower()
+        fallback_allowed = bool(manifest_entry.get("fallback_allowed", voice_profile.get("fallback_allowed", provider != "openvoice")))
+        return {
+            **voice_profile,
+            "requested_provider": provider,
+            "fallback_allowed": fallback_allowed,
+        }
+
     def _resolved_profile_for_speaker(self, speaker: str, slot_index: int) -> dict[str, Any]:
+        manifest_profile = self._manifest_profile_for_speaker(speaker)
+        if manifest_profile:
+            return manifest_profile
         override = self.speaker_voice_overrides.get(_slugify(speaker))
         if override:
             return self._ephemeral_profile(speaker, override)

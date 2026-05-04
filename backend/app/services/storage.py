@@ -5,6 +5,7 @@ import logging
 import shutil
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import HTTPException, UploadFile, status
 
@@ -38,6 +39,40 @@ def project_media_dir(project_id: int) -> Path:
     path = media_root() / f"project_{project_id}"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def generated_job_artifact_dir(job_id: int) -> Path:
+    path = media_root() / "generated" / str(job_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def generated_job_segment_dir(job_id: int) -> Path:
+    path = generated_job_artifact_dir(job_id) / "segments"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def generated_job_artifact_url(job_id: int, artifact_path: Path) -> str:
+    root = generated_job_artifact_dir(job_id).resolve()
+    resolved = artifact_path.resolve()
+    relative = resolved.relative_to(root)
+    return f"/generation-jobs/{job_id}/artifacts/{quote(relative.as_posix())}"
+
+
+def resolve_generated_job_artifact(job_id: int, artifact_path: str) -> Path:
+    relative = Path(artifact_path)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
+    root = generated_job_artifact_dir(job_id).resolve()
+    resolved = (root / relative).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found") from exc
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
+    return resolved
 
 
 def list_background_presets() -> list[dict]:

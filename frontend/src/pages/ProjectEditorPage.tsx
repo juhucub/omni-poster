@@ -135,6 +135,15 @@ const ProjectEditorPage: React.FC = () => {
     [assets, project?.background_asset_id]
   );
   const generationStage = useMemo(() => generationStageLabel(generationJob), [generationJob]);
+  const generationVoiceEntries = useMemo(
+    () => Object.values(((generationJob?.voice_manifest as any)?.speakers || {}) as Record<string, any>),
+    [generationJob?.voice_manifest]
+  );
+  const generationSegments = useMemo(
+    () => (((generationJob?.tts_result as any)?.segments || []) as any[]),
+    [generationJob?.tts_result]
+  );
+  const generationTtsError = (generationJob?.tts_result as any)?.error || null;
   const savedDraft = useMemo(() => normalizeDraft(script?.raw_text || defaultScript), [script?.raw_text]);
   const scriptIsDirty = useMemo(() => normalizeDraft(scriptDraft) !== savedDraft, [scriptDraft, savedDraft]);
   const detectedSpeakers = useMemo(() => {
@@ -169,6 +178,7 @@ const ProjectEditorPage: React.FC = () => {
         accountsResponse,
         historyResponse,
         speakerBindingsResponse,
+        generationJobsResponse,
       ] = await Promise.all([
         apiClient.get<Project>(`/projects/${id}`),
         apiClient.get<Asset[]>(`/projects/${id}/assets`),
@@ -182,6 +192,7 @@ const ProjectEditorPage: React.FC = () => {
         apiClient.get<{ items: SocialAccount[] }>('/social-accounts'),
         apiClient.get<{ jobs: PublishJob[]; posts: PublishedPost[] }>(`/projects/${id}/publish-history`),
         apiClient.get<{ items: SpeakerBinding[] }>(`/projects/${id}/speaker-bindings`),
+        apiClient.get<{ items: GenerationJob[] }>(`/projects/${id}/generation-jobs`),
       ]);
 
       setProject(projectResponse.data);
@@ -196,12 +207,13 @@ const ProjectEditorPage: React.FC = () => {
       setAccounts(accountsResponse.data.items);
       setHistory(historyResponse.data);
       setSpeakerBindings(speakerBindingsResponse.data.items);
+      const latestGenerationJob = generationJobsResponse.data.items[0] || null;
       try {
         const activeGenerationResponse = await apiClient.get<GenerationJob>(`/projects/${id}/generation-jobs/active`);
         setGenerationJob(activeGenerationResponse.data);
       } catch (activeErr: any) {
         if (activeErr.response?.status === 404) {
-          setGenerationJob(null);
+          setGenerationJob(latestGenerationJob);
         } else {
           throw activeErr;
         }
@@ -587,6 +599,68 @@ const ProjectEditorPage: React.FC = () => {
     }
   };
 
+  const renderGenerationJobPanel = () => {
+    if (!generationJob) {
+      return null;
+    }
+    return (
+      <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4 text-sm text-slate-300">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <span>
+            Render job #{generationJob.id}: {generationJob.status} ({generationJob.progress}%)
+          </span>
+          {generationStage ? <span className="text-cyan-200">{generationStage}</span> : null}
+        </div>
+        <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+          <div className="h-full rounded-full bg-cyan-300 transition-[width] duration-500" style={{ width: `${generationJob.progress}%` }} />
+        </div>
+        {generationJob.error_message && <div className="mt-2 text-rose-300">{generationJob.error_message}</div>}
+        {generationVoiceEntries.length > 0 && (
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {generationVoiceEntries.map((entry: any) => (
+              <div key={entry.speaker} className="rounded-xl border border-white/10 bg-black/20 p-3">
+                <div className="font-medium text-slate-100">{entry.speaker}</div>
+                <div className="mt-1 text-xs text-slate-400">
+                  {entry.character_display_name || 'Unmapped'} · {entry.provider || 'tts'}
+                </div>
+                <div className="mt-1 text-xs text-cyan-200">{entry.voice_profile_id || 'ephemeral voice profile'}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {generationTtsError && (
+          <div className="mt-3 rounded-xl border border-rose-300/30 bg-rose-950/30 p-3 text-sm text-rose-100">
+            <div className="font-medium">{generationTtsError.message || generationTtsError.code || 'TTS provider failed.'}</div>
+            {generationTtsError.suggested_action && <div className="mt-1 text-rose-200/80">{generationTtsError.suggested_action}</div>}
+          </div>
+        )}
+        {generationSegments.length > 0 && (
+          <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3">
+            <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Render segment WAVs</div>
+            <div className="mt-2 grid gap-2 md:grid-cols-2">
+              {generationSegments.map((segment: any) => (
+                <a
+                  key={segment.segment_id || `${segment.segment_index}-${segment.speaker}`}
+                  href={segment.artifact_url}
+                  className="rounded-lg border border-white/10 px-3 py-2 text-xs text-slate-300 hover:bg-white/10"
+                >
+                  <div className="font-medium text-slate-100">
+                    #{segment.segment_index} {segment.speaker} · {segment.provider_used}
+                  </div>
+                  <div className="mt-1 text-cyan-200">{segment.voice_profile_id}</div>
+                  <div className="mt-1 text-slate-500">
+                    {segment.duration_seconds ? `${Number(segment.duration_seconds).toFixed(2)}s` : 'duration unknown'}
+                    {segment.fallback_used ? ' · fallback used' : ''}
+                  </div>
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#08111f] text-white flex">
@@ -619,6 +693,24 @@ const ProjectEditorPage: React.FC = () => {
           </div>
 
           {error && <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-rose-200">{error}</div>}
+
+          {stage !== 'Generate' && generationJob && (
+            <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Latest render job</div>
+                  <div className="mt-1 text-sm text-slate-400">Segment WAV links stay available after completion for render debugging.</div>
+                </div>
+                <button
+                  onClick={() => setStage('Generate')}
+                  className="rounded-full border border-white/10 px-4 py-2 text-sm hover:bg-white/10"
+                >
+                  Open Render Controls
+                </button>
+              </div>
+              {renderGenerationJobPanel()}
+            </section>
+          )}
 
           <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
             <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-8">
@@ -867,20 +959,7 @@ const ProjectEditorPage: React.FC = () => {
                     </button>
                   </div>
 
-                  {generationJob && (
-                    <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4 text-sm text-slate-300">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <span>
-                          Render job #{generationJob.id}: {generationJob.status} ({generationJob.progress}%)
-                        </span>
-                        {generationStage ? <span className="text-cyan-200">{generationStage}</span> : null}
-                      </div>
-                      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
-                        <div className="h-full rounded-full bg-cyan-300 transition-[width] duration-500" style={{ width: `${generationJob.progress}%` }} />
-                      </div>
-                      {generationJob.error_message && <div className="mt-2 text-rose-300">{generationJob.error_message}</div>}
-                    </div>
-                  )}
+                  {generationJob && <div className="mt-4">{renderGenerationJobPanel()}</div>}
 
                   <div className="mt-6 space-y-3">
                     {outputs.map((output) => (

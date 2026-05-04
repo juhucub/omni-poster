@@ -15,6 +15,7 @@ from app.services.voice_preview_jobs import STALE_VOICE_PREVIEW_ERROR_CODE
 from app.services.character_presets import get_character_preset
 from app.services.crypto import decrypt_secret
 from app.services.rendering import ProjectRenderService
+from app.services.storage import generated_job_artifact_url, generated_job_segment_dir
 from app.services.tts import LocalSpeechService, OpenVoiceProvider, SpeechSegment, TTSOrchestrator, TextToSpeechError
 from app.tasks.generation import STALE_GENERATION_ERROR, process_generation_job, reconcile_stale_generation_jobs
 from app.tasks.publish import process_publish_job
@@ -1124,6 +1125,42 @@ def test_tts_orchestrator_returns_provider_error_when_explicit_provider_cannot_f
     assert exc_info.value.provider_failures["openvoice"]["code"] == "openvoice_runtime_failure"
 
 
+def test_tts_orchestrator_does_not_fallback_when_openvoice_selected_but_unavailable(tmp_path: Path):
+    orchestrator = TTSOrchestrator(
+        registry=StubRegistry(
+            {
+                "openvoice": StubProvider(response={"provider_used": "openvoice"}),
+                "espeak": StubProvider(response={"provider_used": "espeak", "voice": "en-us+f3"}),
+            },
+            {
+                "openvoice": {"available": False, "reason": "missing_models"},
+                "espeak": {"available": True, "reason": None},
+            },
+        )
+    )
+
+    with pytest.raises(TextToSpeechError) as exc_info:
+        orchestrator.synthesize_line(
+            text="OpenVoice only.",
+            voice_profile={
+                "id": "vp_openvoice_selected",
+                "display_name": "Host",
+                "provider": "openvoice",
+                "fallback_provider": "espeak",
+                "voice": "en-us+f3",
+                "reference_audios": [],
+                "controls": {},
+            },
+            output_path=tmp_path / "render.wav",
+            requested_provider="openvoice",
+            fallback_allowed=False,
+        )
+
+    assert exc_info.value.attempted_providers == ["openvoice"]
+    assert exc_info.value.provider_failures["openvoice"]["code"] == "missing_models"
+    assert "espeak" not in exc_info.value.provider_failures
+
+
 def test_openvoice_prepare_voice_profile_uses_all_reference_clips(monkeypatch, tmp_path: Path):
     provider = OpenVoiceProvider()
     ref_one = tmp_path / "ref_one.wav"
@@ -1512,6 +1549,96 @@ def test_local_speech_service_uses_persisted_voice_profiles(monkeypatch, tmp_pat
     assert [segment.voice_profile_id for segment in segments] == ["vp_stewie_v1", "vp_brian_v1"]
 
 
+def test_local_speech_service_prefers_generation_voice_manifest(monkeypatch, tmp_path: Path):
+    manifest = {
+        "version": 1,
+        "speakers": {
+            "Host": {
+                "speaker": "Host",
+                "voice_profile_id": "vp_openvoice_host",
+                "provider": "openvoice",
+                "requested_provider": "openvoice",
+                "fallback_allowed": False,
+                "voice_profile": {
+                    "id": "vp_openvoice_host",
+                    "display_name": "Host Clone",
+                    "provider": "openvoice",
+                    "fallback_provider": "espeak",
+                    "voice": "en-us+f3",
+                    "reference_audios": [{"id": 1, "storage_path": "authorized.wav", "sha256": "abc"}],
+                    "controls": {},
+                    "requested_provider": "openvoice",
+                    "fallback_allowed": False,
+                },
+            }
+        },
+    }
+    service = LocalSpeechService(voice_manifest=manifest)
+    captured: dict[str, object] = {}
+
+    def fake_synthesize_line(*, text, voice_profile, output_path, requested_provider=None, fallback_allowed=True, options=None):
+        captured["voice_profile"] = dict(voice_profile)
+        captured["requested_provider"] = requested_provider
+        captured["fallback_allowed"] = fallback_allowed
+        _write_wav(output_path, seconds=0.8)
+        return type(
+            "Result",
+            (),
+            {
+                "audio_path": str(output_path),
+                "voice": "Host Clone",
+                "duration_seconds": 0.8,
+                "provider_used": "openvoice",
+                "fallback_used": False,
+                "controls_applied": {},
+                "reference_audio_count": 1,
+                "provider_state": {"openvoice": {"available": True}},
+                "cache_hit": False,
+                "voice_profile_id": "vp_openvoice_host",
+            },
+        )()
+
+    monkeypatch.setattr(service.orchestrator, "synthesize_line", fake_synthesize_line)
+
+    segments = service.synthesize_dialogue(
+        [{"speaker": "Host", "text": "Use the selected clone.", "order": 0}],
+        tmp_path,
+    )
+
+    assert captured["requested_provider"] == "openvoice"
+    assert captured["fallback_allowed"] is False
+    assert captured["voice_profile"]["id"] == "vp_openvoice_host"
+    assert segments[0].provider_used == "openvoice"
+    assert segments[0].fallback_used is False
+
+
+def test_project_render_service_does_not_overlay_fallback_for_tts_errors(monkeypatch):
+    service = ProjectRenderService()
+
+    def fail_tts(**kwargs):
+        raise TextToSpeechError(
+            code="openvoice_missing_models",
+            message="OpenVoice is unavailable.",
+            provider_state={"openvoice": {"available": False, "reason": "missing_models"}},
+        )
+
+    monkeypatch.setattr(service, "_render_speaker_video", fail_tts)
+    monkeypatch.setattr(
+        service.video_service,
+        "generate_video",
+        lambda **kwargs: pytest.fail("overlay fallback should not be used for TTS errors"),
+    )
+
+    with pytest.raises(TextToSpeechError):
+        service.render_preview(
+            project_id=1,
+            background_video_path="missing.mp4",
+            parsed_lines=[{"speaker": "Host", "text": "Hello"}],
+            style_preset="none",
+            voice_manifest={"speakers": {}},
+        )
+
+
 def test_render_timing_prefers_actual_audio_clip_duration(monkeypatch):
     service = ProjectRenderService()
     segments = [
@@ -1532,6 +1659,88 @@ def test_render_timing_prefers_actual_audio_clip_duration(monkeypatch):
     timed_segments = service._build_timed_segments(segments)
 
     assert timed_segments[0]["duration_seconds"] == 1.8
+
+
+def test_render_speech_output_dir_uses_persisted_job_artifact_storage(tmp_path: Path):
+    service = ProjectRenderService()
+    speech_dir = service._speech_output_dir(42, tmp_path)
+
+    assert speech_dir == generated_job_segment_dir(42)
+    assert speech_dir.exists()
+    assert str(speech_dir).endswith("generated/42/segments")
+
+
+def test_render_audio_assembly_uses_segment_audio_paths(monkeypatch):
+    service = ProjectRenderService()
+    segment_path = generated_job_segment_dir(77) / "000_host.wav"
+    _write_wav(segment_path, seconds=1.1)
+    used_paths: list[str] = []
+    segments = [
+        SpeechSegment(
+            speaker="Host",
+            text="Persisted render segment.",
+            voice="Host",
+            slot_index=0,
+            audio_path=str(segment_path),
+            duration_seconds=1.1,
+            voice_profile_id="vp_host",
+            provider_used="openvoice",
+            fallback_used=False,
+        )
+    ]
+
+    class FakeAudioClip:
+        duration = 1.1
+
+    def fake_build_audio_clip(audio_path):
+        used_paths.append(audio_path)
+        return FakeAudioClip()
+
+    monkeypatch.setattr(service.speech_service, "build_audio_clip", fake_build_audio_clip)
+    timed_segments = service._build_timed_segments(segments)
+
+    assert used_paths == [str(segment_path)]
+    assert timed_segments[0]["segment"].audio_path == str(segment_path)
+
+
+def test_render_segment_metadata_exposes_safe_artifact_url():
+    service = ProjectRenderService()
+    segment_path = generated_job_segment_dir(88) / "000_host.wav"
+    _write_wav(segment_path, seconds=0.9)
+    segment = SpeechSegment(
+        speaker="Host",
+        text="Compare this render segment.",
+        voice="Host",
+        slot_index=0,
+        audio_path=str(segment_path),
+        duration_seconds=0.9,
+        voice_profile_id="vp_host_calm_v1",
+        provider_used="openvoice",
+        fallback_used=False,
+        provider_failures={},
+    )
+
+    metadata = service._segment_artifact_metadata(
+        index=0,
+        item={"segment": segment, "duration_seconds": 0.9},
+        voice_manifest={
+            "speakers": {
+                "Host": {
+                    "character_display_name": "Host",
+                    "voice_profile": {"display_name": "Host"},
+                }
+            }
+        },
+        job_id=88,
+    )
+
+    assert metadata["segment_index"] == 0
+    assert metadata["speaker"] == "Host"
+    assert metadata["voice_profile_id"] == "vp_host_calm_v1"
+    assert metadata["provider_used"] == "openvoice"
+    assert metadata["fallback_used"] is False
+    assert metadata["local_file_path"] == str(segment_path)
+    assert metadata["artifact_url"] == "/generation-jobs/88/artifacts/segments/000_host.wav"
 
 
 def test_render_config_caps_preview_fps_for_large_backgrounds():
@@ -1739,6 +1948,202 @@ def test_script_validation_and_asset_ownership(auth_client: TestClient, client: 
     assert forbidden_delete.status_code == 404
 
 
+def _write_voice_manifest_presets() -> None:
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_clone_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "model_id": "openvoice_v2",
+    "language": "en",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  },
+  {
+    "id": "guest_local_v1",
+    "display_name": "Guest",
+    "speaker_names": ["Guest"],
+    "portrait_filename": "speaker_2.png",
+    "tts_provider": "espeak",
+    "voice": "en-gb+m3",
+    "rate": 158,
+    "pitch": 46,
+    "word_gap": 1,
+    "amplitude": 145
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_generation_job_snapshots_selected_voice_profiles(auth_client: TestClient, monkeypatch):
+    _write_voice_manifest_presets()
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+
+    assert create_job.status_code == 201
+    manifest = create_job.json()["voice_manifest"]
+    assert manifest["policy"] == "openvoice_fail_closed"
+    assert manifest["speakers"]["Host"]["voice_profile_id"] == "vp_host_clone_v1"
+    assert manifest["speakers"]["Host"]["requested_provider"] == "openvoice"
+    assert manifest["speakers"]["Host"]["fallback_allowed"] is False
+    assert manifest["speakers"]["Guest"]["voice_profile_id"] == "vp_guest_local_v1"
+    assert manifest["speakers"]["Guest"]["fallback_allowed"] is True
+
+
+def test_generation_worker_uses_persisted_voice_manifest_after_binding_changes(auth_client: TestClient, monkeypatch):
+    _write_voice_manifest_presets()
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert create_job.status_code == 201
+    job_id = create_job.json()["id"]
+
+    updated_bindings = auth_client.put(
+        f"/projects/{flow['project_id']}/speaker-bindings",
+        json={
+            "items": [
+                {"speaker_name": "Host", "character_preset_id": "guest_local_v1"},
+                {"speaker_name": "Guest", "character_preset_id": "guest_local_v1"},
+            ]
+        },
+    )
+    assert updated_bindings.status_code == 200
+
+    source_preview = Path("test_storage") / "source_preview.mp4"
+    source_preview.write_bytes(b"rendered-preview")
+    captured: dict[str, dict] = {}
+
+    def fake_render_preview(self, *args, **kwargs):
+        captured["voice_manifest"] = kwargs["voice_manifest"]
+        segment_path = generated_job_segment_dir(kwargs["job_id"]) / "000_host.wav"
+        _write_wav(segment_path, seconds=1.5)
+        artifact_url = generated_job_artifact_url(kwargs["job_id"], segment_path)
+        return {
+            "output_path": str(source_preview),
+            "duration_seconds": 1.5,
+            "metadata": {
+                "tts_result": {
+                    "status": "completed",
+                    "provider_state": {"openvoice": {"available": True}},
+                    "segments": [
+                        {
+                            "speaker": "Host",
+                            "provider_used": "openvoice",
+                            "voice_profile_id": "vp_host_clone_v1",
+                            "fallback_used": False,
+                            "local_file_path": str(segment_path),
+                            "artifact_url": artifact_url,
+                            "duration_seconds": 1.5,
+                        }
+                    ],
+                }
+            },
+        }
+
+    monkeypatch.setattr(ProjectRenderService, "render_preview", fake_render_preview)
+    result = process_generation_job(job_id)
+
+    assert result["ok"] is True
+    assert captured["voice_manifest"]["speakers"]["Host"]["voice_profile_id"] == "vp_host_clone_v1"
+    job = auth_client.get(f"/generation-jobs/{job_id}")
+    assert job.status_code == 200
+    assert job.json()["tts_result"]["segments"][0]["provider_used"] == "openvoice"
+    assert job.json()["tts_result"]["segments"][0]["artifact_url"].endswith("/segments/000_host.wav")
+    outputs = auth_client.get(f"/projects/{flow['project_id']}/outputs")
+    assert outputs.status_code == 200
+    assert outputs.json()["items"][0]["asset"]["metadata"]["tts_result"]["segments"][0]["voice_profile_id"] == "vp_host_clone_v1"
+    assert outputs.json()["items"][0]["asset"]["metadata"]["tts_result"]["segments"][0]["artifact_url"].endswith("/segments/000_host.wav")
+
+
+def test_generation_worker_persists_tts_provider_failure(auth_client: TestClient, monkeypatch):
+    _write_voice_manifest_presets()
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert create_job.status_code == 201
+    job_id = create_job.json()["id"]
+
+    def fail_render(self, *args, **kwargs):
+        assert kwargs["voice_manifest"]["speakers"]["Host"]["fallback_allowed"] is False
+        raise TextToSpeechError(
+            code="openvoice_missing_models",
+            message="OpenVoice is unavailable.",
+            provider_state={"openvoice": {"available": False, "reason": "missing_models"}},
+            attempted_providers=["openvoice"],
+            provider_failures={"openvoice": {"code": "missing_models"}},
+            suggested_action="Install OpenVoice checkpoints.",
+        )
+
+    monkeypatch.setattr(ProjectRenderService, "render_preview", fail_render)
+    result = process_generation_job(job_id)
+
+    assert result["ok"] is False
+    job = auth_client.get(f"/generation-jobs/{job_id}")
+    assert job.status_code == 200
+    assert job.json()["status"] == "failed"
+    assert job.json()["tts_result"]["error"]["attempted_providers"] == ["openvoice"]
+    assert job.json()["provider_state"]["openvoice"]["reason"] == "missing_models"
+
+
+def test_generation_job_artifact_endpoint_serves_scoped_segment_wav(auth_client: TestClient, monkeypatch):
+    _write_voice_manifest_presets()
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert create_job.status_code == 201
+    job_id = create_job.json()["id"]
+    segment_path = generated_job_segment_dir(job_id) / "000_host.wav"
+    _write_wav(segment_path, seconds=0.5)
+
+    response = auth_client.get(f"/generation-jobs/{job_id}/artifacts/segments/000_host.wav")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/")
+    assert response.content.startswith(b"RIFF")
+
+
+def test_generation_job_artifact_endpoint_rejects_path_traversal(auth_client: TestClient, monkeypatch):
+    _write_voice_manifest_presets()
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert create_job.status_code == 201
+    job_id = create_job.json()["id"]
+
+    response = auth_client.get(f"/generation-jobs/{job_id}/artifacts/../secrets.wav")
+
+    assert response.status_code == 404
+
+
 def test_generation_job_lifecycle(auth_client: TestClient, monkeypatch):
     flow = _create_project_flow(auth_client)
 
@@ -1795,6 +2200,49 @@ def test_generation_job_dedupes_active_job(auth_client: TestClient, monkeypatch)
     active = auth_client.get(f"/projects/{flow['project_id']}/generation-jobs/active")
     assert active.status_code == 200
     assert active.json()["id"] == first.json()["id"]
+
+
+def test_generation_job_list_exposes_latest_completed_job(auth_client: TestClient, monkeypatch):
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert create_job.status_code == 201
+    job_id = create_job.json()["id"]
+
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        assert job is not None
+        job.status = "completed"
+        job.progress = 100
+        job.tts_result_json = {
+            "segments": [
+                {
+                    "segment_index": 0,
+                    "speaker": "Host",
+                    "voice_profile_id": "vp_host_clone_v1",
+                    "provider_used": "openvoice",
+                    "fallback_used": False,
+                    "artifact_url": f"/generation-jobs/{job_id}/artifacts/segments/000_host.wav",
+                }
+            ]
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    active = auth_client.get(f"/projects/{flow['project_id']}/generation-jobs/active")
+    assert active.status_code == 404
+
+    jobs = auth_client.get(f"/projects/{flow['project_id']}/generation-jobs")
+    assert jobs.status_code == 200
+    assert jobs.json()["items"][0]["id"] == job_id
+    assert jobs.json()["items"][0]["status"] == "completed"
+    assert jobs.json()["items"][0]["tts_result"]["segments"][0]["artifact_url"].endswith("/segments/000_host.wav")
 
 
 def test_stale_processing_generation_job_is_reconciled(auth_client: TestClient, monkeypatch):

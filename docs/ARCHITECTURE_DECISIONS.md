@@ -1,6 +1,6 @@
 # Omniposter Architecture Decisions
 
-Last updated: 2026-05-01
+Last updated: 2026-05-02
 
 This file records architectural decisions that future Codex agents should not reverse casually.
 
@@ -205,3 +205,35 @@ Local MVP storage must keep asset classes separate:
 - Character library endpoints.
 - Video generation tasks.
 - `.gitignore`.
+
+## ADR-007: Persist Render Segment Audio As Scoped Job Artifacts
+
+Status: Accepted
+Date: 2026-05-02
+
+### Context
+
+Voice Lab previews and final video renders can differ in audible quality. Debugging that difference requires access to the exact per-segment WAV files used during final assembly without exposing arbitrary filesystem paths.
+
+### Decision
+
+Video render TTS segment WAVs are persisted under generated job artifact storage and served only through authenticated, job-scoped artifact routes:
+
+- Storage path shape: `MEDIA_DIR/generated/{job_id}/segments/*.wav`
+- URL shape: `/generation-jobs/{job_id}/artifacts/segments/{filename}.wav`
+
+Final video assembly must use these persisted segment WAV files rather than a separate hidden temp copy.
+
+### Consequences
+
+- Job metadata can compare Voice Lab preview audio, render segment audio, and final video audio.
+- Generated segment WAVs remain local generated artifacts and must not be committed.
+- Artifact routes must validate project ownership and reject path traversal.
+
+### Files/Areas Affected
+
+- Render pipeline.
+- Generation job metadata.
+- Generated artifact storage.
+- Job artifact serving routes.
+- Job Monitor UI.
