@@ -153,6 +153,15 @@ const ProjectEditorPage: React.FC = () => {
 
   const toUtcIso = (value: string) => (value ? new Date(value).toISOString() : null);
   const apiBase = apiBaseUrl;
+  const toApiHref = (path: string | null | undefined) => {
+    if (!path) {
+      return '#';
+    }
+    if (/^https?:\/\//i.test(path)) {
+      return path;
+    }
+    return `${apiBase}${path.startsWith('/') ? path : `/${path}`}`;
+  };
 
   const hydrateScriptState = (revision: ScriptRevision | null) => {
     setScript(revision);
@@ -641,7 +650,7 @@ const ProjectEditorPage: React.FC = () => {
               {generationSegments.map((segment: any) => (
                 <a
                   key={segment.segment_id || `${segment.segment_index}-${segment.speaker}`}
-                  href={segment.artifact_url}
+                  href={toApiHref(segment.artifact_url)}
                   className="rounded-lg border border-white/10 px-3 py-2 text-xs text-slate-300 hover:bg-white/10"
                 >
                   <div className="font-medium text-slate-100">

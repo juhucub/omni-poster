@@ -15,6 +15,7 @@ Last updated: 2026-05-04
 - Video generation jobs now snapshot per-speaker voice profile/provider selections into the job payload and expose TTS provider status in job responses.
 - OpenVoice-selected render jobs fail closed with structured provider diagnostics instead of silently falling back to local TTS.
 - Render jobs now persist per-segment WAV artifacts under generated job storage and expose safe artifact URLs in job metadata for audio comparison.
+- Final MP4 assembly now builds a persisted per-job dialogue composite WAV from the same render segment WAV artifacts and uses that composite WAV as the final video audio source.
 - Project Editor now fetches the latest project generation job when there is no active job, so completed render status and segment WAV links remain visible after refresh or stage changes.
 
 ## Partially Working
@@ -57,6 +58,7 @@ P2:
 - Added generation-job voice manifests, TTS result diagnostics, OpenVoice fail-closed render behavior, and regression tests for selected voice profile propagation.
 - Added persisted render segment WAV artifacts, scoped job artifact serving, and UI links for comparing Voice Lab previews, render segment WAVs, and final video audio.
 - Added project generation-job listing and a persistent latest render job panel so completed render diagnostics do not disappear when the active-job endpoint returns 404.
+- Fixed final MP4 audio assembly to concatenate the persisted segment WAV artifacts into `audio/dialogue_composite.wav` before muxing, with assembly paths recorded in job metadata.
 
 ## Open Questions
 

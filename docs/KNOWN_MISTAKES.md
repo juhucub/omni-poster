@@ -4,6 +4,26 @@ Last updated: 2026-05-04
 
 This file is regression memory. Add to it when bugs are found or fixed. Do not remove entries unless they are obsolete and clearly replaced by a better rule.
 
+## Final MP4 Audio Did Not Use Persisted OpenVoice Segment WAVs
+
+Date found:
+2026-05-04
+
+Symptom:
+Render segment WAV artifacts sounded correct and used the selected OpenVoice profiles, but audio extracted from the final MP4 still sounded like local/espeak fallback.
+
+Root cause:
+The final video export did not have a persisted, auditable composite audio source built from the exact segment artifact WAV paths, leaving the compositor path able to use a different hidden/temp audio source.
+
+Fix:
+Final rendering now ffmpeg-concatenates the persisted segment WAV artifacts in script order into `generated/{job_id}/audio/dialogue_composite.wav`, uses that composite WAV as the final MoviePy audio input, logs all segment and assembly paths, and records assembly paths in job metadata.
+
+Regression test:
+`backend/app/tests/test_vertical_slice.py::test_render_preview_final_mp4_uses_persisted_segment_wavs`.
+
+Rule:
+The final MP4 must use a composite audio track built from the same segment WAV artifact paths shown in the render job panel.
+
 ## Completed Render Diagnostics Hidden After Active Job Ends
 
 Date found:

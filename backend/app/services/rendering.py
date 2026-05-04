@@ -4,9 +4,11 @@ import logging
 import math
 import os
 import shutil
+import subprocess
 import tempfile
 import textwrap
 import uuid
+import wave
 from datetime import datetime
 from pathlib import Path
 
@@ -14,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.core.config import settings
 from app.services.character_presets import resolve_character_portrait_path, resolve_character_preset_for_speaker
-from app.services.storage import generated_job_artifact_url, generated_job_segment_dir
+from app.services.storage import generated_job_artifact_dir, generated_job_artifact_url, generated_job_segment_dir
 from app.services.tts import LocalSpeechService, SpeechSegment, TTSProviderError
 from app.services.vid_gen import VideoGenerationService
 
@@ -88,10 +90,10 @@ class ProjectRenderService:
         job_id: int | None,
     ) -> dict:
         from moviepy import (
+            AudioFileClip,
             CompositeVideoClip,
             ImageClip,
             VideoFileClip,
-            concatenate_audioclips,
         )
 
         clean_video_path = self.video_service._clean_file_path(background_video_path)
@@ -100,7 +102,6 @@ class ProjectRenderService:
 
         work_dir = Path(tempfile.mkdtemp(prefix=f"render_{project_id}_", dir=self.output_dir))
         clips_to_close: list = []
-        audio_clips: list = []
         try:
             self.speech_service = LocalSpeechService(db=self.db, project_id=project_id, voice_manifest=voice_manifest)
             speech_dir = self._speech_output_dir(job_id, work_dir)
@@ -113,11 +114,16 @@ class ProjectRenderService:
             self._emit_progress(progress_callback, "background_ready", 58)
 
             timed_segments = self._build_timed_segments(segments)
-            audio_clips.extend(item["audio_clip"] for item in timed_segments)
 
             total_duration = sum(item["duration_seconds"] for item in timed_segments)
             if total_duration <= 0:
                 raise RuntimeError("Generated speech audio has no duration.")
+            composite_audio_path = self._build_composite_audio_track(
+                timed_segments=timed_segments,
+                job_id=job_id,
+                project_id=project_id,
+                work_dir=work_dir,
+            )
 
             background_clip = self._extend_background(background_clip, total_duration)
             clips_to_close.append(background_clip)
@@ -162,7 +168,7 @@ class ProjectRenderService:
 
             self._emit_progress(progress_callback, "timeline_ready", 68)
 
-            composite_audio = concatenate_audioclips(audio_clips)
+            composite_audio = AudioFileClip(str(composite_audio_path))
             composite = (
                 CompositeVideoClip(
                     timeline_layers,
@@ -178,6 +184,13 @@ class ProjectRenderService:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_filename = f"{project_id}_{output_kind}_{timestamp}.mp4"
             output_path = self.output_dir / output_filename
+            self._log_final_assembly_inputs(
+                job_id=job_id,
+                project_id=project_id,
+                timed_segments=timed_segments,
+                composite_audio_path=composite_audio_path,
+                final_mp4_path=output_path,
+            )
             logger.info(
                 "Writing composite video project=%s output=%s audio_fps=%s audio_bitrate=%s render_fps=%s preset=%s crf=%s segment_count=%s duration=%.2fs",
                 project_id,
@@ -220,13 +233,23 @@ class ProjectRenderService:
                     item=item,
                     voice_manifest=voice_manifest,
                     job_id=job_id,
+                    audio_path_used_for_final_assembly=str(item["segment"].audio_path),
                 )
                 for index, item in enumerate(timed_segments)
             ]
+            assembly_metadata = self._assembly_metadata(
+                job_id=job_id,
+                project_id=project_id,
+                timed_segments=timed_segments,
+                segment_metadata=segment_metadata,
+                composite_audio_path=composite_audio_path,
+                final_mp4_path=output_path,
+            )
             tts_result = {
                 "status": "completed",
                 "provider_state": (segments[-1].provider_state or {}) if segments else {},
                 "segments": segment_metadata,
+                "assembly": assembly_metadata,
             }
 
             return {
@@ -250,12 +273,14 @@ class ProjectRenderService:
                         for segment in segments
                     },
                     "tts_result": tts_result,
+                    "render_assembly": assembly_metadata,
                     "line_timing_seconds": [
                         {
                             "speaker": item["segment"].speaker,
                             "text": item["segment"].text,
                             "duration_seconds": item["duration_seconds"],
                             "audio_path": item["segment"].audio_path,
+                            "audio_path_used_for_final_assembly": item["segment"].audio_path,
                             "artifact_url": segment_metadata[index].get("artifact_url"),
                             "provider_used": item["segment"].provider_used,
                             "voice_profile_id": item["segment"].voice_profile_id,
@@ -278,11 +303,20 @@ class ProjectRenderService:
                         logger.debug("Failed to close clip cleanly", exc_info=True)
             shutil.rmtree(work_dir, ignore_errors=True)
 
-    def _segment_artifact_metadata(self, *, index: int, item: dict, voice_manifest: dict | None, job_id: int | None) -> dict:
+    def _segment_artifact_metadata(
+        self,
+        *,
+        index: int,
+        item: dict,
+        voice_manifest: dict | None,
+        job_id: int | None,
+        audio_path_used_for_final_assembly: str | None = None,
+    ) -> dict:
         segment: SpeechSegment = item["segment"]
         audio_path = Path(segment.audio_path)
         manifest_entry = dict(((voice_manifest or {}).get("speakers") or {}).get(segment.speaker) or {})
         voice_profile = dict(manifest_entry.get("voice_profile") or {})
+        final_audio_path = audio_path_used_for_final_assembly or str(audio_path)
         payload = {
             "segment_index": index,
             "segment_id": f"{index:03d}_{self._slugify(segment.speaker)}",
@@ -297,6 +331,8 @@ class ProjectRenderService:
             "provider_failures": segment.provider_failures or {},
             "local_file_path": str(audio_path),
             "audio_path": str(audio_path),
+            "audio_path_used_for_final_assembly": final_audio_path,
+            "used_for_final_assembly": final_audio_path == str(audio_path),
             "artifact_url": generated_job_artifact_url(job_id, audio_path) if job_id is not None else None,
             "duration_seconds": item["duration_seconds"],
             "reference_audio_count": segment.reference_audio_count,
@@ -330,15 +366,181 @@ class ProjectRenderService:
     def _build_timed_segments(self, segments: list[SpeechSegment]) -> list[dict]:
         timed_segments: list[dict] = []
         for segment in segments:
-            audio_clip = self.speech_service.build_audio_clip(segment.audio_path)
+            audio_path = Path(segment.audio_path)
+            if not audio_path.exists():
+                raise TTSProviderError(
+                    code="missing_render_segment_audio",
+                    message=f"Render segment audio is missing before final assembly: {audio_path}",
+                    provider_state=segment.provider_state or {},
+                    provider_failures=segment.provider_failures or {},
+                    suggested_action="Regenerate the video and inspect render segment artifact storage.",
+                )
+            file_duration = self._wav_duration_seconds(audio_path)
             timed_segments.append(
                 {
                     "segment": segment,
-                    "audio_clip": audio_clip,
-                    "duration_seconds": max(float(getattr(audio_clip, "duration", 0) or 0), segment.duration_seconds, 0.6),
+                    "duration_seconds": max(file_duration, segment.duration_seconds, 0.6),
                 }
             )
         return timed_segments
+
+    def _wav_duration_seconds(self, audio_path: Path) -> float:
+        with wave.open(str(audio_path), "rb") as handle:
+            frame_rate = handle.getframerate()
+            frame_count = handle.getnframes()
+        if frame_rate <= 0:
+            return 0.0
+        return float(frame_count) / float(frame_rate)
+
+    def _build_composite_audio_track(
+        self,
+        *,
+        timed_segments: list[dict],
+        job_id: int | None,
+        project_id: int,
+        work_dir: Path,
+    ) -> Path:
+        audio_dir = generated_job_artifact_dir(job_id) / "audio" if job_id is not None else work_dir / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        composite_audio_path = audio_dir / "dialogue_composite.wav"
+        concat_list_path = audio_dir / "dialogue_segments.txt"
+        concat_lines: list[str] = []
+        audio_paths: list[Path] = []
+        for item in timed_segments:
+            segment: SpeechSegment = item["segment"]
+            audio_path = Path(segment.audio_path).resolve()
+            if not audio_path.exists():
+                raise TTSProviderError(
+                    code="missing_render_segment_audio",
+                    message=f"Render segment audio is missing before final audio assembly: {audio_path}",
+                    provider_state=segment.provider_state or {},
+                    provider_failures=segment.provider_failures or {},
+                    suggested_action="Regenerate the video and inspect render segment artifact storage.",
+                )
+            escaped_audio_path = str(audio_path).replace("'", "'\\''")
+            concat_lines.append(f"file '{escaped_audio_path}'")
+            audio_paths.append(audio_path)
+        concat_list_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+        command = ["ffmpeg", "-y"]
+        for audio_path in audio_paths:
+            command.extend(["-i", str(audio_path)])
+        if len(audio_paths) == 1:
+            filter_complex = f"[0:a]aresample={self.audio_export_fps}[a]"
+        else:
+            filter_complex = (
+                "".join(f"[{index}:a]" for index in range(len(audio_paths)))
+                + f"concat=n={len(audio_paths)}:v=0:a=1,aresample={self.audio_export_fps}[a]"
+            )
+        command.extend(
+            [
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[a]",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                str(self.audio_export_fps),
+                "-ac",
+                "2",
+                str(composite_audio_path),
+            ]
+        )
+        logger.info(
+            "Building final dialogue composite audio job_id=%s project_id=%s segment_count=%s composite_audio_path=%s",
+            job_id,
+            project_id,
+            len(timed_segments),
+            composite_audio_path,
+        )
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise TTSProviderError(
+                code="ffmpeg_missing",
+                message="ffmpeg is required to build the final dialogue composite audio track.",
+                suggested_action="Install ffmpeg in the runtime image before rendering video.",
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            raise TTSProviderError(
+                code="composite_audio_failed",
+                message=f"Failed to build final dialogue composite audio: {exc.stderr or exc}",
+                suggested_action="Inspect render segment WAV files and ffmpeg logs.",
+            ) from exc
+        if not composite_audio_path.exists():
+            raise TTSProviderError(
+                code="missing_composite_audio",
+                message=f"Final dialogue composite audio was not created: {composite_audio_path}",
+                suggested_action="Inspect ffmpeg logs and generated job artifact storage.",
+            )
+        return composite_audio_path
+
+    def _log_final_assembly_inputs(
+        self,
+        *,
+        job_id: int | None,
+        project_id: int,
+        timed_segments: list[dict],
+        composite_audio_path: Path,
+        final_mp4_path: Path,
+    ) -> None:
+        for index, item in enumerate(timed_segments):
+            segment: SpeechSegment = item["segment"]
+            audio_path = Path(segment.audio_path)
+            logger.info(
+                "Final assembly segment job_id=%s project_id=%s segment_index=%s speaker=%s provider_used=%s fallback_used=%s segment_wav_path=%s segment_wav_exists=%s composite_audio_path=%s final_mp4_path=%s",
+                job_id,
+                project_id,
+                index,
+                segment.speaker,
+                segment.provider_used,
+                segment.fallback_used,
+                audio_path,
+                audio_path.exists(),
+                composite_audio_path,
+                final_mp4_path,
+            )
+        logger.info(
+            "Final assembly inputs job_id=%s project_id=%s composite_audio_path=%s composite_audio_exists=%s final_mp4_path=%s",
+            job_id,
+            project_id,
+            composite_audio_path,
+            composite_audio_path.exists(),
+            final_mp4_path,
+        )
+
+    def _assembly_metadata(
+        self,
+        *,
+        job_id: int | None,
+        project_id: int,
+        timed_segments: list[dict],
+        segment_metadata: list[dict],
+        composite_audio_path: Path,
+        final_mp4_path: Path,
+    ) -> dict:
+        return {
+            "job_id": job_id,
+            "project_id": project_id,
+            "composite_audio_path": str(composite_audio_path),
+            "composite_audio_artifact_url": (
+                generated_job_artifact_url(job_id, composite_audio_path) if job_id is not None else None
+            ),
+            "final_mp4_path": str(final_mp4_path),
+            "segments": [
+                {
+                    "segment_index": metadata["segment_index"],
+                    "speaker": metadata["speaker"],
+                    "provider_used": metadata["provider_used"],
+                    "fallback_used": metadata["fallback_used"],
+                    "artifact_url": metadata.get("artifact_url"),
+                    "segment_audio_path": metadata["audio_path"],
+                    "audio_path_used_for_final_assembly": item["segment"].audio_path,
+                    "segment_wav_exists": Path(item["segment"].audio_path).exists(),
+                }
+                for metadata, item in zip(segment_metadata, timed_segments, strict=False)
+            ],
+        }
 
     def _render_config(self, background_clip, output_kind: str) -> dict[str, int | str]:
         source_fps = float(getattr(background_clip, "fps", 24) or 24)

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 import subprocess
+import sys
+import types
 import wave
 
 import pytest
@@ -1641,21 +1643,19 @@ def test_project_render_service_does_not_overlay_fallback_for_tts_errors(monkeyp
 
 def test_render_timing_prefers_actual_audio_clip_duration(monkeypatch):
     service = ProjectRenderService()
+    segment_path = generated_job_segment_dir(76) / "000_stewie.wav"
+    _write_wav(segment_path, seconds=1.8)
     segments = [
         SpeechSegment(
             speaker="Stewie",
             text="Longer than the metadata says.",
             voice="en-us+f3",
             slot_index=0,
-            audio_path="unused.wav",
+            audio_path=str(segment_path),
             duration_seconds=1.0,
         )
     ]
 
-    class FakeAudioClip:
-        duration = 1.8
-
-    monkeypatch.setattr(service.speech_service, "build_audio_clip", lambda audio_path: FakeAudioClip())
     timed_segments = service._build_timed_segments(segments)
 
     assert timed_segments[0]["duration_seconds"] == 1.8
@@ -1674,7 +1674,7 @@ def test_render_audio_assembly_uses_segment_audio_paths(monkeypatch):
     service = ProjectRenderService()
     segment_path = generated_job_segment_dir(77) / "000_host.wav"
     _write_wav(segment_path, seconds=1.1)
-    used_paths: list[str] = []
+    captured: dict[str, str] = {}
     segments = [
         SpeechSegment(
             speaker="Host",
@@ -1689,18 +1689,201 @@ def test_render_audio_assembly_uses_segment_audio_paths(monkeypatch):
         )
     ]
 
-    class FakeAudioClip:
-        duration = 1.1
+    def fake_run(command, check, capture_output, text):
+        composite_audio_path = Path(command[-1])
+        concat_list_path = composite_audio_path.parent / "dialogue_segments.txt"
+        captured["concat_list"] = concat_list_path.read_text(encoding="utf-8")
+        captured["command"] = " ".join(command)
+        captured["output_path"] = command[-1]
+        _write_wav(composite_audio_path, seconds=1.1)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    def fake_build_audio_clip(audio_path):
-        used_paths.append(audio_path)
-        return FakeAudioClip()
-
-    monkeypatch.setattr(service.speech_service, "build_audio_clip", fake_build_audio_clip)
+    monkeypatch.setattr("app.services.rendering.subprocess.run", fake_run)
     timed_segments = service._build_timed_segments(segments)
+    composite_audio = service._build_composite_audio_track(
+        timed_segments=timed_segments,
+        job_id=77,
+        project_id=1,
+        work_dir=Path("unused"),
+    )
 
-    assert used_paths == [str(segment_path)]
+    assert str(segment_path.resolve()) in captured["concat_list"]
+    assert str(segment_path.resolve()) in captured["command"]
     assert timed_segments[0]["segment"].audio_path == str(segment_path)
+    assert composite_audio == generated_job_segment_dir(77).parent / "audio" / "dialogue_composite.wav"
+    assert captured["output_path"] == str(composite_audio)
+
+
+def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_path: Path):
+    service = ProjectRenderService()
+    job_id = 90
+    segment_dir = generated_job_segment_dir(job_id)
+    host_segment = segment_dir / "000_host_openvoice.wav"
+    guest_segment = segment_dir / "001_guest_openvoice.wav"
+    _write_wav(host_segment, seconds=0.8)
+    _write_wav(guest_segment, seconds=1.0)
+    background_path = tmp_path / "background.mp4"
+    background_path.write_bytes(b"fake-video")
+    portrait_path = tmp_path / "portrait.png"
+    caption_path = tmp_path / "caption.png"
+    portrait_path.write_bytes(b"fake-portrait")
+    caption_path.write_bytes(b"fake-caption")
+    captured: dict[str, str] = {}
+
+    def fake_synthesize_dialogue(self, parsed_lines, work_dir):
+        assert work_dir == segment_dir
+        return [
+            SpeechSegment(
+                speaker="Host",
+                text=parsed_lines[0]["text"],
+                voice="Host Clone",
+                slot_index=0,
+                audio_path=str(host_segment),
+                duration_seconds=0.8,
+                voice_profile_id="vp_host_openvoice",
+                provider_used="openvoice",
+                fallback_used=False,
+            ),
+            SpeechSegment(
+                speaker="Guest",
+                text=parsed_lines[1]["text"],
+                voice="Guest Clone",
+                slot_index=1,
+                audio_path=str(guest_segment),
+                duration_seconds=1.0,
+                voice_profile_id="vp_guest_openvoice",
+                provider_used="openvoice",
+                fallback_used=False,
+            ),
+        ]
+
+    def fake_run(command, check, capture_output, text):
+        composite_audio_path = Path(command[-1])
+        concat_list_path = composite_audio_path.parent / "dialogue_segments.txt"
+        captured["concat_list"] = concat_list_path.read_text(encoding="utf-8")
+        captured["command"] = " ".join(command)
+        captured["composite_audio_path"] = command[-1]
+        _write_wav(composite_audio_path, seconds=1.8)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    class FakeVideoClip:
+        w = 1080
+        h = 1920
+        duration = 8.0
+        fps = 24
+
+        def __init__(self, path=None):
+            captured["background_path"] = str(path)
+
+        def without_audio(self):
+            return self
+
+        def resized(self, new_size=None, height=None):
+            return self
+
+        def cropped(self, **kwargs):
+            return self
+
+        def subclipped(self, start, end):
+            captured["background_duration"] = str(end - start)
+            return self
+
+        def close(self):
+            return None
+
+    class FakeImageClip:
+        def __init__(self, path):
+            self.path = path
+
+        def resized(self, height=None, new_size=None):
+            return self
+
+        def with_opacity(self, opacity):
+            return self
+
+        def with_position(self, position):
+            return self
+
+        def with_duration(self, duration):
+            return self
+
+        def with_start(self, start):
+            return self
+
+        def close(self):
+            return None
+
+    class FakeAudioFileClip:
+        def __init__(self, path):
+            self.path = str(path)
+            captured["audio_file_clip_path"] = self.path
+            self.duration = 1.8
+
+        def close(self):
+            return None
+
+    class FakeCompositeVideoClip:
+        def __init__(self, layers, size):
+            self.layers = layers
+            self.size = size
+            self.duration = 0
+
+        def with_audio(self, audio_clip):
+            captured["final_audio_path"] = audio_clip.path
+            return self
+
+        def with_duration(self, duration):
+            self.duration = duration
+            return self
+
+        def write_videofile(self, path, **kwargs):
+            captured["final_mp4_path"] = str(path)
+            captured["temp_audiofile"] = kwargs["temp_audiofile"]
+            Path(path).write_bytes(b"mp4")
+
+        def close(self):
+            return None
+
+    fake_moviepy = types.ModuleType("moviepy")
+    fake_moviepy.AudioFileClip = FakeAudioFileClip
+    fake_moviepy.CompositeVideoClip = FakeCompositeVideoClip
+    fake_moviepy.ImageClip = FakeImageClip
+    fake_moviepy.VideoFileClip = FakeVideoClip
+    fake_moviepy.concatenate_videoclips = lambda clips: clips[0]
+
+    monkeypatch.setitem(sys.modules, "moviepy", fake_moviepy)
+    monkeypatch.setattr(LocalSpeechService, "synthesize_dialogue", fake_synthesize_dialogue)
+    monkeypatch.setattr("app.services.rendering.subprocess.run", fake_run)
+    monkeypatch.setattr(service, "_resolve_character_portrait", lambda speaker, slot_index, work_dir: portrait_path)
+    monkeypatch.setattr(service, "_build_dialogue_card", lambda segment, work_dir: caption_path)
+
+    result = service.render_preview(
+        project_id=1,
+        background_video_path=str(background_path),
+        parsed_lines=[
+            {"speaker": "Host", "text": "The render segment is correct."},
+            {"speaker": "Guest", "text": "The final video must use it."},
+        ],
+        style_preset="none",
+        output_kind="preview",
+        voice_manifest={"speakers": {}},
+        job_id=job_id,
+    )
+
+    assert str(host_segment.resolve()) in captured["concat_list"]
+    assert str(guest_segment.resolve()) in captured["concat_list"]
+    assert str(host_segment.resolve()) in captured["command"]
+    assert str(guest_segment.resolve()) in captured["command"]
+    assert captured["audio_file_clip_path"] == captured["composite_audio_path"]
+    assert captured["final_audio_path"] == captured["composite_audio_path"]
+    tts_result = result["metadata"]["tts_result"]
+    assert tts_result["assembly"]["composite_audio_path"] == captured["composite_audio_path"]
+    assert tts_result["assembly"]["final_mp4_path"] == captured["final_mp4_path"]
+    assert tts_result["segments"][0]["audio_path"] == str(host_segment)
+    assert tts_result["segments"][0]["audio_path_used_for_final_assembly"] == str(host_segment)
+    assert tts_result["segments"][0]["provider_used"] == "openvoice"
+    assert tts_result["segments"][0]["fallback_used"] is False
+    assert tts_result["segments"][1]["audio_path_used_for_final_assembly"] == str(guest_segment)
 
 
 def test_render_segment_metadata_exposes_safe_artifact_url():
