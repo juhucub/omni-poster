@@ -355,6 +355,29 @@ class VoiceLabPreviewRequest(BaseModel):
     amplitude: int | None = Field(default=None, ge=0, le=200)
 
 
+class VoiceCalibrationRecipe(BaseModel):
+    base_speaker: str | None = Field(default=None, max_length=128)
+    style_preset: str = Field(default="default", max_length=64)
+    speaking_rate: float = Field(default=1.0, ge=0.25, le=3.0)
+    pause_bias: float | None = Field(default=None)
+    pitch: float | None = None
+    energy: float | None = None
+    emotion: str | None = Field(default=None, max_length=64)
+    accent: str | None = Field(default=None, max_length=64)
+
+
+class VoiceCalibrationMatrixRequest(BaseModel):
+    preset_id: str
+    provider_preference: str = Field(default="openvoice", max_length=32)
+    fallback_allowed: bool = False
+    phrases: list[str] = Field(default_factory=list, max_length=6)
+    recipes: list[VoiceCalibrationRecipe] = Field(default_factory=list, max_length=8)
+
+
+class VoiceCalibrationRecipeSaveRequest(BaseModel):
+    recipe: VoiceCalibrationRecipe
+
+
 class VoiceLabPreviewResponse(BaseModel):
     status: Literal["queued", "processing", "completed", "failed"]
     job_id: int | None = None
@@ -369,7 +392,16 @@ class VoiceLabPreviewResponse(BaseModel):
     duration_seconds: float | None = None
     sample_text: str
     content_url: str | None = None
+    calibration: dict = Field(default_factory=dict)
     error: TTSFailureResponse | None = None
+
+
+class VoiceCalibrationMatrixResponse(BaseModel):
+    preset_id: str
+    voice_profile_id: str
+    provider_state: dict = Field(default_factory=dict)
+    unsupported_controls: list[str] = Field(default_factory=list)
+    items: list[VoiceLabPreviewResponse] = Field(default_factory=list)
 
 
 class SpeakerBindingSummary(BaseModel):

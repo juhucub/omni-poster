@@ -509,6 +509,37 @@ def update_voice_profile_preparation_metadata(
     return profile
 
 
+def update_voice_profile_calibration_recipe(
+    profile: VoiceProfile,
+    *,
+    recipe: dict[str, Any],
+    db: Session,
+) -> VoiceProfile:
+    controls = dict(profile.controls_json or {})
+    style = dict(profile.style_json or {})
+    if recipe.get("speaking_rate") is not None:
+        controls["speaking_rate"] = float(recipe["speaking_rate"])
+    if recipe.get("pause_bias") is not None:
+        controls["pause_length"] = float(recipe["pause_bias"])
+    for key in ("pitch", "energy", "emotion", "accent"):
+        if recipe.get(key) is not None:
+            controls[key] = recipe[key]
+    if recipe.get("base_speaker") is not None:
+        style["base_speaker"] = recipe.get("base_speaker")
+    if recipe.get("style_preset") is not None:
+        style["style_preset"] = recipe.get("style_preset") or "default"
+
+    profile.controls_json = {key: value for key, value in controls.items() if value is not None}
+    profile.style_json = {key: value for key, value in style.items() if value is not None}
+    metadata = dict(profile.provider_metadata_json or {})
+    metadata["last_calibration_recipe"] = dict(recipe)
+    metadata["calibration_status"] = "saved"
+    profile.provider_metadata_json = metadata
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
 def invalidate_voice_profile_embedding(profile: VoiceProfile, db: Session) -> None:
     paths_to_remove: set[Path] = set()
     if profile.embedding_path:

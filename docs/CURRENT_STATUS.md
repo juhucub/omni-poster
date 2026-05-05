@@ -17,6 +17,7 @@ Last updated: 2026-05-05
 - Render jobs now persist per-segment WAV artifacts under generated job storage and expose safe artifact URLs in job metadata for audio comparison.
 - Final MP4 assembly now builds a persisted per-job dialogue composite WAV from the same render segment WAV artifacts and uses that composite WAV as the final video audio source.
 - Voice profiles now persist original reference uploads, processed mono 16 kHz WAV references, validation metadata, processed-reference OpenVoice embedding metadata, style/prosody settings, render segment WAVs, dialogue composite WAVs, and extracted final-video audio artifacts for comparison.
+- Voice Lab can queue a calibration matrix for a profile, recording per-preview base speaker, style preset, speaking rate, pause bias, supported/unsupported controls, processed reference paths, and embedding path; selected recipes can be saved back to the profile and are snapshotted into video render voice manifests.
 - Project Editor now fetches the latest project generation job when there is no active job, so completed render status and segment WAV links remain visible after refresh or stage changes.
 
 ## Partially Working
@@ -44,7 +45,7 @@ P0:
 P1:
 - Verify OpenVoice V2 availability checks and provider fallback behavior.
 - Add or strengthen regression tests for speaker mapping, background preset loading, TTS fallback, and render timing.
-- Improve Voice Lab so voice profiles map predictably to generation jobs.
+- Manually audition Voice Lab calibration recipes against real OpenVoice checkpoints and confirm saved recipes sound distinctive in generated video.
 
 P2:
 - Improve generated media library.
@@ -62,6 +63,7 @@ P2:
 - Fixed final MP4 audio assembly to concatenate the persisted segment WAV artifacts into `audio/dialogue_composite.wav` before muxing, with assembly paths recorded in job metadata.
 - Added reference-audio validation with hard rejects for unreadable, too-short, mostly silent, and clipped clips; soft validation warnings are persisted for quality heuristics.
 - Added scoped original/processed reference audio artifact routes, processed-reference OpenVoice preparation tests, Voice Lab fixed comparison phrases, and render metadata links for dialogue composite/final extracted audio.
+- Added Voice Profile Calibration Matrix endpoints/UI, persisted calibration recipe metadata on preview jobs, recipe save-back to voice profiles, and tests proving saved recipes are included in generation voice manifests.
 
 ## Open Questions
 

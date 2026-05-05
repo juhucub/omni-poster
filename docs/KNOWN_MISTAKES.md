@@ -16,13 +16,13 @@ Root cause:
 Reference clips were treated too much like full performance clones, while OpenVoice primarily clones tone color. Prosody and style need explicit base speaker/style/profile settings, and bad reference clips need validation before use.
 
 Fix:
-Voice profiles now persist original uploads, processed mono 16 kHz WAV references, validation status/metrics/warnings, processed-reference OpenVoice embedding metadata, style/prosody settings, and comparison artifacts for Voice Lab previews, render segment WAVs, dialogue composite WAVs, and final extracted audio.
+Voice profiles now persist original uploads, processed mono 16 kHz WAV references, validation status/metrics/warnings, processed-reference OpenVoice embedding metadata, style/prosody settings, calibration recipe previews/save-back, and comparison artifacts for Voice Lab previews, render segment WAVs, dialogue composite WAVs, and final extracted audio.
 
 Regression test:
-`backend/app/tests/test_vertical_slice.py::test_reference_audio_upload_normalizes_audio_and_invalidates_embedding`, `test_reference_audio_upload_rejects_mostly_silent_audio`, `test_reference_audio_upload_rejects_clipped_audio`, `test_reference_audio_upload_accepts_soft_warning_metadata`, `test_openvoice_prepare_voice_profile_prefers_processed_reference_path`, and `test_render_segment_metadata_exposes_safe_artifact_url`.
+`backend/app/tests/test_vertical_slice.py::test_reference_audio_upload_normalizes_audio_and_invalidates_embedding`, `test_reference_audio_upload_rejects_mostly_silent_audio`, `test_reference_audio_upload_rejects_clipped_audio`, `test_reference_audio_upload_accepts_soft_warning_metadata`, `test_openvoice_prepare_voice_profile_prefers_processed_reference_path`, `test_voice_lab_calibration_matrix_queues_recipe_previews`, `test_saved_calibration_recipe_is_snapshotted_for_video_render`, and `test_render_segment_metadata_exposes_safe_artifact_url`.
 
 Rule:
-Do not treat reference audio as a full performance clone. Always validate and process references, persist embeddings from processed audio, and keep prosody/style explicit in voice profile settings with unsupported controls degrading safely.
+Do not treat reference audio as a full performance clone. Always validate and process references, persist embeddings from processed audio, audition explicit calibration recipes, and keep prosody/style explicit in voice profile settings with unsupported controls degrading safely.
 
 ## Final MP4 Audio Did Not Use Persisted OpenVoice Segment WAVs
 

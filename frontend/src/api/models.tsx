@@ -197,7 +197,16 @@ export interface VoiceLabPreview {
   duration_seconds: number | null;
   sample_text: string;
   content_url: string | null;
+  calibration: Record<string, unknown>;
   error: TTSFailure | null;
+}
+
+export interface VoiceCalibrationMatrix {
+  preset_id: string;
+  voice_profile_id: string;
+  provider_state: Record<string, unknown>;
+  unsupported_controls: string[];
+  items: VoiceLabPreview[];
 }
 
 export interface SpeakerBinding {

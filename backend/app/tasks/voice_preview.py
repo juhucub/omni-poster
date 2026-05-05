@@ -67,6 +67,24 @@ def process_voice_lab_preview(preview_job_id: int) -> dict:
             profile_payload,
             controls=dict(job.controls_applied_json or {}),
         )
+        calibration = dict(job.calibration_json or {})
+        recipe = dict(calibration.get("recipe") or {})
+        if recipe:
+            profile_payload["style"] = {
+                **dict(profile_payload.get("style") or {}),
+                "base_speaker": recipe.get("base_speaker"),
+                "style_preset": recipe.get("style_preset") or "default",
+            }
+            provider_metadata = dict(profile_payload.get("provider_metadata") or {})
+            if calibration.get("processed_reference_paths"):
+                provider_metadata["processed_reference_paths"] = list(calibration.get("processed_reference_paths") or [])
+                provider_metadata["processed_reference_audio_ids"] = list(calibration.get("processed_reference_audio_ids") or [])
+            if calibration.get("reference_audio_sha256"):
+                provider_metadata["reference_audio_sha256"] = calibration.get("reference_audio_sha256")
+            if calibration.get("embedding_path"):
+                profile_payload["embedding_path"] = calibration.get("embedding_path")
+                provider_metadata["embedding_artifact_path"] = calibration.get("embedding_path")
+            profile_payload["provider_metadata"] = provider_metadata
         requested_provider = job.requested_provider
         fallback_allowed = job.fallback_allowed
         sample_text = job.sample_text

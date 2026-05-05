@@ -15,6 +15,9 @@ from app.schemas import (
     OkResponse,
     ProviderCapabilityListResponse,
     TTSFailureResponse,
+    VoiceCalibrationMatrixRequest,
+    VoiceCalibrationMatrixResponse,
+    VoiceCalibrationRecipeSaveRequest,
     VoiceLabPreviewRequest,
     VoiceLabPreviewResponse,
     VoiceProfileListResponse,
@@ -42,6 +45,7 @@ from app.services.voice_profiles import (
     resolve_character_portrait_path,
     runtime_voice_profile_payload,
     save_reference_audio_upload,
+    update_voice_profile_calibration_recipe,
     update_voice_profile_preparation_metadata,
     upsert_character_preset,
     upsert_voice_profile,
@@ -50,6 +54,42 @@ from app.services.voice_profiles import (
 from app.tasks.voice_preview import process_voice_lab_preview
 
 router = APIRouter(tags=["character_presets"])
+
+VOICE_CALIBRATION_TEST_PHRASES = [
+    "I need this line to sound calm, specific, and unmistakably like me.",
+    "Wait, pause there. The rhythm matters more than the words.",
+    "That is the difference between a generic voice and a real character.",
+]
+
+DEFAULT_CALIBRATION_RECIPES = [
+    {"base_speaker": "EN-Default", "style_preset": "default", "speaking_rate": 0.9, "pause_bias": 0.75, "pitch": -2, "energy": 0.9},
+    {"base_speaker": "EN-Default", "style_preset": "default", "speaking_rate": 1.05, "pause_bias": 1.15, "pitch": 0, "energy": 1.0},
+    {"base_speaker": "EN-US", "style_preset": "default", "speaking_rate": 0.95, "pause_bias": 1.0, "pitch": 1, "energy": 1.1},
+    {"base_speaker": "EN-BR", "style_preset": "default", "speaking_rate": 1.0, "pause_bias": 1.25, "pitch": -1, "energy": 1.0},
+]
+
+
+def _calibration_recipe_controls(recipe: dict[str, object]) -> dict[str, object]:
+    controls = {"speaking_rate": recipe.get("speaking_rate")}
+    mapping = {
+        "pause_length": recipe.get("pause_bias"),
+        "pitch": recipe.get("pitch"),
+        "energy": recipe.get("energy"),
+        "emotion": recipe.get("emotion"),
+        "accent": recipe.get("accent"),
+    }
+    controls.update(mapping)
+    return {key: value for key, value in controls.items() if value is not None}
+
+
+def _unsupported_calibration_controls(provider_name: str, orchestrator: TTSOrchestrator, recipe_controls: dict[str, object]) -> list[str]:
+    capabilities = orchestrator.provider_capabilities()
+    provider_capability = next((item for item in capabilities if item["provider"] == provider_name), None)
+    supported = set((provider_capability or {}).get("supported_controls") or [])
+    unsupported = [key for key, value in recipe_controls.items() if value is not None and key not in supported]
+    if "style_preset" not in supported:
+        unsupported.append("style_preset")
+    return sorted(set(unsupported))
 
 
 def _preview_execution_policy(
@@ -381,6 +421,125 @@ def create_voice_lab_preview(
         content_url=f"/voice-lab/previews/{audio_path.name}",
         error=None,
     )
+
+
+@router.post("/voice-lab/calibration-matrix", response_model=VoiceCalibrationMatrixResponse, status_code=status.HTTP_202_ACCEPTED)
+def create_voice_lab_calibration_matrix(
+    payload: VoiceCalibrationMatrixRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    preset_model = get_character_preset_model(payload.preset_id, db)
+    if not preset_model:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Character preset not found.")
+    ensure_voice_profile_editable(preset_model.voice_profile, current_user.id)
+
+    orchestrator = TTSOrchestrator()
+    profile_payload = runtime_voice_profile_payload(preset_model.voice_profile, preset_model.display_name)
+    requested_provider = (payload.provider_preference or "openvoice").strip().lower()
+    fallback_allowed = bool(payload.fallback_allowed) if requested_provider in {"", "auto"} else False
+    selection = orchestrator.resolve_provider_selection(
+        profile_payload,
+        requested_provider=requested_provider,
+        fallback_allowed=fallback_allowed,
+    )
+    selected_provider = str(selection.get("selected_provider") or requested_provider or profile_payload.get("provider") or "openvoice").lower()
+    provider_state = dict(selection["provider_state"])
+    provider_capabilities = orchestrator.provider_capabilities()
+    provider_capability = next((item for item in provider_capabilities if item["provider"] == selected_provider), None)
+    supported_controls = list((provider_capability or {}).get("supported_controls") or [])
+    phrases = [phrase.strip() for phrase in (payload.phrases or VOICE_CALIBRATION_TEST_PHRASES) if phrase.strip()]
+    phrases = phrases[:6] or VOICE_CALIBRATION_TEST_PHRASES[:1]
+    recipes = [item.model_dump() for item in payload.recipes] or [dict(item) for item in DEFAULT_CALIBRATION_RECIPES]
+    recipes = recipes[:8]
+
+    responses: list[VoiceLabPreviewResponse] = []
+    unsupported_seen: set[str] = set()
+    for recipe_index, recipe in enumerate(recipes):
+        controls = _calibration_recipe_controls(recipe)
+        unsupported_controls = _unsupported_calibration_controls(selected_provider, orchestrator, controls)
+        unsupported_seen.update(unsupported_controls)
+        calibration = {
+            "kind": "voice_profile_calibration",
+            "recipe_index": recipe_index,
+            "recipe": recipe,
+            "controls": controls,
+            "supported_controls": supported_controls,
+            "unsupported_controls": unsupported_controls,
+            "processed_reference_paths": list((profile_payload.get("provider_metadata") or {}).get("processed_reference_paths") or []),
+            "processed_reference_audio_ids": list((profile_payload.get("provider_metadata") or {}).get("processed_reference_audio_ids") or []),
+            "embedding_path": profile_payload.get("embedding_path") or (profile_payload.get("provider_metadata") or {}).get("embedding_artifact_path"),
+            "reference_audio_sha256": (profile_payload.get("provider_metadata") or {}).get("reference_audio_sha256"),
+        }
+        for phrase_index, phrase in enumerate(phrases):
+            preview_job = create_voice_preview_job(
+                user_id=current_user.id,
+                preset=preset_model,
+                requested_provider=selected_provider,
+                fallback_allowed=fallback_allowed,
+                sample_text=phrase,
+                controls_applied=controls,
+                provider_state=provider_state,
+                reference_audio_count=len(profile_payload.get("reference_audios") or []),
+                db=db,
+                calibration={
+                    **calibration,
+                    "phrase_index": phrase_index,
+                    "phrase": phrase,
+                },
+            )
+            db.commit()
+            celery_task_id = f"voice-calibration-{preview_job.id}"
+            try:
+                process_voice_lab_preview.apply_async(
+                    kwargs={"preview_job_id": preview_job.id},
+                    task_id=celery_task_id,
+                )
+                preview_job.celery_task_id = celery_task_id
+                db.commit()
+                db.refresh(preview_job)
+            except Exception as exc:
+                preview_job.status = "failed"
+                preview_job.stage = "failed"
+                preview_job.error_json = {
+                    "code": "calibration_queue_failed",
+                    "message": f"Voice calibration preview could not be queued: {exc}",
+                    "provider_state": provider_state,
+                    "fallback_attempted": False,
+                    "attempted_providers": [],
+                    "provider_failures": {},
+                    "suggested_action": "Check the worker and broker configuration, then retry calibration.",
+                }
+                db.commit()
+            responses.append(to_voice_preview_response(preview_job))
+
+    return VoiceCalibrationMatrixResponse(
+        preset_id=preset_model.id,
+        voice_profile_id=preset_model.voice_profile_id,
+        provider_state=provider_state,
+        unsupported_controls=sorted(unsupported_seen),
+        items=responses,
+    )
+
+
+@router.post("/voice-profiles/{voice_profile_id}/calibration-recipe", response_model=VoiceProfileSummary)
+def save_voice_profile_calibration_recipe(
+    voice_profile_id: str,
+    payload: VoiceCalibrationRecipeSaveRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    profile_model = get_voice_profile_model(voice_profile_id, db)
+    if not profile_model:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice profile not found.")
+    ensure_voice_profile_editable(profile_model, current_user.id)
+    profile_model = update_voice_profile_calibration_recipe(
+        profile_model,
+        recipe=payload.recipe.model_dump(),
+        db=db,
+    )
+    profile = get_voice_profile(profile_model.id, db)
+    return VoiceProfileSummary(**profile)
 
 
 @router.get("/voice-lab/preview-jobs/{job_id}", response_model=VoiceLabPreviewResponse)

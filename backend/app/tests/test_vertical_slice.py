@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import GenerationJob, SocialAccount, VoicePreviewJob
+from app.models import GenerationJob, SocialAccount, VoicePreviewJob, VoiceProfile, VoiceReferenceAudio
 from app.services.voice_preview_jobs import STALE_VOICE_PREVIEW_ERROR_CODE
 from app.services.character_presets import get_character_preset
 from app.services.crypto import decrypt_secret
@@ -353,6 +353,151 @@ def test_voice_lab_preview_disables_fallback_for_explicit_provider(auth_client: 
         assert job is not None
         assert job.requested_provider == "openvoice"
         assert job.fallback_allowed is False
+    finally:
+        db.close()
+
+
+def test_voice_lab_calibration_matrix_queues_recipe_previews(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+
+    from app.services.voice_profiles import reference_audio_content_hash_from_paths
+
+    processed_reference_path = Path("test_storage") / "voice_lab" / "reference_audio" / "vp_host_calm_v1" / "processed_reference.wav"
+    _write_wav(processed_reference_path, sample=b"\x04\x00")
+    reference_hash = reference_audio_content_hash_from_paths([processed_reference_path])
+    embedding_path = Path("test_storage") / "voice_lab" / "embeddings" / f"vp_host_calm_v1_{reference_hash[:16]}.pth"
+    embedding_path.parent.mkdir(parents=True, exist_ok=True)
+    embedding_path.write_bytes(b"embedding")
+    processed_reference = str(processed_reference_path)
+    embedding_path_value = str(embedding_path)
+    db = SessionLocal()
+    try:
+        profile = db.get(VoiceProfile, "vp_host_calm_v1")
+        assert profile is not None
+        reference = VoiceReferenceAudio(
+            voice_profile_id="vp_host_calm_v1",
+            storage_path=processed_reference,
+            original_storage_path="test_storage/voice_lab/reference_audio/vp_host_calm_v1/original.wav",
+            processed_storage_path=processed_reference,
+            mime_type="audio/wav",
+            duration_ms=1600,
+            sha256="raw-reference",
+            processed_sha256=reference_hash,
+            validation_status="passed",
+            validation_json={"status": "passed"},
+            authorization_confirmed=True,
+        )
+        db.add(reference)
+        db.flush()
+        profile.embedding_path = embedding_path_value
+        profile.provider_metadata_json = {
+            "embedding_artifact_path": embedding_path_value,
+            "reference_audio_sha256": reference_hash,
+            "processed_reference_audio": {
+                str(reference.id): {
+                    "normalized_reference_path": processed_reference,
+                    "chunks": [
+                        {
+                            "path": processed_reference,
+                            "duration_seconds": 1.6,
+                            "start_seconds": 0.0,
+                            "end_seconds": 1.6,
+                        }
+                    ],
+                }
+            },
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    scheduled: list[dict] = []
+
+    def fake_apply_async(*, kwargs=None, task_id=None, **_extra):
+        scheduled.append({"kwargs": kwargs, "task_id": task_id})
+        return None
+
+    monkeypatch.setattr(process_voice_lab_preview, "apply_async", fake_apply_async)
+    response = auth_client.post(
+        "/voice-lab/calibration-matrix",
+        json={
+            "preset_id": "host_calm_v1",
+            "provider_preference": "openvoice",
+            "fallback_allowed": False,
+            "phrases": ["Calibration phrase one.", "Calibration phrase two."],
+            "recipes": [
+                {
+                    "base_speaker": "EN-US",
+                    "style_preset": "default",
+                    "speaking_rate": 0.92,
+                    "pause_bias": 1.25,
+                    "pitch": -1,
+                    "energy": 1.1,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["voice_profile_id"] == "vp_host_calm_v1"
+    assert len(payload["items"]) == 2
+    assert len(scheduled) == 2
+    first = payload["items"][0]
+    assert first["status"] == "queued"
+    assert first["calibration"]["recipe"] == {
+        "base_speaker": "EN-US",
+        "style_preset": "default",
+        "speaking_rate": 0.92,
+        "pause_bias": 1.25,
+        "pitch": -1.0,
+        "energy": 1.1,
+        "emotion": None,
+        "accent": None,
+    }
+    assert first["calibration"]["controls"] == {
+        "speaking_rate": 0.92,
+        "pause_length": 1.25,
+        "pitch": -1.0,
+        "energy": 1.1,
+    }
+    assert first["calibration"]["supported_controls"] == ["speaking_rate"]
+    assert first["calibration"]["processed_reference_paths"] == [processed_reference]
+    assert len(first["calibration"]["processed_reference_audio_ids"]) == 1
+    assert first["calibration"]["embedding_path"] == embedding_path_value
+    assert first["calibration"]["reference_audio_sha256"] == reference_hash
+    assert {"energy", "pause_length", "pitch", "style_preset"}.issubset(set(first["calibration"]["unsupported_controls"]))
+
+    db = SessionLocal()
+    try:
+        job = db.get(VoicePreviewJob, first["job_id"])
+        assert job is not None
+        assert job.calibration_json["recipe"]["base_speaker"] == "EN-US"
+        assert job.calibration_json["embedding_path"] == embedding_path_value
+        assert job.fallback_allowed is False
+        assert scheduled[0]["kwargs"]["preview_job_id"] == job.id
     finally:
         db.close()
 
@@ -2433,6 +2578,55 @@ def test_generation_job_snapshots_selected_voice_profiles(auth_client: TestClien
     assert manifest["speakers"]["Host"]["fallback_allowed"] is False
     assert manifest["speakers"]["Guest"]["voice_profile_id"] == "vp_guest_local_v1"
     assert manifest["speakers"]["Guest"]["fallback_allowed"] is True
+
+
+def test_saved_calibration_recipe_is_snapshotted_for_video_render(auth_client: TestClient, monkeypatch):
+    _write_voice_manifest_presets()
+    auth_client.get("/character-presets")
+    save_response = auth_client.post(
+        "/voice-profiles/vp_host_clone_v1/calibration-recipe",
+        json={
+            "recipe": {
+                "base_speaker": "EN-US",
+                "style_preset": "default",
+                "speaking_rate": 0.88,
+                "pause_bias": 1.5,
+                "pitch": -2,
+                "energy": 1.15,
+                "emotion": "serious",
+                "accent": "default",
+            }
+        },
+    )
+    assert save_response.status_code == 200
+    profile = save_response.json()
+    assert profile["base_speaker"] == "EN-US"
+    assert profile["style_preset"] == "default"
+    assert profile["pace"] == 0.88
+    assert profile["pause_bias"] == 1.5
+    assert profile["pitch"] == -2.0
+    assert profile["energy"] == 1.15
+    assert profile["provider_metadata"]["calibration_status"] == "saved"
+    assert profile["provider_metadata"]["last_calibration_recipe"]["base_speaker"] == "EN-US"
+
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+
+    assert create_job.status_code == 201
+    host_profile = create_job.json()["voice_manifest"]["speakers"]["Host"]["voice_profile"]
+    assert host_profile["style"]["base_speaker"] == "EN-US"
+    assert host_profile["style"]["style_preset"] == "default"
+    assert host_profile["controls"]["speaking_rate"] == 0.88
+    assert host_profile["controls"]["pause_length"] == 1.5
+    assert host_profile["controls"]["pitch"] == -2.0
+    assert host_profile["controls"]["energy"] == 1.15
+    assert host_profile["controls"]["emotion"] == "serious"
+    assert host_profile["controls"]["accent"] == "default"
+    assert host_profile["provider_metadata"]["last_calibration_recipe"]["speaking_rate"] == 0.88
 
 
 def test_generation_worker_uses_persisted_voice_manifest_after_binding_changes(auth_client: TestClient, monkeypatch):

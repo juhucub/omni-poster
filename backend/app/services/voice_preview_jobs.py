@@ -48,6 +48,7 @@ def create_voice_preview_job(
     provider_state: dict[str, Any],
     reference_audio_count: int,
     db: Session,
+    calibration: dict[str, Any] | None = None,
 ) -> VoicePreviewJob:
     job = VoicePreviewJob(
         user_id=user_id,
@@ -60,6 +61,7 @@ def create_voice_preview_job(
         progress=0,
         stage="queued",
         controls_applied_json=dict(controls_applied or {}),
+        calibration_json=dict(calibration or {}),
         provider_state_json=dict(provider_state or {}),
         reference_audio_count=reference_audio_count,
     )
@@ -134,5 +136,6 @@ def to_voice_preview_response(job: VoicePreviewJob) -> VoiceLabPreviewResponse:
         duration_seconds=job.duration_seconds,
         sample_text=job.sample_text,
         content_url=voice_preview_content_url(job.preview_audio_path),
+        calibration=dict(job.calibration_json or {}),
         error=TTSFailureResponse(**error_payload) if error_payload else None,
     )

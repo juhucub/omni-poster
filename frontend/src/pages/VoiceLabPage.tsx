@@ -4,6 +4,7 @@ import apiClient, { apiBaseUrl } from '../api/client';
 import type {
   CharacterPreset,
   TTSFailure,
+  VoiceCalibrationMatrix,
   VoiceLabPreview,
   VoiceProfile,
   VoiceProviderCapability,
@@ -50,6 +51,8 @@ const VoiceLabPage: React.FC = () => {
   const [previewProviderPreference, setPreviewProviderPreference] = useState<'auto' | 'openvoice' | 'espeak'>('auto');
   const [form, setForm] = useState(emptyForm);
   const [preview, setPreview] = useState<VoiceLabPreview | null>(null);
+  const [calibrationItems, setCalibrationItems] = useState<VoiceLabPreview[]>([]);
+  const [calibrationUnsupported, setCalibrationUnsupported] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [providerError, setProviderError] = useState<TTSFailure | null>(null);
   const [info, setInfo] = useState<string | null>(null);
@@ -99,6 +102,19 @@ const VoiceLabPage: React.FC = () => {
     : [];
 
   const supportsControl = (controlName: string) => supportedControls.has(controlName);
+
+  const calibrationRecipe = (item: VoiceLabPreview) =>
+    (item.calibration?.['recipe'] || {}) as Record<string, unknown>;
+
+  const calibrationUnsupportedControls = (item: VoiceLabPreview) =>
+    Array.isArray(item.calibration?.['unsupported_controls'])
+      ? (item.calibration['unsupported_controls'] as unknown[]).map((value) => String(value))
+      : [];
+
+  const calibrationSupportedControls = (item: VoiceLabPreview) =>
+    Array.isArray(item.calibration?.['supported_controls'])
+      ? (item.calibration['supported_controls'] as unknown[]).map((value) => String(value))
+      : [];
 
   const hydrateForm = (preset: CharacterPreset | null, profile: VoiceProfile | null) => {
     if (!preset) {
@@ -355,6 +371,78 @@ const VoiceLabPage: React.FC = () => {
     }
   };
 
+  const pollPreviewJobs = async (items: VoiceLabPreview[]) => {
+    let currentItems = items;
+    for (let attempt = 0; attempt < 105; attempt += 1) {
+      const pending = currentItems.filter((item) => item.job_id && ['queued', 'processing'].includes(item.status));
+      if (pending.length === 0) {
+        return currentItems;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      const updates = await Promise.all(
+        pending.map((item) => apiClient.get<VoiceLabPreview>(`/voice-lab/preview-jobs/${item.job_id}`))
+      );
+      const updateMap = new Map(updates.map((response) => [response.data.job_id, response.data]));
+      currentItems = currentItems.map((item) => updateMap.get(item.job_id) || item);
+      setCalibrationItems(currentItems);
+    }
+    return currentItems;
+  };
+
+  const runCalibrationMatrix = async () => {
+    if (!selectedId) {
+      setError('Save the preset first before generating a calibration matrix.');
+      return;
+    }
+    try {
+      setBusy('calibration');
+      setProviderError(null);
+      const response = await apiClient.post<VoiceCalibrationMatrix>('/voice-lab/calibration-matrix', {
+        preset_id: selectedId,
+        provider_preference: 'openvoice',
+        fallback_allowed: false,
+        phrases: fixedTestPhrases,
+      });
+      setCalibrationItems(response.data.items);
+      setCalibrationUnsupported(response.data.unsupported_controls || []);
+      setInfo(`Queued ${response.data.items.length} calibration previews.`);
+      const settledItems = await pollPreviewJobs(response.data.items);
+      const failed = settledItems.find((item) => item.status === 'failed');
+      if (failed?.error) {
+        setProviderError(failed.error);
+        setError(failed.error.message || 'One or more calibration previews failed.');
+        return;
+      }
+      setInfo('Calibration previews generated.');
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setCalibrationItems([]);
+      setCalibrationUnsupported([]);
+      setProviderError(typeof detail === 'object' ? detail : null);
+      setError(typeof detail === 'string' ? detail : detail?.message || 'Failed to generate calibration matrix.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveCalibrationRecipe = async (item: VoiceLabPreview) => {
+    const recipe = calibrationRecipe(item);
+    if (!item.voice_profile_id || Object.keys(recipe).length === 0) {
+      setError('Calibration item is missing a recipe.');
+      return;
+    }
+    try {
+      setBusy(`save-calibration-${item.job_id || 'recipe'}`);
+      await apiClient.post(`/voice-profiles/${item.voice_profile_id}/calibration-recipe`, { recipe });
+      setInfo('Calibration recipe saved to the voice profile.');
+      await Promise.all([loadPresets(), loadVoiceProfiles()]);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save calibration recipe.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const providerState = Object.entries(preview?.provider_state || providerError?.provider_state || {});
   const attemptedProviders = providerError?.attempted_providers || [];
   const providerFailures = Object.entries(providerError?.provider_failures || {});
@@ -379,6 +467,8 @@ const VoiceLabPage: React.FC = () => {
                 onClick={() => {
                   setSelectedId(null);
                   setPreview(null);
+                  setCalibrationItems([]);
+                  setCalibrationUnsupported([]);
                   setProviderError(null);
                   setInfo(null);
                   hydrateForm(null, null);
@@ -402,6 +492,8 @@ const VoiceLabPage: React.FC = () => {
                   onClick={() => {
                     setSelectedId(preset.id);
                     setPreview(null);
+                    setCalibrationItems([]);
+                    setCalibrationUnsupported([]);
                     setProviderError(null);
                     setInfo(null);
                   }}
@@ -824,6 +916,13 @@ const VoiceLabPage: React.FC = () => {
                 {busy === 'preview' ? 'Generating Preview...' : 'Generate Voice Preview'}
               </button>
               <button
+                onClick={runCalibrationMatrix}
+                disabled={busy === 'calibration' || !selectedId}
+                className="rounded-2xl border border-cyan-300/40 px-4 py-3 text-sm text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-60"
+              >
+                {busy === 'calibration' ? 'Generating Matrix...' : 'Generate Calibration Matrix'}
+              </button>
+              <button
                 onClick={deletePreset}
                 disabled={busy === 'delete' || !selectedPreset || selectedPreset.source === 'bundled'}
                 className="rounded-2xl border border-rose-400/30 px-4 py-3 text-sm text-rose-200 hover:bg-rose-500/10 disabled:opacity-40"
@@ -905,6 +1004,88 @@ const VoiceLabPage: React.FC = () => {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-medium text-slate-100">Calibration matrix</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    Audition fixed phrases across the persisted OpenVoice reference artifacts, base speakers, and explicit style controls.
+                  </div>
+                </div>
+                {calibrationUnsupported.length > 0 && (
+                  <div className="rounded-xl border border-amber-300/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                    Unsupported: {calibrationUnsupported.join(', ')}
+                  </div>
+                )}
+              </div>
+              {calibrationItems.length > 0 ? (
+                <div className="mt-4 grid gap-3">
+                  {calibrationItems.map((item, index) => {
+                    const recipe = calibrationRecipe(item);
+                    const unsupported = calibrationUnsupportedControls(item);
+                    const supported = calibrationSupportedControls(item);
+                    const processedPaths = Array.isArray(item.calibration?.['processed_reference_paths'])
+                      ? (item.calibration['processed_reference_paths'] as unknown[]).map((value) => String(value))
+                      : [];
+                    return (
+                      <div key={`${item.job_id || index}-${item.sample_text}`} className="rounded-xl border border-white/10 bg-black/20 p-3 text-sm text-slate-300">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                              Recipe {String(item.calibration?.['recipe_index'] ?? index)} · Phrase {String(item.calibration?.['phrase_index'] ?? 0)}
+                            </div>
+                            <div className="mt-1 font-medium text-slate-100">{item.sample_text}</div>
+                            <div className="mt-2 text-xs text-slate-400">
+                              Base {String(recipe['base_speaker'] || 'default')} · Style {String(recipe['style_preset'] || 'default')} · Rate {String(recipe['speaking_rate'] || 1)} · Pause {String(recipe['pause_bias'] || 'default')}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                              Pitch {String(recipe['pitch'] ?? 'stored only')} · Energy {String(recipe['energy'] ?? 'stored only')} · Embedding {String(item.calibration?.['embedding_path'] || 'not prepared')}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => saveCalibrationRecipe(item)}
+                            disabled={item.status !== 'completed' || Boolean(busy?.startsWith('save-calibration'))}
+                            className="rounded-xl border border-emerald-300/30 px-3 py-2 text-xs text-emerald-100 hover:bg-emerald-500/10 disabled:opacity-50"
+                          >
+                            Save Recipe
+                          </button>
+                        </div>
+                        <div className="mt-3 grid gap-2 md:grid-cols-3">
+                          <div>Status: <span className="text-cyan-200">{item.status}</span></div>
+                          <div>Provider: <span className="text-cyan-200">{item.provider_used || 'pending'}</span></div>
+                          <div>Supported: <span className="text-cyan-200">{supported.join(', ') || 'none'}</span></div>
+                        </div>
+                        {unsupported.length > 0 && (
+                          <div className="mt-2 rounded-lg border border-amber-300/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                            Stored but ignored by this provider: {unsupported.join(', ')}
+                          </div>
+                        )}
+                        {processedPaths.length > 0 && (
+                          <div className="mt-2 text-xs text-slate-500">Processed refs: {processedPaths.join(', ')}</div>
+                        )}
+                        {item.content_url ? (
+                          <div className="mt-3 space-y-2">
+                            <audio controls src={`${apiBase}${item.content_url}`} className="w-full" />
+                            <a href={`${apiBase}${item.content_url}`} className="text-xs text-cyan-200 hover:text-cyan-100">
+                              Calibration preview WAV
+                            </a>
+                          </div>
+                        ) : (
+                          <div className="mt-3 rounded-lg border border-dashed border-white/10 px-3 py-3 text-xs text-slate-500">
+                            Audio pending from worker.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="mt-3 rounded-xl border border-dashed border-white/10 px-3 py-4 text-sm text-slate-500">
+                  Generate a calibration matrix to compare style recipes for this profile.
                 </div>
               )}
             </div>

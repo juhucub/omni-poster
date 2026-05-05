@@ -436,6 +436,7 @@ class VoicePreviewJob(Base):
     provider_used: Mapped[str | None] = mapped_column(String(32), nullable=True)
     fallback_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     controls_applied_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    calibration_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     provider_state_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     error_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     reference_audio_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
