@@ -143,6 +143,10 @@ const ProjectEditorPage: React.FC = () => {
     () => (((generationJob?.tts_result as any)?.segments || []) as any[]),
     [generationJob?.tts_result]
   );
+  const generationAssembly = useMemo(
+    () => (((generationJob?.tts_result as any)?.assembly || {}) as any),
+    [generationJob?.tts_result]
+  );
   const generationTtsError = (generationJob?.tts_result as any)?.error || null;
   const savedDraft = useMemo(() => normalizeDraft(script?.raw_text || defaultScript), [script?.raw_text]);
   const scriptIsDirty = useMemo(() => normalizeDraft(scriptDraft) !== savedDraft, [scriptDraft, savedDraft]);
@@ -646,6 +650,23 @@ const ProjectEditorPage: React.FC = () => {
         {generationSegments.length > 0 && (
           <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3">
             <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Render segment WAVs</div>
+            <div className="mt-2 flex flex-wrap gap-3 text-xs">
+              {generationAssembly.composite_audio_artifact_url && (
+                <a href={toApiHref(generationAssembly.composite_audio_artifact_url)} className="text-cyan-200 hover:text-cyan-100">
+                  Dialogue composite WAV
+                </a>
+              )}
+              {generationAssembly.final_video_audio_artifact_url && (
+                <a href={toApiHref(generationAssembly.final_video_audio_artifact_url)} className="text-cyan-200 hover:text-cyan-100">
+                  Final video audio WAV
+                </a>
+              )}
+              {latestOutput?.asset?.content_url && (
+                <a href={toApiHref(latestOutput.asset.content_url)} className="text-cyan-200 hover:text-cyan-100">
+                  Final MP4
+                </a>
+              )}
+            </div>
             <div className="mt-2 grid gap-2 md:grid-cols-2">
               {generationSegments.map((segment: any) => (
                 <a

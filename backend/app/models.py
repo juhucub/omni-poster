@@ -279,9 +279,14 @@ class VoiceReferenceAudio(Base):
         ForeignKey("voice_profiles.id", ondelete="CASCADE"), nullable=False, index=True
     )
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    original_storage_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processed_storage_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    processed_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    validation_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    validation_status: Mapped[str] = mapped_column(String(32), default="not_validated", nullable=False)
     authorization_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     authorization_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[int | None] = mapped_column(

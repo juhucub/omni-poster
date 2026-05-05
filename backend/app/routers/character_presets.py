@@ -38,6 +38,7 @@ from app.services.voice_profiles import (
     get_voice_profile_model,
     list_character_presets,
     list_voice_profiles,
+    resolve_voice_reference_audio_artifact,
     resolve_character_portrait_path,
     runtime_voice_profile_payload,
     save_reference_audio_upload,
@@ -176,6 +177,30 @@ def upload_reference_audio(
     return VoiceReferenceAudioUploadResponse(
         voice_profile=VoiceProfileSummary(**voice_profile),
         reference_audio=reference_audio,
+    )
+
+
+@router.get("/voice-profiles/{voice_profile_id}/reference-audio/{reference_audio_id}/{artifact_kind}")
+def get_voice_reference_audio_artifact(
+    voice_profile_id: str,
+    reference_audio_id: int,
+    artifact_kind: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    artifact = resolve_voice_reference_audio_artifact(
+        voice_profile_id=voice_profile_id,
+        reference_audio_id=reference_audio_id,
+        artifact_kind=artifact_kind,
+        current_user_id=current_user.id,
+        db=db,
+    )
+    media_type = "audio/wav" if artifact.suffix.lower() == ".wav" else "application/octet-stream"
+    return FileResponse(
+        artifact,
+        media_type=media_type,
+        filename=artifact.name,
+        headers={"Cache-Control": "private, max-age=3600"},
     )
 
 

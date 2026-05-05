@@ -172,6 +172,14 @@ class CharacterPresetSummary(BaseModel):
     language: str | None = None
     model_id: str | None = None
     controls: dict = Field(default_factory=dict)
+    style: dict = Field(default_factory=dict)
+    base_speaker: str | None = Field(default=None, max_length=128)
+    style_preset: str | None = Field(default=None, max_length=64)
+    emotion: str | None = Field(default=None, max_length=64)
+    pace: float | None = Field(default=None, ge=0.25, le=3.0)
+    energy: float | None = Field(default=None)
+    pause_bias: float | None = Field(default=None)
+    accent: str | None = Field(default=None, max_length=64)
     fallback_voice_settings: dict = Field(default_factory=dict)
     reference_audio_count: int = 0
     notes: str = ""
@@ -187,9 +195,16 @@ class VoiceReferenceAudioSummary(BaseModel):
     id: int
     voice_profile_id: str
     storage_path: str
+    original_storage_path: str | None = None
+    processed_storage_path: str | None = None
+    original_content_url: str | None = None
+    processed_content_url: str | None = None
     mime_type: str
     duration_ms: int | None = None
     sha256: str
+    processed_sha256: str | None = None
+    validation_status: str = "not_validated"
+    validation: dict = Field(default_factory=dict)
     authorization_confirmed: bool
     authorization_note: str | None = None
     created_at: datetime
@@ -207,6 +222,14 @@ class VoiceProfileSummary(BaseModel):
     style: dict = Field(default_factory=dict)
     controls: dict = Field(default_factory=dict)
     provider_metadata: dict = Field(default_factory=dict)
+    base_speaker: str | None = None
+    style_preset: str | None = None
+    emotion: str | None = None
+    pace: float | None = None
+    pitch: float | None = None
+    energy: float | None = None
+    pause_bias: float | None = None
+    accent: str | None = None
     voice: str | None = None
     espeak_rate: int | None = None
     espeak_pitch: int | None = None
@@ -244,6 +267,14 @@ class VoiceProfileRequest(BaseModel):
     style: dict = Field(default_factory=dict)
     controls: dict = Field(default_factory=dict)
     provider_metadata: dict = Field(default_factory=dict)
+    base_speaker: str | None = Field(default=None, max_length=128)
+    style_preset: str | None = Field(default=None, max_length=64)
+    emotion: str | None = Field(default=None, max_length=64)
+    pace: float | None = Field(default=None, ge=0.25, le=3.0)
+    pitch: float | None = Field(default=None)
+    energy: float | None = Field(default=None)
+    pause_bias: float | None = Field(default=None)
+    accent: str | None = Field(default=None, max_length=64)
     embedding_path: str | None = Field(default=None, max_length=1000)
     voice: str | None = Field(default=None, max_length=64)
     espeak_rate: int | None = Field(default=None, ge=80, le=260)
@@ -268,6 +299,7 @@ class CharacterPresetRequest(BaseModel):
     word_gap: int = Field(ge=0, le=20)
     amplitude: int = Field(ge=0, le=200)
     controls: dict = Field(default_factory=dict)
+    style: dict = Field(default_factory=dict)
     fallback_voice_settings: dict = Field(default_factory=dict)
     notes: str = Field(default="", max_length=2000)
     sample_text: str = Field(default="", max_length=500)

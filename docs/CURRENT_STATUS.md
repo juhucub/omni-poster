@@ -1,6 +1,6 @@
 # Omniposter Current Status
 
-Last updated: 2026-05-04
+Last updated: 2026-05-05
 
 ## Working
 
@@ -16,6 +16,7 @@ Last updated: 2026-05-04
 - OpenVoice-selected render jobs fail closed with structured provider diagnostics instead of silently falling back to local TTS.
 - Render jobs now persist per-segment WAV artifacts under generated job storage and expose safe artifact URLs in job metadata for audio comparison.
 - Final MP4 assembly now builds a persisted per-job dialogue composite WAV from the same render segment WAV artifacts and uses that composite WAV as the final video audio source.
+- Voice profiles now persist original reference uploads, processed mono 16 kHz WAV references, validation metadata, processed-reference OpenVoice embedding metadata, style/prosody settings, render segment WAVs, dialogue composite WAVs, and extracted final-video audio artifacts for comparison.
 - Project Editor now fetches the latest project generation job when there is no active job, so completed render status and segment WAV links remain visible after refresh or stage changes.
 
 ## Partially Working
@@ -23,7 +24,7 @@ Last updated: 2026-05-04
 - Product and MVP goals are documented, but implementation status must be verified against the repository before marking any app feature complete.
 - The intended architecture is documented, but exact current code alignment is not verified in this file yet.
 - TTS architecture intent is documented as provider-based with Docker-safe fallback and OpenVoice V2 as the clone-capable provider when configured.
-- Voice profile propagation from Video Generator to render/TTS is covered by backend regression tests, but real OpenVoice runtime rendering still needs manual Docker/runtime verification with checkpoints installed.
+- Voice profile propagation from Voice Lab and Video Generator to render/TTS is covered by backend regression tests, including processed reference audio and style metadata, but real OpenVoice runtime rendering still needs manual Docker/runtime verification with checkpoints installed.
 
 ## Broken / Needs Fix
 
@@ -59,6 +60,8 @@ P2:
 - Added persisted render segment WAV artifacts, scoped job artifact serving, and UI links for comparing Voice Lab previews, render segment WAVs, and final video audio.
 - Added project generation-job listing and a persistent latest render job panel so completed render diagnostics do not disappear when the active-job endpoint returns 404.
 - Fixed final MP4 audio assembly to concatenate the persisted segment WAV artifacts into `audio/dialogue_composite.wav` before muxing, with assembly paths recorded in job metadata.
+- Added reference-audio validation with hard rejects for unreadable, too-short, mostly silent, and clipped clips; soft validation warnings are persisted for quality heuristics.
+- Added scoped original/processed reference audio artifact routes, processed-reference OpenVoice preparation tests, Voice Lab fixed comparison phrases, and render metadata links for dialogue composite/final extracted audio.
 
 ## Open Questions
 

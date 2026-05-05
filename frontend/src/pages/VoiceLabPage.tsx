@@ -36,6 +36,12 @@ const emptyForm = {
   },
 };
 
+const fixedTestPhrases = [
+  "I need this line to sound calm, specific, and unmistakably like me.",
+  "Wait, pause there. The rhythm matters more than the words.",
+  "That is the difference between a generic voice and a real character.",
+];
+
 const VoiceLabPage: React.FC = () => {
   const [presets, setPresets] = useState<CharacterPreset[]>([]);
   const [profiles, setProfiles] = useState<VoiceProfile[]>([]);
@@ -189,6 +195,16 @@ const VoiceLabPage: React.FC = () => {
         word_gap: Number(form.word_gap),
         amplitude: Number(form.amplitude),
         controls: form.controls,
+        style: {
+          ...(selectedVoiceProfile?.style || {}),
+          base_speaker: selectedVoiceProfile?.base_speaker || selectedVoiceProfile?.style?.['base_speaker'] || null,
+          style_preset: selectedVoiceProfile?.style_preset || selectedVoiceProfile?.style?.['style_preset'] || 'default',
+        },
+        pace: Number(form.controls.speaking_rate || 1),
+        energy: Number(form.controls.energy || 1),
+        pause_bias: Number(form.controls.pause_length || 1),
+        emotion: String(form.controls.emotion || 'neutral'),
+        accent: String(form.controls.accent || 'default'),
         fallback_voice_settings: {
           voice: form.voice.trim(),
           rate: Number(form.rate),
@@ -687,6 +703,18 @@ const VoiceLabPage: React.FC = () => {
                 className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
               />
             </label>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {fixedTestPhrases.map((phrase) => (
+                <button
+                  key={phrase}
+                  type="button"
+                  onClick={() => setForm((current) => ({ ...current, sample_text: phrase }))}
+                  className="rounded-full border border-white/10 px-3 py-2 text-xs text-slate-300 hover:bg-white/10"
+                >
+                  {phrase}
+                </button>
+              ))}
+            </div>
 
             <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
               <div className="flex items-center justify-between gap-4">
@@ -740,9 +768,26 @@ const VoiceLabPage: React.FC = () => {
               <div className="mt-4 space-y-2">
                 {(selectedVoiceProfile?.reference_audios || []).map((clip) => (
                   <div key={clip.id} className="rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-300">
-                    <div>{clip.storage_path.split('/').pop()}</div>
+                    <div>{(clip.processed_storage_path || clip.storage_path).split('/').pop()}</div>
                     <div className="mt-1 text-xs text-slate-500">
-                      {clip.mime_type} · {clip.duration_ms ? `${(clip.duration_ms / 1000).toFixed(2)}s` : 'duration unknown'}
+                      {clip.mime_type} · {clip.duration_ms ? `${(clip.duration_ms / 1000).toFixed(2)}s` : 'duration unknown'} · {clip.validation_status}
+                    </div>
+                    {Array.isArray((clip.validation as any)?.warnings) && (clip.validation as any).warnings.length > 0 && (
+                      <div className="mt-2 text-xs text-amber-200">
+                        {(clip.validation as any).warnings.map((warning: any) => warning.code || 'warning').join(', ')}
+                      </div>
+                    )}
+                    <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                      {clip.original_content_url && (
+                        <a href={`${apiBase}${clip.original_content_url}`} className="text-cyan-200 hover:text-cyan-100">
+                          Original
+                        </a>
+                      )}
+                      {clip.processed_content_url && (
+                        <a href={`${apiBase}${clip.processed_content_url}`} className="text-cyan-200 hover:text-cyan-100">
+                          Processed WAV
+                        </a>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -804,7 +849,12 @@ const VoiceLabPage: React.FC = () => {
                     <pre className="mt-2 overflow-x-auto text-xs text-slate-300">{JSON.stringify(preview.controls_applied, null, 2)}</pre>
                   </div>
                   {preview.content_url ? (
-                    <audio controls src={`${apiBase}${preview.content_url}`} className="w-full" />
+                    <div className="space-y-2">
+                      <audio controls src={`${apiBase}${preview.content_url}`} className="w-full" />
+                      <a href={`${apiBase}${preview.content_url}`} className="text-xs text-cyan-200 hover:text-cyan-100">
+                        Voice Lab preview WAV
+                      </a>
+                    </div>
                   ) : (
                     <div className="rounded-xl border border-dashed border-white/10 px-3 py-4 text-sm text-slate-500">
                       Audio will appear here once the worker finishes the preview.

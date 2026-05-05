@@ -493,11 +493,24 @@ def test_reference_audio_upload_normalizes_audio_and_invalidates_embedding(auth_
     assert response.status_code == 201
     assert response.json()["reference_audio"]["mime_type"] == "audio/wav"
     assert response.json()["reference_audio"]["storage_path"].endswith(".wav")
+    assert response.json()["reference_audio"]["original_storage_path"].endswith("original.mp3")
+    assert response.json()["reference_audio"]["processed_storage_path"].endswith("processed_reference.wav")
+    assert response.json()["reference_audio"]["processed_sha256"]
+    assert response.json()["reference_audio"]["validation_status"] == "passed"
+    assert response.json()["reference_audio"]["original_content_url"].endswith("/original")
+    assert response.json()["reference_audio"]["processed_content_url"].endswith("/processed")
     assert response.json()["reference_audio"]["duration_ms"] >= 1800
     assert response.json()["voice_profile"]["embedding_path"] is None
     assert response.json()["voice_profile"]["provider_metadata"]["embedding_status"] == "not_prepared"
+    assert response.json()["voice_profile"]["provider_metadata"]["reference_validation_status"] == "passed"
     assert stale_embedding.exists() is False
     assert stale_hashed_embedding.exists() is False
+
+    original_response = auth_client.get(response.json()["reference_audio"]["original_content_url"])
+    processed_response = auth_client.get(response.json()["reference_audio"]["processed_content_url"])
+    assert original_response.status_code == 200
+    assert processed_response.status_code == 200
+    assert processed_response.content.startswith(b"RIFF")
 
 
 def test_reference_audio_upload_rejects_unreadable_audio(auth_client: TestClient, monkeypatch):
@@ -641,6 +654,164 @@ def test_reference_audio_upload_processes_long_mp3_into_short_chunks(auth_client
     assert metadata["last_reference_original_filename"] == "long-reference.mp3"
     assert any("voice.reference_audio.uploaded" in record.message for record in caplog.records)
     assert any("-ss" in command for command in recorded["commands"])
+
+
+def test_reference_audio_upload_rejects_mostly_silent_audio(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    silence_stderr = "\n".join(
+        [
+            "[silencedetect] silence_start: 0.1",
+            "[silencedetect] silence_end: 3.9 | silence_duration: 3.8",
+        ]
+    )
+
+    monkeypatch.setattr("app.services.voice_profiles._ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(
+        "app.services.voice_profiles.subprocess.run",
+        _fake_reference_audio_ffmpeg_run(seconds=4.0, silence_stderr=silence_stderr),
+    )
+
+    response = auth_client.post(
+        "/voice-profiles/reference-audio",
+        files={"file": ("silent.mp3", b"fake-mp3", "audio/mpeg")},
+        data={
+            "voice_profile_id": "vp_host_calm_v1",
+            "authorization_confirmed": "true",
+            "authorization_note": "owned",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["validation"]["hard_failures"][0]["code"] == "too_much_silence"
+
+
+def test_reference_audio_upload_rejects_clipped_audio(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+
+    def fake_run(command, check, capture_output, text):
+        if command[-1] != "-":
+            _write_wav(Path(command[-1]), seconds=2.0, sample=b"\xff\x7f")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.services.voice_profiles._ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("app.services.voice_profiles.subprocess.run", fake_run)
+
+    response = auth_client.post(
+        "/voice-profiles/reference-audio",
+        files={"file": ("clipped.mp3", b"fake-mp3", "audio/mpeg")},
+        data={
+            "voice_profile_id": "vp_host_calm_v1",
+            "authorization_confirmed": "true",
+            "authorization_note": "owned",
+        },
+    )
+
+    assert response.status_code == 400
+    codes = [item["code"] for item in response.json()["detail"]["validation"]["hard_failures"]]
+    assert "clipping_detected" in codes
+
+
+def test_reference_audio_upload_accepts_soft_warning_metadata(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    silence_stderr = "\n".join(
+        [
+            "[silencedetect] silence_start: 0.4",
+            "[silencedetect] silence_end: 1.0 | silence_duration: 0.6",
+            "[silencedetect] silence_start: 1.4",
+            "[silencedetect] silence_end: 2.0 | silence_duration: 0.6",
+            "[silencedetect] silence_start: 2.4",
+            "[silencedetect] silence_end: 3.0 | silence_duration: 0.6",
+            "[silencedetect] silence_start: 3.4",
+        ]
+    )
+
+    monkeypatch.setattr("app.services.voice_profiles._ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(
+        "app.services.voice_profiles.subprocess.run",
+        _fake_reference_audio_ffmpeg_run(seconds=4.0, silence_stderr=silence_stderr),
+    )
+
+    response = auth_client.post(
+        "/voice-profiles/reference-audio",
+        files={"file": ("warning.mp3", b"fake-mp3", "audio/mpeg")},
+        data={
+            "voice_profile_id": "vp_host_calm_v1",
+            "authorization_confirmed": "true",
+            "authorization_note": "owned",
+        },
+    )
+
+    assert response.status_code == 201
+    validation = response.json()["reference_audio"]["validation"]
+    assert response.json()["reference_audio"]["validation_status"] == "warning"
+    assert validation["warnings"][0]["code"] == "poor_speech_ratio"
+    assert response.json()["voice_profile"]["provider_metadata"]["reference_validation_status"] == "warning"
 
 
 def test_prepare_voice_profile_persists_embedding_metadata(auth_client: TestClient, monkeypatch):
@@ -1251,6 +1422,48 @@ def test_openvoice_prepare_voice_profile_uses_processed_reference_chunks(monkeyp
     assert result["provider_metadata"]["reference_audio_sha256"] == expected_reference_hash
 
 
+def test_openvoice_prepare_voice_profile_prefers_processed_reference_path(monkeypatch, tmp_path: Path):
+    provider = OpenVoiceProvider()
+    original_ref = tmp_path / "original_upload.mp3"
+    processed_ref = tmp_path / "processed_reference.wav"
+    original_ref.write_bytes(b"not-used")
+    _write_wav(processed_ref, seconds=2.0, sample=b"\x04\x00")
+    converter_dir = tmp_path / "converter"
+    converter_dir.mkdir(parents=True, exist_ok=True)
+    recorded: dict[str, object] = {}
+    expected_reference_hash = provider._reference_audio_hash([processed_ref])
+
+    monkeypatch.setattr(settings, "OPENVOICE_CHECKPOINTS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        provider,
+        "healthcheck",
+        lambda: {"available": True, "reason": None, "metadata": {"device": "cpu"}},
+    )
+    monkeypatch.setattr(provider, "_import_runtime", lambda: (None, "se_extractor", "converter_cls", "torch_module"))
+    monkeypatch.setattr(provider, "_get_converter", lambda converter_dir, device, converter_cls: object())
+
+    def fake_get_target_embedding(reference_paths, converter, se_extractor, device, torch_module, artifact_path=None):
+        recorded["reference_paths"] = [str(path) for path in reference_paths]
+        return "embedding"
+
+    monkeypatch.setattr(provider, "_get_target_embedding", fake_get_target_embedding)
+
+    result = provider.prepare_voice_profile(
+        {
+            "id": "vp_test",
+            "reference_audios": [
+                {
+                    "storage_path": str(original_ref),
+                    "processed_storage_path": str(processed_ref),
+                }
+            ],
+        }
+    )
+
+    assert recorded["reference_paths"] == [str(processed_ref)]
+    assert result["provider_metadata"]["reference_audio_sha256"] == expected_reference_hash
+
+
 def test_openvoice_reference_content_hash_changes_embedding_artifact_path(tmp_path: Path):
     provider = OpenVoiceProvider()
     ref_one = tmp_path / "ref_one.wav"
@@ -1387,7 +1600,8 @@ def test_openvoice_synthesize_line_passes_selected_profile_target_embedding(monk
         "provider": "openvoice",
         "language": "en",
         "reference_audios": [{"storage_path": str(reference_path)}],
-        "controls": {},
+        "controls": {"speaking_rate": 0.9, "emotion": "warm", "pitch": 12, "energy": 1.3},
+        "style": {"base_speaker": "EN-Default"},
         "provider_metadata": {},
     }
 
@@ -1406,6 +1620,8 @@ def test_openvoice_synthesize_line_passes_selected_profile_target_embedding(monk
     assert recorded["tgt_se"] == selected_target
     assert voice_profile["embedding_path"].endswith(f"vp_selected_{reference_hash[:16]}.pth")
     assert voice_profile["provider_metadata"]["reference_audio_sha256"] == reference_hash
+    assert voice_profile["provider_metadata"]["base_speaker"] == "en-default"
+    assert result["controls_applied"] == {"speaking_rate": 0.9}
 
 
 def test_openvoice_synthesize_line_fails_when_source_embedding_missing(monkeypatch, tmp_path: Path):
@@ -1758,12 +1974,15 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
         ]
 
     def fake_run(command, check, capture_output, text):
-        composite_audio_path = Path(command[-1])
-        concat_list_path = composite_audio_path.parent / "dialogue_segments.txt"
-        captured["concat_list"] = concat_list_path.read_text(encoding="utf-8")
-        captured["command"] = " ".join(command)
-        captured["composite_audio_path"] = command[-1]
-        _write_wav(composite_audio_path, seconds=1.8)
+        output_audio_path = Path(command[-1])
+        if "-filter_complex" in command:
+            concat_list_path = output_audio_path.parent / "dialogue_segments.txt"
+            captured["concat_list"] = concat_list_path.read_text(encoding="utf-8")
+            captured["command"] = " ".join(command)
+            captured["composite_audio_path"] = command[-1]
+        else:
+            captured["final_video_audio_path"] = command[-1]
+        _write_wav(output_audio_path, seconds=1.8)
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     class FakeVideoClip:
@@ -1879,6 +2098,8 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
     tts_result = result["metadata"]["tts_result"]
     assert tts_result["assembly"]["composite_audio_path"] == captured["composite_audio_path"]
     assert tts_result["assembly"]["final_mp4_path"] == captured["final_mp4_path"]
+    assert tts_result["assembly"]["final_video_audio_path"] == captured["final_video_audio_path"]
+    assert tts_result["assembly"]["final_video_audio_artifact_url"].endswith("/audio/final_video_audio.wav")
     assert tts_result["segments"][0]["audio_path"] == str(host_segment)
     assert tts_result["segments"][0]["audio_path_used_for_final_assembly"] == str(host_segment)
     assert tts_result["segments"][0]["provider_used"] == "openvoice"
@@ -1910,7 +2131,27 @@ def test_render_segment_metadata_exposes_safe_artifact_url():
             "speakers": {
                 "Host": {
                     "character_display_name": "Host",
-                    "voice_profile": {"display_name": "Host"},
+                    "voice_profile": {
+                        "display_name": "Host",
+                        "provider": "openvoice",
+                        "embedding_path": "voice_lab/embeddings/vp_host_hash.pth",
+                        "style": {"base_speaker": "EN-US", "style_preset": "default"},
+                        "controls": {"speaking_rate": 0.95, "emotion": "warm"},
+                        "provider_metadata": {
+                            "reference_audio_sha256": "processed-reference-hash",
+                            "target_embedding_hash": "embedding-hash",
+                            "reference_validation_status": "warning",
+                        },
+                        "reference_audios": [
+                            {
+                                "id": 7,
+                                "original_storage_path": "original.mp3",
+                                "processed_storage_path": "processed_reference.wav",
+                                "processed_sha256": "processed-sha",
+                                "validation_status": "warning",
+                            }
+                        ],
+                    },
                 }
             }
         },
@@ -1924,6 +2165,10 @@ def test_render_segment_metadata_exposes_safe_artifact_url():
     assert metadata["fallback_used"] is False
     assert metadata["local_file_path"] == str(segment_path)
     assert metadata["artifact_url"] == "/generation-jobs/88/artifacts/segments/000_host.wav"
+    assert metadata["voice_profile_settings"]["embedding_path"] == "voice_lab/embeddings/vp_host_hash.pth"
+    assert metadata["voice_profile_settings"]["reference_audio_sha256"] == "processed-reference-hash"
+    assert metadata["voice_profile_settings"]["base_speaker"] == "EN-US"
+    assert metadata["reference_artifacts"][0]["processed_storage_path"] == "processed_reference.wav"
 
 
 def test_render_config_caps_preview_fps_for_large_backgrounds():

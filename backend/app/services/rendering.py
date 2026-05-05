@@ -226,6 +226,11 @@ class ProjectRenderService:
                 logger=None,
             )
             self._emit_progress(progress_callback, "encoded", 88)
+            final_video_audio_path = self._extract_final_video_audio(
+                final_mp4_path=output_path,
+                job_id=job_id,
+                work_dir=work_dir,
+            )
 
             segment_metadata = [
                 self._segment_artifact_metadata(
@@ -244,6 +249,7 @@ class ProjectRenderService:
                 segment_metadata=segment_metadata,
                 composite_audio_path=composite_audio_path,
                 final_mp4_path=output_path,
+                final_video_audio_path=final_video_audio_path,
             )
             tts_result = {
                 "status": "completed",
@@ -316,6 +322,20 @@ class ProjectRenderService:
         audio_path = Path(segment.audio_path)
         manifest_entry = dict(((voice_manifest or {}).get("speakers") or {}).get(segment.speaker) or {})
         voice_profile = dict(manifest_entry.get("voice_profile") or {})
+        provider_metadata = dict(voice_profile.get("provider_metadata") or {})
+        reference_artifacts = []
+        for reference in voice_profile.get("reference_audios") or []:
+            if not isinstance(reference, dict):
+                continue
+            reference_artifacts.append(
+                {
+                    "id": reference.get("id"),
+                    "original_storage_path": reference.get("original_storage_path"),
+                    "processed_storage_path": reference.get("processed_storage_path") or reference.get("storage_path"),
+                    "processed_sha256": reference.get("processed_sha256"),
+                    "validation_status": reference.get("validation_status"),
+                }
+            )
         final_audio_path = audio_path_used_for_final_assembly or str(audio_path)
         payload = {
             "segment_index": index,
@@ -336,6 +356,18 @@ class ProjectRenderService:
             "artifact_url": generated_job_artifact_url(job_id, audio_path) if job_id is not None else None,
             "duration_seconds": item["duration_seconds"],
             "reference_audio_count": segment.reference_audio_count,
+            "voice_profile_settings": {
+                "provider": voice_profile.get("provider"),
+                "base_speaker": voice_profile.get("base_speaker") or dict(voice_profile.get("style") or {}).get("base_speaker"),
+                "style_preset": dict(voice_profile.get("style") or {}).get("style_preset"),
+                "controls": dict(voice_profile.get("controls") or {}),
+                "style": dict(voice_profile.get("style") or {}),
+                "embedding_path": voice_profile.get("embedding_path") or provider_metadata.get("embedding_artifact_path"),
+                "reference_audio_sha256": provider_metadata.get("reference_audio_sha256"),
+                "target_embedding_hash": provider_metadata.get("target_embedding_hash"),
+                "reference_validation_status": provider_metadata.get("reference_validation_status"),
+            },
+            "reference_artifacts": reference_artifacts,
         }
         return payload
 
@@ -518,6 +550,7 @@ class ProjectRenderService:
         segment_metadata: list[dict],
         composite_audio_path: Path,
         final_mp4_path: Path,
+        final_video_audio_path: Path | None = None,
     ) -> dict:
         return {
             "job_id": job_id,
@@ -527,6 +560,12 @@ class ProjectRenderService:
                 generated_job_artifact_url(job_id, composite_audio_path) if job_id is not None else None
             ),
             "final_mp4_path": str(final_mp4_path),
+            "final_video_audio_path": str(final_video_audio_path) if final_video_audio_path else None,
+            "final_video_audio_artifact_url": (
+                generated_job_artifact_url(job_id, final_video_audio_path)
+                if job_id is not None and final_video_audio_path is not None
+                else None
+            ),
             "segments": [
                 {
                     "segment_index": metadata["segment_index"],
@@ -541,6 +580,35 @@ class ProjectRenderService:
                 for metadata, item in zip(segment_metadata, timed_segments, strict=False)
             ],
         }
+
+    def _extract_final_video_audio(self, *, final_mp4_path: Path, job_id: int | None, work_dir: Path) -> Path | None:
+        audio_dir = generated_job_artifact_dir(job_id) / "audio" if job_id is not None else work_dir / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        output_path = audio_dir / "final_video_audio.wav"
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(final_mp4_path),
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(self.audio_export_fps),
+            "-ac",
+            "2",
+            str(output_path),
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            logger.warning(
+                "Could not extract final MP4 audio for comparison final_mp4_path=%s error=%s",
+                final_mp4_path,
+                exc,
+            )
+            return None
+        return output_path if output_path.exists() else None
 
     def _render_config(self, background_clip, output_kind: str) -> dict[str, int | str]:
         source_fps = float(getattr(background_clip, "fps", 24) or 24)

@@ -412,17 +412,27 @@ class OpenVoiceProvider(BaseTTSProvider):
         }
         return mapping.get((language or "en").lower(), "EN")
 
-    def _melo_speaker_id(self, model: Any, language_code: str) -> Any:
+    def _melo_speaker_id(self, model: Any, language_code: str, voice_profile: dict[str, Any] | None = None) -> tuple[str, Any]:
         speaker_map = dict(getattr(getattr(model, "hps", None), "data", None).spk2id)
+        style = dict((voice_profile or {}).get("style") or {})
+        requested_base_speaker = str(
+            (voice_profile or {}).get("base_speaker")
+            or style.get("base_speaker")
+            or ""
+        ).strip()
         preferred = [
+            requested_base_speaker,
+            requested_base_speaker.upper().replace("-", "_") if requested_base_speaker else None,
+            requested_base_speaker.replace("_", "-") if requested_base_speaker else None,
             f"{language_code}-Default",
             f"{language_code}_DEFAULT",
             next(iter(speaker_map.keys()), None),
         ]
         for key in preferred:
             if key in speaker_map:
-                return speaker_map[key]
-        return next(iter(speaker_map.values()))
+                return key, speaker_map[key]
+        first_key = next(iter(speaker_map.keys()))
+        return first_key, speaker_map[first_key]
 
     def _memory_mb(self) -> float:
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -494,14 +504,15 @@ class OpenVoiceProvider(BaseTTSProvider):
         processed_reference_ids = {int(item) for item in metadata.get("processed_reference_audio_ids") or [] if str(item).isdigit()}
         fallback_paths = []
         for item in voice_profile.get("reference_audios") or []:
-            if not item.get("storage_path"):
+            reference_path = item.get("processed_storage_path") or item.get("storage_path")
+            if not reference_path:
                 continue
             try:
                 reference_id = int(item.get("id") or 0)
             except (TypeError, ValueError):
                 reference_id = 0
             if reference_id not in processed_reference_ids:
-                fallback_paths.append(Path(item["storage_path"]))
+                fallback_paths.append(Path(str(reference_path)))
         return processed_paths + fallback_paths if processed_paths else fallback_paths
 
     def _embedding_artifact_path(self, voice_profile: dict[str, Any], reference_hash: str) -> Path:
@@ -761,6 +772,7 @@ class OpenVoiceProvider(BaseTTSProvider):
                 "target_embedding_hash": target_embedding_hash,
                 "active_reference_count": len(reference_paths),
                 "reference_audio_mode": "average_all_clips" if len(reference_paths) > 1 else "single_clip",
+                "base_speaker": (voice_profile.get("base_speaker") or dict(voice_profile.get("style") or {}).get("base_speaker")),
             },
         }
 
@@ -803,7 +815,6 @@ class OpenVoiceProvider(BaseTTSProvider):
         device = health["metadata"].get("device") or "cpu"
         checkpoints_dir = Path(settings.OPENVOICE_CHECKPOINTS_DIR)
         converter_dir = checkpoints_dir / "converter"
-        base_speaker_path = checkpoints_dir / "base_speakers" / "ses" / f"{language_code.lower()}-default.pth"
         if not converter_dir.exists():
             raise TTSProviderError(
                 code="openvoice_models_missing",
@@ -811,19 +822,23 @@ class OpenVoiceProvider(BaseTTSProvider):
                 provider_state={self.provider_name: self.healthcheck()},
                 suggested_action="Install OpenVoice checkpoints or preview with espeak.",
             )
-        if not base_speaker_path.exists():
-            raise TTSProviderError(
-                code="openvoice_source_embedding_missing",
-                message=f"OpenVoice source speaker embedding is missing: {base_speaker_path}",
-                provider_state={self.provider_name: self.healthcheck()},
-                suggested_action="Install the OpenVoice base speaker embeddings before generating cloned previews.",
-            )
+        style = dict(voice_profile.get("style") or {})
+        requested_base_speaker = str(voice_profile.get("base_speaker") or style.get("base_speaker") or "").strip()
+        if not requested_base_speaker:
+            default_source_path = checkpoints_dir / "base_speakers" / "ses" / f"{language_code.lower()}-default.pth"
+            if not default_source_path.exists():
+                raise TTSProviderError(
+                    code="openvoice_source_embedding_missing",
+                    message=f"OpenVoice source speaker embedding is missing: {default_source_path}",
+                    provider_state={self.provider_name: self.healthcheck()},
+                    suggested_action="Install the OpenVoice base speaker embeddings before generating cloned previews.",
+                )
 
         temp_src_path = output_path.with_name(f"{output_path.stem}_src.wav")
         stage_callback = options.get("stage_callback")
         try:
             model = self._get_melo_model(language_code, device, TTS)
-            speaker_id = self._melo_speaker_id(model, language_code)
+            speaker_key, speaker_id = self._melo_speaker_id(model, language_code, voice_profile)
             controls = dict(voice_profile.get("controls") or {})
             unsupported_controls = {
                 key: value
@@ -851,7 +866,16 @@ class OpenVoiceProvider(BaseTTSProvider):
                 stage_callback("extracting_reference", 55)
             target_se = self._get_target_embedding(reference_paths, converter, se_extractor, device, torch, artifact_path=artifact_path)
             voice_profile["embedding_path"] = str(artifact_path)
-            source_se = self._get_source_embedding(base_speaker_path, device, torch)
+            source_speaker_key = speaker_key.lower().replace("_", "-")
+            source_speaker_path = checkpoints_dir / "base_speakers" / "ses" / f"{source_speaker_key}.pth"
+            if not source_speaker_path.exists():
+                raise TTSProviderError(
+                    code="openvoice_source_embedding_missing",
+                    message=f"OpenVoice source speaker embedding is missing: {source_speaker_path}",
+                    provider_state={self.provider_name: self.healthcheck()},
+                    suggested_action="Install the OpenVoice base speaker embeddings before generating cloned previews.",
+                )
+            source_se = self._get_source_embedding(source_speaker_path, device, torch)
             if callable(stage_callback):
                 stage_callback("converting", 70)
             target_embedding_hash = self._embedding_fingerprint(target_se)
@@ -864,6 +888,7 @@ class OpenVoiceProvider(BaseTTSProvider):
                 "target_embedding_hash": target_embedding_hash,
                 "active_reference_count": len(reference_paths),
                 "reference_audio_mode": "average_all_clips" if len(reference_paths) > 1 else "single_clip",
+                "base_speaker": source_speaker_key,
                 "last_preview_source_audio_path": str(temp_src_path),
                 "last_preview_output_path": str(output_path),
                 "openvoice_conversion_applied": True,
@@ -876,6 +901,7 @@ class OpenVoiceProvider(BaseTTSProvider):
                     "reference_audio_sha256": reference_hash,
                     "target_embedding_path": str(artifact_path),
                     "target_embedding_hash": target_embedding_hash,
+                    "base_speaker": source_speaker_key,
                     "source_audio_path": str(temp_src_path),
                     "converted_output_path": str(output_path),
                     "openvoice_conversion_applied": True,
@@ -1022,10 +1048,24 @@ class TTSOrchestrator:
         return attempts
 
     def _voice_cache_key(self, provider_name: str, text: str, voice_profile: dict[str, Any], provider: BaseTTSProvider) -> str:
+        provider_metadata = dict(voice_profile.get("provider_metadata") or {})
         reference_hash = hashlib.sha256(
-            "|".join(sorted(str(item.get("sha256") or item.get("storage_path") or "") for item in voice_profile.get("reference_audios") or [])).encode("utf-8")
+            "|".join(
+                sorted(
+                    str(
+                        item.get("processed_sha256")
+                        or item.get("sha256")
+                        or item.get("processed_storage_path")
+                        or item.get("storage_path")
+                        or ""
+                    )
+                    for item in voice_profile.get("reference_audios") or []
+                )
+            ).encode("utf-8")
         ).hexdigest()
+        reference_hash = str(provider_metadata.get("reference_audio_sha256") or reference_hash)
         controls = dict(voice_profile.get("controls") or {})
+        style = dict(voice_profile.get("style") or {})
         fallback_settings = dict(voice_profile.get("fallback_voice_settings") or {})
         supported_control_names = tuple(getattr(provider, "supported_control_names", ()) or ())
         if provider_name == "openvoice":
@@ -1033,6 +1073,10 @@ class TTSOrchestrator:
                 "controls": {key: controls.get(key) for key in supported_control_names if controls.get(key) is not None},
                 "language": voice_profile.get("language"),
                 "model_id": voice_profile.get("model_id"),
+                "base_speaker": voice_profile.get("base_speaker") or style.get("base_speaker"),
+                "style_preset": style.get("style_preset"),
+                "embedding_path": voice_profile.get("embedding_path") or provider_metadata.get("embedding_artifact_path"),
+                "target_embedding_hash": provider_metadata.get("target_embedding_hash"),
             }
         else:
             cache_settings = {
@@ -1408,14 +1452,20 @@ class LocalSpeechService:
                         {
                             "id": item.id,
                             "storage_path": item.storage_path,
+                            "original_storage_path": item.original_storage_path,
+                            "processed_storage_path": item.processed_storage_path or item.storage_path,
                             "sha256": item.sha256,
+                            "processed_sha256": item.processed_sha256,
                             "mime_type": item.mime_type,
+                            "validation_status": item.validation_status,
+                            "validation": dict(item.validation_json or {}),
                         }
                         for item in profile.reference_audios
                     ],
                     "language": profile.language,
                     "model_id": profile.model_id,
                     "embedding_path": profile.embedding_path,
+                    "provider_metadata": dict(profile.provider_metadata_json or {}),
                 }
         default_voice = settings.TTS_ESPEAK_VOICE_SLOT_1 if slot_index % 2 == 0 else settings.TTS_ESPEAK_VOICE_SLOT_2
         return self._ephemeral_profile(

@@ -1,6 +1,6 @@
 # Omniposter Architecture Decisions
 
-Last updated: 2026-05-02
+Last updated: 2026-05-05
 
 This file records architectural decisions that future Codex agents should not reverse casually.
 
@@ -237,3 +237,34 @@ Final video assembly must use these persisted segment WAV files rather than a se
 - Generated artifact storage.
 - Job artifact serving routes.
 - Job Monitor UI.
+
+## ADR-008: Treat Voice Reference Processing As Durable Profile State
+
+Status: Accepted
+Date: 2026-05-05
+
+### Context
+
+OpenVoice reference audio primarily provides tone color. Debugging voice quality requires knowing which original upload, processed reference WAV, embedding artifact, profile settings, preview WAV, render segment WAV, composite WAV, and final video audio were used.
+
+### Decision
+
+Voice profiles persist reference processing and validation state:
+
+- Original reference uploads and processed mono 16 kHz WAVs are stored as profile-scoped Voice Lab artifacts.
+- Validation status, validation metrics, and warning metadata are stored on each reference audio row.
+- OpenVoice embeddings are derived from processed reference artifacts and persisted under Voice Lab embedding storage.
+- Render job metadata records the profile settings, processed references, embedding identifiers, segment WAVs, dialogue composite WAV, and extracted final-video audio used for assembly.
+
+### Consequences
+
+- Voice Lab previews and render jobs can be compared against the same persisted profile state.
+- Unsupported provider style controls must be reported and ignored safely.
+- Reference artifact routes must remain scoped to the owning/editable voice profile.
+
+### Files/Areas Affected
+
+- Voice profile models, schemas, services, and routes.
+- TTS/OpenVoice provider integration.
+- Render metadata and generated job artifact storage.
+- Voice Lab and Project Editor comparison UI.
