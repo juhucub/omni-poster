@@ -358,6 +358,11 @@ class ProjectRenderService:
             "reference_audio_count": segment.reference_audio_count,
             "voice_profile_settings": {
                 "provider": voice_profile.get("provider"),
+                "model_checkpoint_path": voice_profile.get("model_checkpoint_path"),
+                "reference_dataset_id": voice_profile.get("reference_dataset_id"),
+                "selected_recipe": dict(segment.recipe_used or voice_profile.get("selected_recipe") or {}),
+                "calibration_score": voice_profile.get("calibration_score"),
+                "last_verified_render_job_id": voice_profile.get("last_verified_render_job_id"),
                 "base_speaker": voice_profile.get("base_speaker") or dict(voice_profile.get("style") or {}).get("base_speaker"),
                 "style_preset": dict(voice_profile.get("style") or {}).get("style_preset"),
                 "controls": dict(voice_profile.get("controls") or {}),
@@ -368,6 +373,11 @@ class ProjectRenderService:
                 "reference_validation_status": provider_metadata.get("reference_validation_status"),
             },
             "reference_artifacts": reference_artifacts,
+            "selected_recipe": dict(segment.recipe_used or voice_profile.get("selected_recipe") or {}),
+            "recipe_used": dict(segment.recipe_used or voice_profile.get("selected_recipe") or {}),
+            "golden_preview_wav": segment.golden_preview_wav,
+            "model_checkpoint_path": voice_profile.get("model_checkpoint_path"),
+            "reference_dataset_id": voice_profile.get("reference_dataset_id"),
         }
         return payload
 

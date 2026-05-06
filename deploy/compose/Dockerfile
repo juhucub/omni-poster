@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt requirements.txt
 RUN pip install -r requirements.txt
 
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
+RUN pip install --force-reinstall --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.8.0" "torchaudio==2.8.0"
 RUN pip install git+https://github.com/myshell-ai/MeloTTS.git
 RUN python - <<'PY'
 import torch
@@ -68,6 +68,14 @@ RUN pip install --upgrade "Cython<3" wheel "setuptools>=77"
 
 COPY vendor/OpenVoice /opt/openvoice/repo
 RUN pip install --no-build-isolation -e /opt/openvoice/repo
+
+# Melo/OpenVoice dependency resolution downgrades transformers after the
+# backend requirements install. Re-apply only the XTTS import-critical packages
+# without re-resolving Coqui's full graph, which would disturb OpenVoice pins.
+RUN pip install --upgrade --no-deps "tokenizers==0.22.2" "transformers==4.57.6"
+RUN pip uninstall -y torchcodec && \
+    pip install --force-reinstall --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.8.0" "torchaudio==2.8.0" && \
+    pip install --upgrade --no-deps "setuptools==80.9.0"
 
 COPY backend/alembic.ini ./alembic.ini
 COPY backend/alembic ./alembic

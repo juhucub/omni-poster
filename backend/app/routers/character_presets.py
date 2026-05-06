@@ -15,18 +15,25 @@ from app.schemas import (
     OkResponse,
     ProviderCapabilityListResponse,
     TTSFailureResponse,
+    VoiceCalibrationBatchRequest,
+    VoiceCalibrationBatchSummary,
     VoiceCalibrationMatrixRequest,
     VoiceCalibrationMatrixResponse,
     VoiceCalibrationRecipeSaveRequest,
     VoiceLabPreviewRequest,
     VoiceLabPreviewResponse,
+    VoiceModelAttachRequest,
     VoiceProfileListResponse,
     VoiceProfilePrepareResponse,
     VoiceProfileRequest,
     VoiceProfileSummary,
+    VoiceReferenceDatasetClipUploadResponse,
+    VoiceReferenceDatasetCreateRequest,
+    VoiceReferenceDatasetResponse,
     VoiceReferenceAudioUploadResponse,
 )
 from app.services.tts import TTSOrchestrator, TTSProviderError, apply_voice_lab_overrides
+from app.services.character_voice_recipes import CharacterVoiceRecipeError, validate_selected_character_recipe
 from app.services.voice_preview_jobs import (
     create_voice_preview_job,
     get_voice_preview_job,
@@ -50,6 +57,16 @@ from app.services.voice_profiles import (
     upsert_character_preset,
     upsert_voice_profile,
     voice_lab_preview_dir,
+)
+from app.services.voice_replication import (
+    analyze_voice_reference_dataset,
+    attach_character_voice_model,
+    create_calibration_batch,
+    create_reference_dataset,
+    save_best_calibration_recipe,
+    serialize_calibration_batch,
+    upload_reference_dataset_clip,
+    verify_character_voice_render,
 )
 from app.tasks.voice_preview import process_voice_lab_preview
 
@@ -220,6 +237,103 @@ def upload_reference_audio(
     )
 
 
+@router.post(
+    "/voice-profiles/{voice_profile_id}/reference-datasets",
+    response_model=VoiceReferenceDatasetResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_voice_reference_dataset(
+    voice_profile_id: str,
+    payload: VoiceReferenceDatasetCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    voice_profile, dataset = create_reference_dataset(
+        voice_profile_id=voice_profile_id,
+        display_name=payload.display_name,
+        character_slug=payload.character_slug,
+        current_user_id=current_user.id,
+        db=db,
+    )
+    return VoiceReferenceDatasetResponse(
+        voice_profile=VoiceProfileSummary(**voice_profile),
+        dataset=dataset,
+    )
+
+
+@router.post(
+    "/voice-profiles/{voice_profile_id}/reference-datasets/{reference_dataset_id}/clips",
+    response_model=VoiceReferenceDatasetClipUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_voice_reference_dataset_clip(
+    voice_profile_id: str,
+    reference_dataset_id: int,
+    authorization_confirmed: bool = Form(...),
+    authorization_note: str | None = Form(default=None),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    voice_profile, dataset, reference_audio = upload_reference_dataset_clip(
+        voice_profile_id=voice_profile_id,
+        reference_dataset_id=reference_dataset_id,
+        file=file,
+        current_user_id=current_user.id,
+        authorization_confirmed=authorization_confirmed,
+        authorization_note=authorization_note,
+        db=db,
+    )
+    return VoiceReferenceDatasetClipUploadResponse(
+        voice_profile=VoiceProfileSummary(**voice_profile),
+        dataset=dataset,
+        reference_audio=reference_audio,
+    )
+
+
+@router.post(
+    "/voice-profiles/{voice_profile_id}/reference-datasets/{reference_dataset_id}/analyze",
+    response_model=VoiceReferenceDatasetResponse,
+)
+def analyze_voice_reference_dataset_route(
+    voice_profile_id: str,
+    reference_dataset_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    voice_profile, dataset = analyze_voice_reference_dataset(
+        voice_profile_id=voice_profile_id,
+        reference_dataset_id=reference_dataset_id,
+        current_user_id=current_user.id,
+        db=db,
+    )
+    return VoiceReferenceDatasetResponse(
+        voice_profile=VoiceProfileSummary(**voice_profile),
+        dataset=dataset,
+    )
+
+
+@router.post("/voice-profiles/{voice_profile_id}/models/attach", response_model=VoiceProfileSummary)
+def attach_voice_character_model(
+    voice_profile_id: str,
+    payload: VoiceModelAttachRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    profile = attach_character_voice_model(
+        voice_profile_id=voice_profile_id,
+        provider=payload.provider,
+        character_slug=payload.character_slug,
+        model_checkpoint_path=payload.model_checkpoint_path,
+        model_index_path=payload.model_index_path,
+        reference_dataset_id=payload.reference_dataset_id,
+        recipe=payload.recipe,
+        current_user_id=current_user.id,
+        db=db,
+    )
+    return VoiceProfileSummary(**profile)
+
+
 @router.get("/voice-profiles/{voice_profile_id}/reference-audio/{reference_audio_id}/{artifact_kind}")
 def get_voice_reference_audio_artifact(
     voice_profile_id: str,
@@ -294,6 +408,20 @@ def get_tts_provider_capabilities(current_user: User = Depends(get_current_user)
     _ = current_user
     orchestrator = TTSOrchestrator()
     return ProviderCapabilityListResponse(items=orchestrator.provider_capabilities())
+
+
+@router.get("/voice-models/{character_slug}/golden-preview")
+def get_character_golden_preview(character_slug: str, current_user: User = Depends(get_current_user)):
+    _ = current_user
+    try:
+        recipe = validate_selected_character_recipe(character_slug)
+    except CharacterVoiceRecipeError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.as_dict()) from exc
+    return FileResponse(
+        recipe.golden_preview_wav,
+        media_type="audio/wav",
+        filename=recipe.golden_preview_wav.name,
+    )
 
 
 @router.post(
@@ -533,13 +661,63 @@ def save_voice_profile_calibration_recipe(
     if not profile_model:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice profile not found.")
     ensure_voice_profile_editable(profile_model, current_user.id)
-    profile_model = update_voice_profile_calibration_recipe(
-        profile_model,
-        recipe=payload.recipe.model_dump(),
+    profile = save_best_calibration_recipe(
+        voice_profile_id=profile_model.id,
+        recipe=dict(payload.recipe or {}),
+        current_user_id=current_user.id,
         db=db,
     )
-    profile = get_voice_profile(profile_model.id, db)
     return VoiceProfileSummary(**profile)
+
+
+@router.post("/voice-lab/calibration-batches", response_model=VoiceCalibrationBatchSummary, status_code=status.HTTP_201_CREATED)
+def create_voice_calibration_batch(
+    payload: VoiceCalibrationBatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    batch = create_calibration_batch(
+        voice_profile_id=payload.voice_profile_id,
+        reference_dataset_id=payload.reference_dataset_id,
+        calibration_script=payload.calibration_script,
+        candidates=payload.candidates,
+        current_user_id=current_user.id,
+        db=db,
+    )
+    return VoiceCalibrationBatchSummary(**batch)
+
+
+@router.get("/voice-lab/calibration-batches/{batch_id}", response_model=VoiceCalibrationBatchSummary)
+def get_voice_calibration_batch(
+    batch_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.models import VoiceCalibrationBatch
+
+    batch = (
+        db.query(VoiceCalibrationBatch)
+        .filter(VoiceCalibrationBatch.id == batch_id, VoiceCalibrationBatch.created_by_user_id == current_user.id)
+        .one_or_none()
+    )
+    if not batch:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice calibration batch not found.")
+    return VoiceCalibrationBatchSummary(**serialize_calibration_batch(batch))
+
+
+@router.post("/voice-profiles/{voice_profile_id}/verify-render/{generation_job_id}")
+def verify_voice_profile_render(
+    voice_profile_id: str,
+    generation_job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return verify_character_voice_render(
+        voice_profile_id=voice_profile_id,
+        generation_job_id=generation_job_id,
+        current_user_id=current_user.id,
+        db=db,
+    )
 
 
 @router.get("/voice-lab/preview-jobs/{job_id}", response_model=VoiceLabPreviewResponse)

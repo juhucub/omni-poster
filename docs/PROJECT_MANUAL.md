@@ -6,7 +6,7 @@ Last updated: 2026-05-01
 
 Omniposter is a creator workflow tool for generating repeatable video content from reusable assets.
 
-It should support script-to-video generation, reusable characters, reusable backgrounds, accurate dialogue-driven speaker overlays, TTS generation with a Docker-safe local fallback, clone-capable reference-based voice profiles, preview/export workflows, metadata preparation, job tracking, and future publishing integrations.
+It should support script-to-video generation, reusable characters, reusable backgrounds, accurate dialogue-driven speaker overlays, TTS generation with a Docker-safe local fallback, clone-capable reference-based voice profiles, licensed character voice replication, preview/export workflows, metadata preparation, job tracking, and future publishing integrations.
 
 The product should become a system creators can use repeatedly, not a one-off renderer.
 
@@ -18,6 +18,7 @@ Omniposter should support:
 - Dialogue-based accurate character speaker overlays.
 - TTS generation with a reliable local fallback.
 - Clone-capable and reference-based voice profiles.
+- Licensed character voice replication from curated per-character datasets, attached trained models, calibration scoring, and render-path verification.
 - Background preset management.
 - Upload metadata preparation.
 - Job tracking and preview generation.
@@ -96,7 +97,7 @@ A reusable visual speaker identity. Character assets should not be loaded from b
 
 ### Voice Profile
 
-A reusable voice configuration. A voice profile may use local fallback TTS, OpenVoice V2, or a future provider.
+A reusable voice configuration. A voice profile may use local fallback TTS, OpenVoice V2, XTTS-style multi-reference cloning, RVC-style voice conversion, or a future provider. Character replication profiles should keep reference datasets, attached model/checkpoint paths, selected recipes, calibration scores, and render verification metadata separate from generic fallback voice settings.
 
 ### Background Preset
 
@@ -153,9 +154,12 @@ Required provider tiers:
 
 1. Docker-safe local fallback provider.
 2. OpenVoice V2 provider when configured and available.
-3. Future providers can be added without rewriting the video generation pipeline.
+3. XTTS and RVC-style character voice providers when configured and available.
+4. Future providers can be added without rewriting the video generation pipeline.
 
 The app must not assume OpenVoice is installed or available. It should detect availability and expose status through health checks.
+
+OpenVoice should be treated as an optional tone-color conversion layer for character replication, not as the whole near-identical voice stack. Licensed character voice replication should use curated reference datasets, prosody analysis, calibration scoring, attached trained models, and strict render-path verification.
 
 ### Rendering
 
@@ -177,7 +181,7 @@ The MVP does not need to provide:
 - Production cloud storage.
 - Production user billing.
 - Enterprise-scale queue orchestration.
-- Perfect voice cloning quality.
+- In-app full XTTS/RVC training orchestration. The MVP may attach externally trained character model artifacts before adding full training jobs.
 - Full video editor functionality.
 - Complex timeline editing UI.
 

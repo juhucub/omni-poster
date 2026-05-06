@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     VOICE_LAB_MIN_REFERENCE_CHUNK_SECONDS: float = 2.0
     VOICE_LAB_REFERENCE_SILENCE_THRESHOLD_DB: str = "-40dB"
     VOICE_LAB_REFERENCE_SILENCE_MIN_SECONDS: float = 0.35
+    VOICE_MODELS_DIR: str = "backend/storage/voice_models"
+    XTTS_ENABLED: bool = False
+    XTTS_MODEL_DIR: str = ""
+    XTTS_DEVICE: str = "auto"
+    RVC_ENABLED: bool = False
+    RVC_MODELS_DIR: str = ""
+    RVC_RMVPE_PATH: str = ""
+    RVC_INFER_COMMAND: str = ""
 
     YOUTUBE_CLIENT_ID: str | None = None
     YOUTUBE_CLIENT_SECRET: str | None = None

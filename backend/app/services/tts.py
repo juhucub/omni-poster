@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import importlib.util
 import logging
 import os
 import re
 import resource
+import shlex
 import shutil
 import subprocess
 import sys
@@ -19,6 +21,7 @@ from typing import Any
 import numpy as np
 
 from app.core.config import settings
+from app.services.character_voice_recipes import CharacterVoiceRecipeError, validate_selected_character_recipe
 from app.services.voice_profiles import (
     get_character_preset_model,
     reference_audio_content_hash_from_paths,
@@ -135,6 +138,8 @@ class SpeechSegment:
     provider_state: dict[str, Any] | None = None
     provider_failures: dict[str, Any] | None = None
     fallback_reason: str | None = None
+    recipe_used: dict[str, Any] | None = None
+    golden_preview_wav: str | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +156,8 @@ class SynthesisResult:
     voice_profile_id: str
     provider_failures: dict[str, Any] | None = None
     fallback_reason: str | None = None
+    recipe_used: dict[str, Any] | None = None
+    golden_preview_wav: str | None = None
 
 
 class BaseTTSProvider:
@@ -951,11 +958,327 @@ class OpenVoiceProvider(BaseTTSProvider):
         }
 
 
+class XTTSProvider(BaseTTSProvider):
+    provider_name = "xtts"
+    clone_capable = True
+    prepare_capable = False
+    supported_control_names = ("speaking_rate",)
+
+    def healthcheck(self) -> dict[str, Any]:
+        if not settings.XTTS_ENABLED:
+            return {"available": False, "reason": "disabled", "metadata": {}}
+        model_dir = Path(settings.XTTS_MODEL_DIR) if settings.XTTS_MODEL_DIR else None
+        if model_dir and not model_dir.exists():
+            return {"available": False, "reason": "missing_model_dir", "metadata": {"model_dir": settings.XTTS_MODEL_DIR}}
+        if importlib.util.find_spec("TTS") is None:
+            return {"available": False, "reason": "package_missing", "metadata": {"model_dir": str(model_dir) if model_dir else None}}
+        return {
+            "available": True,
+            "reason": None,
+            "metadata": {"model_dir": str(model_dir) if model_dir else None, "device": settings.XTTS_DEVICE},
+        }
+
+    def _reference_audio_paths(self, voice_profile: dict[str, Any]) -> list[str]:
+        metadata = dict(voice_profile.get("provider_metadata") or {})
+        paths = [str(path) for path in metadata.get("processed_reference_paths") or [] if path]
+        for item in voice_profile.get("reference_audios") or []:
+            path = item.get("processed_storage_path") or item.get("storage_path")
+            if path and path not in paths:
+                paths.append(str(path))
+        return [path for path in paths if Path(path).exists()]
+
+    def synthesize_line(
+        self,
+        text: str,
+        voice_profile: dict[str, Any],
+        output_path: Path,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        health = self.healthcheck()
+        if not health["available"]:
+            raise TTSProviderError(
+                code=f"xtts_{health.get('reason') or 'not_available'}",
+                message="XTTS is selected but unavailable in this environment.",
+                provider_state={self.provider_name: health},
+                suggested_action="Configure XTTS_MODEL_DIR and install Coqui TTS, or choose another provider.",
+            )
+        selected_character_recipe = self._selected_character_recipe(voice_profile)
+        if selected_character_recipe is not None:
+            return self._synthesize_selected_character_recipe(
+                text=text,
+                voice_profile=voice_profile,
+                output_path=output_path,
+                health=health,
+                selected_recipe=selected_character_recipe,
+            )
+
+        model_checkpoint = Path(str(voice_profile.get("model_checkpoint_path") or settings.XTTS_MODEL_DIR))
+        if not model_checkpoint.exists():
+            raise TTSProviderError(
+                code="xtts_model_missing",
+                message=f"XTTS model/checkpoint path is missing: {model_checkpoint}",
+                provider_state={self.provider_name: health},
+                suggested_action="Attach a trained XTTS model path before rendering this character profile.",
+            )
+        references = self._reference_audio_paths(voice_profile)
+        if not references:
+            raise TTSProviderError(
+                code="xtts_reference_audio_missing",
+                message="XTTS requires at least one processed reference WAV for multi-reference cloning.",
+                provider_state={self.provider_name: health},
+                suggested_action="Upload and analyze a character reference dataset first.",
+            )
+        try:
+            from TTS.api import TTS as CoquiTTS  # type: ignore
+        except Exception as exc:
+            raise TTSProviderError(
+                code="xtts_package_missing",
+                message="Coqui TTS runtime is not importable.",
+                provider_state={self.provider_name: health},
+                suggested_action="Install Coqui TTS in the runtime image.",
+            ) from exc
+        try:
+            device = "cpu" if settings.XTTS_DEVICE in {"", "auto"} else settings.XTTS_DEVICE
+            model = CoquiTTS(model_path=str(model_checkpoint), config_path=None).to(device)
+            model.tts_to_file(
+                text=text,
+                speaker_wav=references,
+                language=str(voice_profile.get("language") or "en"),
+                file_path=str(output_path),
+            )
+        except Exception as exc:
+            raise TTSProviderError(
+                code="xtts_synthesis_failed",
+                message=f"XTTS synthesis failed: {exc}",
+                provider_state={self.provider_name: health},
+                suggested_action="Check the XTTS checkpoint, references, and runtime logs.",
+            ) from exc
+        duration_seconds = _audio_stats(output_path)["duration_seconds"]
+        return {
+            "audio_path": str(output_path),
+            "voice": str(voice_profile.get("display_name") or "xtts"),
+            "duration_seconds": max(duration_seconds, 0.6),
+            "provider_used": self.provider_name,
+            "controls_applied": {"speaking_rate": (voice_profile.get("controls") or {}).get("speaking_rate")},
+            "reference_audio_count": len(references),
+        }
+
+    def _selected_character_recipe(self, voice_profile: dict[str, Any]):
+        character = str(voice_profile.get("character_slug") or "").strip().lower()
+        if character != "stewie_griffin":
+            return None
+        try:
+            return validate_selected_character_recipe("stewie_griffin")
+        except CharacterVoiceRecipeError as exc:
+            raise TTSProviderError(
+                code=exc.code,
+                message=exc.message,
+                provider_state={self.provider_name: {**self.healthcheck(), "selected_recipe_error": exc.as_dict()}},
+                suggested_action="Fix backend/storage/voice_models/stewie_griffin/selected_recipe.json and its referenced files.",
+            ) from exc
+
+    def _synthesize_selected_character_recipe(
+        self,
+        *,
+        text: str,
+        voice_profile: dict[str, Any],
+        output_path: Path,
+        health: dict[str, Any],
+        selected_recipe,
+    ) -> dict[str, Any]:
+        try:
+            from TTS.tts.configs.xtts_config import XttsConfig  # type: ignore
+            from TTS.tts.models.xtts import Xtts  # type: ignore
+            import torch  # type: ignore
+            import torchaudio  # type: ignore
+        except Exception as exc:
+            raise TTSProviderError(
+                code="xtts_package_missing",
+                message="Coqui XTTS runtime is not importable.",
+                provider_state={self.provider_name: health},
+                suggested_action="Install Coqui TTS, torch, and torchaudio in the runtime image.",
+            ) from exc
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        device = "cpu" if settings.XTTS_DEVICE in {"", "auto"} else settings.XTTS_DEVICE
+        recipe_settings = dict(selected_recipe.settings)
+        try:
+            config = XttsConfig()
+            config.load_json(str(selected_recipe.config_path))
+            model = Xtts.init_from_config(config)
+            model.load_checkpoint(config, checkpoint_dir=str(selected_recipe.checkpoint_dir), eval=True)
+            model.to(device)
+            gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
+                audio_path=[str(path) for path in selected_recipe.reference_wavs]
+            )
+            inference_kwargs = {
+                "temperature": float(recipe_settings.get("temperature", 0.7)),
+            }
+            if recipe_settings.get("speed") is not None:
+                inference_kwargs["speed"] = float(recipe_settings["speed"])
+            signature = inspect.signature(model.inference)
+            if "split_sentences" in signature.parameters and recipe_settings.get("split_sentences") is not None:
+                inference_kwargs["split_sentences"] = bool(recipe_settings["split_sentences"])
+            if "enable_text_splitting" in signature.parameters and recipe_settings.get("split_sentences") is not None:
+                inference_kwargs["enable_text_splitting"] = bool(recipe_settings["split_sentences"])
+            wav = model.inference(
+                text,
+                selected_recipe.language,
+                gpt_cond_latent,
+                speaker_embedding,
+                **inference_kwargs,
+            )["wav"]
+            wav_tensor = torch.tensor(wav).unsqueeze(0)
+            torchaudio.save(str(output_path), wav_tensor, 24000)
+        except TTSProviderError:
+            raise
+        except Exception as exc:
+            raise TTSProviderError(
+                code="xtts_synthesis_failed",
+                message=f"XTTS synthesis failed from selected Stewie recipe: {exc}",
+                provider_state={self.provider_name: health},
+                suggested_action="Check the Stewie selected recipe checkpoint, references, and runtime logs.",
+            ) from exc
+
+        duration_seconds = _audio_stats(output_path)["duration_seconds"]
+        recipe_payload = selected_recipe.public_payload()
+        logger.info(
+            "xtts.selected_recipe character=%s checkpoint_dir=%s reference_wavs=%s language=%s recipe_settings=%s output_wav=%s",
+            selected_recipe.character,
+            selected_recipe.checkpoint_dir,
+            [str(path) for path in selected_recipe.reference_wavs],
+            selected_recipe.language,
+            recipe_settings,
+            output_path,
+        )
+        return {
+            "audio_path": str(output_path),
+            "voice": str(voice_profile.get("display_name") or selected_recipe.character),
+            "duration_seconds": max(duration_seconds, 0.6),
+            "provider_used": self.provider_name,
+            "controls_applied": {
+                "temperature": recipe_settings.get("temperature"),
+                "speed": recipe_settings.get("speed"),
+                "split_sentences": recipe_settings.get("split_sentences"),
+                "language": selected_recipe.language,
+            },
+            "reference_audio_count": len(selected_recipe.reference_wavs),
+            "recipe_used": recipe_payload,
+            "golden_preview_wav": str(selected_recipe.golden_preview_wav),
+        }
+
+
+class RVCProvider(BaseTTSProvider):
+    provider_name = "rvc"
+    clone_capable = True
+    prepare_capable = False
+    supported_control_names = (
+        "speaking_rate",
+        "pitch",
+        "rvc_pitch_shift",
+        "rvc_index_rate",
+        "rvc_protect",
+        "rvc_filter_radius",
+    )
+
+    def healthcheck(self) -> dict[str, Any]:
+        if not settings.RVC_ENABLED:
+            return {"available": False, "reason": "disabled", "metadata": {}}
+        model_dir = Path(settings.RVC_MODELS_DIR) if settings.RVC_MODELS_DIR else None
+        if not model_dir or not model_dir.exists():
+            return {"available": False, "reason": "missing_model_dir", "metadata": {"model_dir": settings.RVC_MODELS_DIR}}
+        if not settings.RVC_INFER_COMMAND:
+            return {"available": False, "reason": "missing_infer_command", "metadata": {"model_dir": str(model_dir)}}
+        rmvpe_path = Path(settings.RVC_RMVPE_PATH) if settings.RVC_RMVPE_PATH else None
+        return {
+            "available": True,
+            "reason": None,
+            "metadata": {
+                "model_dir": str(model_dir),
+                "rmvpe_path": str(rmvpe_path) if rmvpe_path else None,
+                "pitch_extractor": "rmvpe" if rmvpe_path and rmvpe_path.exists() else "runtime_default",
+            },
+        }
+
+    def synthesize_line(
+        self,
+        text: str,
+        voice_profile: dict[str, Any],
+        output_path: Path,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        health = self.healthcheck()
+        if not health["available"]:
+            raise TTSProviderError(
+                code=f"rvc_{health.get('reason') or 'not_available'}",
+                message="RVC is selected but unavailable in this environment.",
+                provider_state={self.provider_name: health},
+                suggested_action="Configure RVC model paths and inference command before rendering this character profile.",
+            )
+        model_path = Path(str(voice_profile.get("model_checkpoint_path") or ""))
+        if not model_path.exists():
+            raise TTSProviderError(
+                code="rvc_model_missing",
+                message=f"RVC model/checkpoint path is missing: {model_path}",
+                provider_state={self.provider_name: health},
+                suggested_action="Attach a trained RVC model path before rendering this character profile.",
+            )
+        source_path = output_path.with_name(f"{output_path.stem}_source.wav")
+        source_profile = {
+            **voice_profile,
+            "provider": "espeak",
+            "fallback_provider": "espeak",
+        }
+        source_result = EspeakProvider().synthesize_line(text, source_profile, source_path, options)
+        controls = dict(voice_profile.get("controls") or {})
+        recipe = dict(voice_profile.get("selected_recipe") or {})
+        replacements = {
+            "input": str(source_path),
+            "output": str(output_path),
+            "model": str(model_path),
+            "index": str(recipe.get("model_index_path") or ""),
+            "pitch_shift": str(recipe.get("rvc_pitch_shift", controls.get("rvc_pitch_shift", 0))),
+            "index_rate": str(recipe.get("rvc_index_rate", controls.get("rvc_index_rate", 0.75))),
+            "protect": str(recipe.get("rvc_protect", controls.get("rvc_protect", 0.33))),
+            "filter_radius": str(recipe.get("rvc_filter_radius", controls.get("rvc_filter_radius", 3))),
+            "rmvpe": settings.RVC_RMVPE_PATH or "",
+        }
+        command_template = settings.RVC_INFER_COMMAND.format(**replacements)
+        try:
+            subprocess.run(shlex.split(command_template), check=True, capture_output=True, text=True)
+        except Exception as exc:
+            raise TTSProviderError(
+                code="rvc_conversion_failed",
+                message=f"RVC conversion failed: {exc}",
+                provider_state={self.provider_name: health},
+                suggested_action="Check the RVC inference command, model path, index, and RMVPE configuration.",
+            ) from exc
+        finally:
+            source_path.unlink(missing_ok=True)
+        duration_seconds = _audio_stats(output_path)["duration_seconds"]
+        return {
+            "audio_path": str(output_path),
+            "voice": str(voice_profile.get("display_name") or "rvc"),
+            "duration_seconds": max(duration_seconds, source_result["duration_seconds"], 0.6),
+            "provider_used": self.provider_name,
+            "controls_applied": {
+                "speaking_rate": controls.get("speaking_rate"),
+                "rvc_pitch_shift": replacements["pitch_shift"],
+                "rvc_index_rate": replacements["index_rate"],
+                "rvc_protect": replacements["protect"],
+                "rvc_filter_radius": replacements["filter_radius"],
+            },
+            "reference_audio_count": len(voice_profile.get("reference_audios") or []),
+        }
+
+
 class ProviderRegistry:
     def __init__(self) -> None:
         self.providers: dict[str, BaseTTSProvider] = {
             "espeak": EspeakProvider(),
             "openvoice": OpenVoiceProvider(),
+            "xtts": XTTSProvider(),
+            "rvc": RVCProvider(),
         }
 
     def capabilities(self) -> list[ProviderCapability]:
@@ -1067,6 +1390,7 @@ class TTSOrchestrator:
         controls = dict(voice_profile.get("controls") or {})
         style = dict(voice_profile.get("style") or {})
         fallback_settings = dict(voice_profile.get("fallback_voice_settings") or {})
+        selected_recipe = dict(voice_profile.get("selected_recipe") or {})
         supported_control_names = tuple(getattr(provider, "supported_control_names", ()) or ())
         if provider_name == "openvoice":
             cache_settings = {
@@ -1077,6 +1401,16 @@ class TTSOrchestrator:
                 "style_preset": style.get("style_preset"),
                 "embedding_path": voice_profile.get("embedding_path") or provider_metadata.get("embedding_artifact_path"),
                 "target_embedding_hash": provider_metadata.get("target_embedding_hash"),
+            }
+        elif provider_name in {"xtts", "rvc"}:
+            cache_settings = {
+                "controls": {key: controls.get(key) for key in supported_control_names if controls.get(key) is not None},
+                "language": voice_profile.get("language"),
+                "model_id": voice_profile.get("model_id"),
+                "model_checkpoint_path": voice_profile.get("model_checkpoint_path"),
+                "selected_recipe": selected_recipe,
+                "base_speaker": voice_profile.get("base_speaker") or style.get("base_speaker"),
+                "style_preset": style.get("style_preset"),
             }
         else:
             cache_settings = {
@@ -1158,7 +1492,8 @@ class TTSOrchestrator:
                 )
                 continue
             cache_key = self._voice_cache_key(provider_name, text, voice_profile, provider)
-            cache_hit = self._copy_cache_if_present(cache_key, output_path)
+            recipe_requires_validation = provider_name == "xtts" and str(voice_profile.get("character_slug") or "").strip().lower() == "stewie_griffin"
+            cache_hit = False if recipe_requires_validation else self._copy_cache_if_present(cache_key, output_path)
             if cache_hit:
                 duration_seconds = _audio_stats(output_path)["duration_seconds"]
                 if provider_name == "openvoice" and hasattr(provider, "_applied_controls"):
@@ -1200,6 +1535,8 @@ class TTSOrchestrator:
                     voice_profile_id=str(voice_profile.get("id") or ""),
                     provider_failures=dict(provider_failures),
                     fallback_reason=next(iter(provider_failures.values()), {}).get("code") if index > 0 and provider_failures else None,
+                    recipe_used=dict(voice_profile.get("selected_recipe") or {}),
+                    golden_preview_wav=None,
                 )
             try:
                 logger.info(
@@ -1211,7 +1548,8 @@ class TTSOrchestrator:
                     fallback_allowed,
                 )
                 result = provider.synthesize_line(text=text, voice_profile=voice_profile, output_path=output_path, options=options)
-                self._save_to_cache(cache_key, output_path)
+                if not recipe_requires_validation:
+                    self._save_to_cache(cache_key, output_path)
                 return SynthesisResult(
                     audio_path=result["audio_path"],
                     voice=result["voice"],
@@ -1225,6 +1563,8 @@ class TTSOrchestrator:
                     voice_profile_id=str(voice_profile.get("id") or ""),
                     provider_failures=dict(provider_failures),
                     fallback_reason=next(iter(provider_failures.values()), {}).get("code") if index > 0 and provider_failures else None,
+                    recipe_used=dict(result.get("recipe_used") or voice_profile.get("selected_recipe") or {}),
+                    golden_preview_wav=result.get("golden_preview_wav"),
                 )
             except TTSProviderError as exc:
                 last_error = exc
@@ -1317,6 +1657,8 @@ class TTSOrchestrator:
                     provider_state=result.provider_state,
                     provider_failures=getattr(result, "provider_failures", None),
                     fallback_reason=getattr(result, "fallback_reason", None),
+                    recipe_used=getattr(result, "recipe_used", None),
+                    golden_preview_wav=getattr(result, "golden_preview_wav", None),
                 )
             )
         if not segments:
@@ -1408,7 +1750,11 @@ class LocalSpeechService:
         if not voice_profile:
             return None
         provider = str(manifest_entry.get("requested_provider") or voice_profile.get("provider") or "espeak").lower()
-        fallback_allowed = bool(manifest_entry.get("fallback_allowed", voice_profile.get("fallback_allowed", provider != "openvoice")))
+        character = str(voice_profile.get("character_slug") or "").strip().lower()
+        default_fallback_allowed = provider != "openvoice"
+        if provider == "xtts" and character == "stewie_griffin":
+            default_fallback_allowed = False
+        fallback_allowed = bool(manifest_entry.get("fallback_allowed", voice_profile.get("fallback_allowed", default_fallback_allowed)))
         return {
             **voice_profile,
             "requested_provider": provider,
@@ -1464,8 +1810,15 @@ class LocalSpeechService:
                     ],
                     "language": profile.language,
                     "model_id": profile.model_id,
+                    "model_checkpoint_path": profile.model_checkpoint_path,
+                    "selected_recipe": dict(profile.selected_recipe_json or {}),
+                    "reference_dataset_id": profile.reference_dataset_id,
+                    "character_slug": profile.character_slug,
+                    "calibration_score": profile.calibration_score,
+                    "last_verified_render_job_id": profile.last_verified_render_job_id,
                     "embedding_path": profile.embedding_path,
                     "provider_metadata": dict(profile.provider_metadata_json or {}),
+                    "fallback_allowed": False if profile.character_slug == "stewie_griffin" and profile.provider == "xtts" else True,
                 }
         default_voice = settings.TTS_ESPEAK_VOICE_SLOT_1 if slot_index % 2 == 0 else settings.TTS_ESPEAK_VOICE_SLOT_2
         return self._ephemeral_profile(

@@ -26,5 +26,49 @@
     "amplitude": 145,
     "notes": "A slightly punchier response voice for the second character.",
     "sample_text": "Wait, are we sure this is actually ready to ship?"
+  },
+  {
+    "id": "peter_griffin_character_v1",
+    "display_name": "Peter Griffin",
+    "speaker_names": ["Peter", "Peter Griffin"],
+    "portrait_filename": null,
+    "tts_provider": "xtts",
+    "fallback_provider": "espeak",
+    "model_id": "character_voice_replication",
+    "character_slug": "peter_griffin",
+    "voice": "en-us+m3",
+    "rate": 150,
+    "pitch": 38,
+    "word_gap": 1,
+    "amplitude": 145,
+    "provider_metadata": {
+      "character_voice_profile": true,
+      "requires_reference_dataset": true,
+      "requires_attached_model": true
+    },
+    "notes": "Licensed character voice replication profile. Attach a processed dataset and XTTS/RVC model before render verification.",
+    "sample_text": "This profile is waiting for a licensed reference dataset and attached character model."
+  },
+  {
+    "id": "stewie_griffin_character_v1",
+    "display_name": "Stewie Griffin",
+    "speaker_names": ["Stewie", "Stewie Griffin"],
+    "portrait_filename": null,
+    "tts_provider": "xtts",
+    "fallback_provider": "espeak",
+    "model_id": "character_voice_replication",
+    "character_slug": "stewie_griffin",
+    "voice": "en-gb+m3",
+    "rate": 168,
+    "pitch": 62,
+    "word_gap": 1,
+    "amplitude": 145,
+    "provider_metadata": {
+      "character_voice_profile": true,
+      "requires_reference_dataset": true,
+      "requires_attached_model": true
+    },
+    "notes": "Licensed character voice replication profile. Attach a processed dataset and XTTS/RVC model before render verification.",
+    "sample_text": "This profile is waiting for a licensed reference dataset and attached character model."
   }
 ]

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
+import math
 import subprocess
 import sys
 import types
@@ -18,7 +20,8 @@ from app.services.character_presets import get_character_preset
 from app.services.crypto import decrypt_secret
 from app.services.rendering import ProjectRenderService
 from app.services.storage import generated_job_artifact_url, generated_job_segment_dir
-from app.services.tts import LocalSpeechService, OpenVoiceProvider, SpeechSegment, TTSOrchestrator, TextToSpeechError
+from app.services.character_voice_recipes import validate_selected_character_recipe
+from app.services.tts import LocalSpeechService, OpenVoiceProvider, SpeechSegment, TTSOrchestrator, TextToSpeechError, XTTSProvider
 from app.tasks.generation import STALE_GENERATION_ERROR, process_generation_job, reconcile_stale_generation_jobs
 from app.tasks.publish import process_publish_job
 from app.tasks.scheduler import dispatch_due_publish_jobs
@@ -64,6 +67,59 @@ def _write_wav(path: Path, *, seconds: float = 1.6, sample_rate: int = 16000, sa
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
         handle.writeframes(sample * frame_count)
+
+
+def _write_sine_wav(path: Path, *, seconds: float = 1.6, sample_rate: int = 16000, frequency: float = 180.0) -> None:
+    frame_count = int(seconds * sample_rate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = bytearray()
+    for index in range(frame_count):
+        value = int(12000 * math.sin(2 * math.pi * frequency * index / sample_rate))
+        frames.extend(value.to_bytes(2, byteorder="little", signed=True))
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(bytes(frames))
+
+
+def _write_stewie_selected_recipe_tree(root: Path) -> dict[str, Path]:
+    checkpoint_dir = root / "shared" / "xtts_v2"
+    clean_dir = root / "stewie_griffin" / "dataset" / "clean"
+    golden_dir = root / "stewie_griffin" / "previews" / "golden"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    clean_dir.mkdir(parents=True, exist_ok=True)
+    golden_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / "config.json").write_text("{}", encoding="utf-8")
+    (checkpoint_dir / "vocab.json").write_text("{}", encoding="utf-8")
+    (checkpoint_dir / "model.pth").write_bytes(b"checkpoint")
+    _write_sine_wav(clean_dir / "ref_a.wav", seconds=0.8)
+    _write_sine_wav(clean_dir / "ref_b.wav", seconds=0.8, frequency=220)
+    _write_sine_wav(golden_dir / "xtts_checkpoint_smoke.wav", seconds=0.8, frequency=260)
+    recipe_path = root / "stewie_griffin" / "selected_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "provider": "xtts",
+                "character": "stewie_griffin",
+                "status": "golden_preview_selected",
+                "xtts_checkpoint_dir_local": str(checkpoint_dir),
+                "reference_wavs_local": str(clean_dir / "*.wav"),
+                "golden_preview_local": str(golden_dir / "xtts_checkpoint_smoke.wav"),
+                "language": "en",
+                "recipe": {"temperature": 0.7, "speed": 1.0, "split_sentences": True},
+                "render_verified": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "root": root,
+        "checkpoint_dir": checkpoint_dir,
+        "clean_dir": clean_dir,
+        "golden_preview": golden_dir / "xtts_checkpoint_smoke.wav",
+        "recipe_path": recipe_path,
+    }
 
 
 def _fake_reference_audio_ffmpeg_run(recorded: dict[str, object] | None = None, *, seconds: float = 1.8, silence_stderr: str = ""):
@@ -656,6 +712,437 @@ def test_reference_audio_upload_normalizes_audio_and_invalidates_embedding(auth_
     assert original_response.status_code == 200
     assert processed_response.status_code == 200
     assert processed_response.content.startswith(b"RIFF")
+
+
+def test_character_reference_dataset_upload_analyze_and_attach_model(auth_client: TestClient, monkeypatch, tmp_path: Path):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "peter_griffin_character_v1",
+    "display_name": "Peter Griffin",
+    "speaker_names": ["Peter Griffin"],
+    "tts_provider": "xtts",
+    "fallback_provider": "espeak",
+    "character_slug": "peter_griffin",
+    "voice": "en-us+m3",
+    "rate": 150,
+    "pitch": 38,
+    "word_gap": 1,
+    "amplitude": 145
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    monkeypatch.setattr("app.services.voice_profiles._ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
+
+    def fake_run(command, check, capture_output, text):
+        if command[-1] == "-":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        output_seconds = 1.8
+        if "-t" in command:
+            output_seconds = float(command[command.index("-t") + 1])
+        _write_sine_wav(Path(command[-1]), seconds=output_seconds, frequency=145.0)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.services.voice_profiles.subprocess.run", fake_run)
+
+    created = auth_client.post(
+        "/voice-profiles/vp_peter_griffin_character_v1/reference-datasets",
+        json={"display_name": "Peter licensed refs", "character_slug": "peter_griffin"},
+    )
+    assert created.status_code == 201
+    dataset_id = created.json()["dataset"]["id"]
+    assert created.json()["voice_profile"]["reference_dataset_id"] == dataset_id
+    assert created.json()["dataset"]["character_slug"] == "peter_griffin"
+
+    uploaded = auth_client.post(
+        f"/voice-profiles/vp_peter_griffin_character_v1/reference-datasets/{dataset_id}/clips",
+        files={"file": ("reference.mp3", b"fake-mp3", "audio/mpeg")},
+        data={"authorization_confirmed": "true", "authorization_note": "licensed"},
+    )
+    assert uploaded.status_code == 201
+    assert uploaded.json()["reference_audio"]["reference_dataset_id"] == dataset_id
+    assert uploaded.json()["dataset"]["accepted_clip_count"] == 1
+    assert uploaded.json()["dataset"]["metrics"]["clean_speech_duration_seconds"] > 0
+
+    analyzed = auth_client.post(
+        f"/voice-profiles/vp_peter_griffin_character_v1/reference-datasets/{dataset_id}/analyze"
+    )
+    assert analyzed.status_code == 200
+    assert analyzed.json()["dataset"]["status"] == "analyzed"
+    assert analyzed.json()["dataset"]["prosody_metrics"]["pitch_median_hz"] > 0
+
+    checkpoint = tmp_path / "xtts" / "model.pth"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    attached = auth_client.post(
+        "/voice-profiles/vp_peter_griffin_character_v1/models/attach",
+        json={
+            "provider": "xtts",
+            "model_checkpoint_path": str(checkpoint),
+            "reference_dataset_id": dataset_id,
+            "recipe": {"provider": "xtts", "speaking_rate": 0.95},
+        },
+    )
+    assert attached.status_code == 200
+    assert attached.json()["provider"] == "xtts"
+    assert attached.json()["model_checkpoint_path"] == str(checkpoint)
+    assert attached.json()["selected_recipe"]["reference_dataset_id"] == dataset_id
+
+
+def test_prosody_analyzer_extracts_pitch_pause_and_energy(tmp_path: Path):
+    from app.services.voice_replication import analyze_audio_prosody
+
+    audio_path = tmp_path / "tone.wav"
+    _write_sine_wav(audio_path, seconds=1.5, frequency=220.0)
+
+    metrics = analyze_audio_prosody(audio_path)
+
+    assert metrics["pitch_median_hz"] > 150
+    assert metrics["pitch_range_semitones"] >= 0
+    assert metrics["energy_mean"] > 0
+    assert metrics["voiced_ratio"] > 0.5
+
+
+def test_character_calibration_batch_scores_and_saves_recipe(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "stewie_griffin_character_v1",
+    "display_name": "Stewie Griffin",
+    "speaker_names": ["Stewie Griffin"],
+    "tts_provider": "espeak",
+    "fallback_provider": "espeak",
+    "character_slug": "stewie_griffin",
+    "voice": "en-gb+m3",
+    "rate": 168,
+    "pitch": 62,
+    "word_gap": 1,
+    "amplitude": 145
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    db = SessionLocal()
+    try:
+        profile = db.get(VoiceProfile, "vp_stewie_griffin_character_v1")
+        assert profile is not None
+        profile.provider_metadata_json = {
+            "target_prosody_metrics": {
+                "pitch_median_hz": 220,
+                "pitch_range_semitones": 1,
+                "speaking_rate": 0.8,
+                "pause_count": 0,
+                "mean_pause_length_seconds": 0,
+                "energy_mean": 0.25,
+                "phrase_pitch_movement": {"mean_abs_delta_hz": 2},
+            }
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    def fake_provider_state(self):
+        return {
+            "espeak": {"available": True},
+            "openvoice": {"available": False, "reason": "disabled"},
+            "xtts": {"available": False, "reason": "disabled"},
+            "rvc": {"available": False, "reason": "disabled"},
+        }
+
+    def fake_synthesize_line(self, *, text, voice_profile, output_path, requested_provider=None, fallback_allowed=True, options=None):
+        _write_sine_wav(output_path, seconds=1.2, frequency=220.0)
+        from app.services.tts import SynthesisResult
+
+        return SynthesisResult(
+            audio_path=str(output_path),
+            voice="Stewie Griffin",
+            duration_seconds=1.2,
+            provider_used=requested_provider or "espeak",
+            fallback_used=False,
+            controls_applied=voice_profile.get("controls") or {},
+            reference_audio_count=0,
+            provider_state=fake_provider_state(self),
+            cache_hit=False,
+            voice_profile_id=voice_profile["id"],
+        )
+
+    monkeypatch.setattr(TTSOrchestrator, "provider_state", fake_provider_state)
+    monkeypatch.setattr(TTSOrchestrator, "synthesize_line", fake_synthesize_line)
+
+    batch = auth_client.post(
+        "/voice-lab/calibration-batches",
+        json={
+            "voice_profile_id": "vp_stewie_griffin_character_v1",
+            "calibration_script": "Victory is mine.",
+            "candidates": [{"provider": "espeak", "rate": 1.0, "pitch_shift": 0.0}],
+        },
+    )
+    assert batch.status_code == 201
+    assert batch.json()["status"] == "completed"
+    assert batch.json()["rankings"][0]["score"] > 0.5
+    recipe = batch.json()["rankings"][0]["recipe"]
+    recipe["calibration_score"] = batch.json()["rankings"][0]["score"]
+
+    saved = auth_client.post(
+        "/voice-profiles/vp_stewie_griffin_character_v1/calibration-recipe",
+        json={"recipe": recipe},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["selected_recipe"]["provider"] == "espeak"
+    assert saved.json()["calibration_score"] == recipe["calibration_score"]
+
+
+def test_character_render_verification_marks_profile_verified(auth_client: TestClient, tmp_path: Path):
+    profile_response = auth_client.post(
+        "/voice-profiles",
+        json={
+            "display_name": "Verified Character",
+            "provider": "espeak",
+            "fallback_provider": "espeak",
+            "voice": "en-us+f3",
+            "espeak_rate": 155,
+            "espeak_pitch": 45,
+            "espeak_word_gap": 1,
+            "espeak_amplitude": 140,
+            "selected_recipe": {"provider": "espeak"},
+        },
+    )
+    assert profile_response.status_code == 201
+    voice_profile_id = profile_response.json()["id"]
+    segment_path = tmp_path / "segments" / "000_verified.wav"
+    composite_path = tmp_path / "audio" / "dialogue_composite.wav"
+    final_audio_path = tmp_path / "audio" / "final_video_audio.wav"
+    _write_sine_wav(segment_path, seconds=1.1, frequency=180.0)
+    _write_sine_wav(composite_path, seconds=1.1, frequency=180.0)
+    _write_sine_wav(final_audio_path, seconds=1.1, frequency=180.0)
+    db = SessionLocal()
+    try:
+        job = GenerationJob(
+            project_id=1,
+            input_asset_id=1,
+            script_revision_id=1,
+            style_preset="none",
+            output_kind="preview",
+            provider_name="local-compositor",
+            status="completed",
+            progress=100,
+            tts_result_json={
+                "status": "completed",
+                "segments": [
+                    {
+                        "voice_profile_id": voice_profile_id,
+                        "provider_used": "espeak",
+                        "fallback_used": False,
+                        "audio_path": str(segment_path),
+                        "voice_profile_settings": {
+                            "provider": "espeak",
+                            "selected_recipe": {"provider": "espeak"},
+                        },
+                    }
+                ],
+                "assembly": {
+                    "composite_audio_path": str(composite_path),
+                    "final_video_audio_path": str(final_audio_path),
+                },
+            },
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+    finally:
+        db.close()
+
+    verified = auth_client.post(f"/voice-profiles/{voice_profile_id}/verify-render/{job_id}")
+    assert verified.status_code == 200
+    assert verified.json()["verification"]["status"] == "passed"
+    assert verified.json()["voice_profile"]["last_verified_render_job_id"] == job_id
+
+
+def test_stewie_selected_recipe_validates_required_paths(monkeypatch, tmp_path: Path):
+    tree = _write_stewie_selected_recipe_tree(tmp_path / "voice_models")
+    monkeypatch.setattr(settings, "VOICE_MODELS_DIR", str(tree["root"]))
+
+    recipe = validate_selected_character_recipe("stewie_griffin")
+
+    assert recipe.provider == "xtts"
+    assert recipe.character == "stewie_griffin"
+    assert recipe.checkpoint_dir == tree["checkpoint_dir"]
+    assert len(recipe.reference_wavs) == 2
+    assert recipe.golden_preview_wav == tree["golden_preview"]
+    assert recipe.settings["temperature"] == 0.7
+
+
+def test_xtts_provider_uses_stewie_selected_recipe_exactly(monkeypatch, tmp_path: Path):
+    tree = _write_stewie_selected_recipe_tree(tmp_path / "voice_models")
+    monkeypatch.setattr(settings, "VOICE_MODELS_DIR", str(tree["root"]))
+    monkeypatch.setattr(settings, "XTTS_DEVICE", "cpu")
+    recorded: dict[str, object] = {}
+
+    class FakeConfig:
+        def load_json(self, path):
+            recorded["config_path"] = path
+
+    class FakeModel:
+        def load_checkpoint(self, config, checkpoint_dir, eval):
+            recorded["checkpoint_dir"] = checkpoint_dir
+            recorded["eval"] = eval
+
+        def to(self, device):
+            recorded["device"] = device
+
+        def get_conditioning_latents(self, audio_path):
+            recorded["reference_wavs"] = audio_path
+            return "latent", "embedding"
+
+        def inference(self, text, language, latent, embedding, **kwargs):
+            recorded["text"] = text
+            recorded["language"] = language
+            recorded["inference_kwargs"] = kwargs
+            return {"wav": [0.0] * 24000}
+
+    class FakeXtts:
+        @staticmethod
+        def init_from_config(config):
+            recorded["init_from_config"] = True
+            return FakeModel()
+
+    class FakeTensor:
+        def unsqueeze(self, axis):
+            recorded["unsqueeze_axis"] = axis
+            return self
+
+    def fake_torchaudio_save(path, tensor, sample_rate):
+        recorded["output_path"] = path
+        recorded["sample_rate"] = sample_rate
+        _write_sine_wav(Path(path), seconds=0.8, sample_rate=sample_rate)
+
+    modules = {
+        "TTS": types.ModuleType("TTS"),
+        "TTS.tts": types.ModuleType("TTS.tts"),
+        "TTS.tts.configs": types.ModuleType("TTS.tts.configs"),
+        "TTS.tts.configs.xtts_config": types.ModuleType("TTS.tts.configs.xtts_config"),
+        "TTS.tts.models": types.ModuleType("TTS.tts.models"),
+        "TTS.tts.models.xtts": types.ModuleType("TTS.tts.models.xtts"),
+        "torch": types.ModuleType("torch"),
+        "torchaudio": types.ModuleType("torchaudio"),
+    }
+    modules["TTS.tts.configs.xtts_config"].XttsConfig = FakeConfig
+    modules["TTS.tts.models.xtts"].Xtts = FakeXtts
+    modules["torch"].tensor = lambda wav: FakeTensor()
+    modules["torchaudio"].save = fake_torchaudio_save
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    provider = XTTSProvider()
+    monkeypatch.setattr(provider, "healthcheck", lambda: {"available": True, "reason": None, "metadata": {"device": "cpu"}})
+    output_path = tmp_path / "rendered.wav"
+
+    result = provider.synthesize_line(
+        text="Victory is mine.",
+        voice_profile={"id": "vp_stewie", "display_name": "Stewie Griffin", "provider": "xtts", "character_slug": "stewie_griffin"},
+        output_path=output_path,
+        options={},
+    )
+
+    assert recorded["checkpoint_dir"] == str(tree["checkpoint_dir"])
+    assert len(recorded["reference_wavs"]) == 2
+    assert recorded["language"] == "en"
+    assert recorded["inference_kwargs"]["temperature"] == 0.7
+    assert recorded["inference_kwargs"]["speed"] == 1.0
+    assert recorded["sample_rate"] == 24000
+    assert result["provider_used"] == "xtts"
+    assert result["reference_audio_count"] == 2
+    assert result["recipe_used"]["checkpoint_dir"] == str(tree["checkpoint_dir"])
+    assert result["golden_preview_wav"] == str(tree["golden_preview"])
+
+
+def test_stewie_render_verification_requires_golden_preview(auth_client: TestClient, monkeypatch, tmp_path: Path):
+    tree = _write_stewie_selected_recipe_tree(tmp_path / "voice_models")
+    monkeypatch.setattr(settings, "VOICE_MODELS_DIR", str(tree["root"]))
+    profile_response = auth_client.post(
+        "/voice-profiles",
+        json={
+            "display_name": "Stewie Griffin",
+            "provider": "xtts",
+            "fallback_provider": "espeak",
+            "voice": "en-gb+m3",
+            "espeak_rate": 168,
+            "espeak_pitch": 62,
+            "espeak_word_gap": 1,
+            "espeak_amplitude": 145,
+            "character_slug": "stewie_griffin",
+        },
+    )
+    assert profile_response.status_code == 201
+    voice_profile_id = profile_response.json()["id"]
+    segment_path = tmp_path / "segments" / "000_stewie.wav"
+    composite_path = tmp_path / "audio" / "dialogue_composite.wav"
+    final_audio_path = tmp_path / "audio" / "final_video_audio.wav"
+    _write_sine_wav(segment_path, seconds=1.0, frequency=180.0)
+    _write_sine_wav(composite_path, seconds=1.0, frequency=180.0)
+    _write_sine_wav(final_audio_path, seconds=1.0, frequency=180.0)
+    recipe = validate_selected_character_recipe("stewie_griffin").public_payload()
+    db = SessionLocal()
+    try:
+        job = GenerationJob(
+            project_id=1,
+            input_asset_id=1,
+            script_revision_id=1,
+            style_preset="none",
+            output_kind="preview",
+            provider_name="local-compositor",
+            status="completed",
+            progress=100,
+            tts_result_json={
+                "status": "completed",
+                "segments": [
+                    {
+                        "voice_profile_id": voice_profile_id,
+                        "provider_used": "xtts",
+                        "fallback_used": False,
+                        "audio_path": str(segment_path),
+                        "golden_preview_wav": str(tree["golden_preview"]),
+                        "recipe_used": recipe,
+                        "selected_recipe": recipe,
+                        "voice_profile_settings": {"provider": "xtts", "selected_recipe": recipe},
+                    }
+                ],
+                "assembly": {
+                    "composite_audio_path": str(composite_path),
+                    "final_video_audio_path": str(final_audio_path),
+                },
+            },
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+    finally:
+        db.close()
+
+    verified = auth_client.post(f"/voice-profiles/{voice_profile_id}/verify-render/{job_id}")
+    assert verified.status_code == 200
+    body = verified.json()
+    assert body["verification"]["status"] == "passed"
+    assert body["verification"]["fallback_used"] is False
+    assert body["verification"]["golden_preview_wav"] == str(tree["golden_preview"])
+    assert body["verification"]["recipe_used"]["provider"] == "xtts"
+    assert {item["kind"] for item in body["verification"]["audio_checks"]} >= {
+        "golden_preview_wav",
+        "render_segment_wav",
+        "composite_audio_wav",
+        "final_video_extracted_audio",
+    }
 
 
 def test_reference_audio_upload_rejects_unreadable_audio(auth_client: TestClient, monkeypatch):
@@ -2335,9 +2822,13 @@ def test_tts_provider_capabilities_route_returns_registry_state(auth_client: Tes
     assert response.status_code == 200
     items = response.json()["items"]
     providers = {item["provider"] for item in items}
-    assert {"espeak", "openvoice"}.issubset(providers)
+    assert {"espeak", "openvoice", "xtts", "rvc"}.issubset(providers)
     openvoice = next(item for item in items if item["provider"] == "openvoice")
     assert openvoice["supported_controls"] == ["speaking_rate"]
+    xtts = next(item for item in items if item["provider"] == "xtts")
+    rvc = next(item for item in items if item["provider"] == "rvc")
+    assert xtts["supports_voice_cloning"] is True
+    assert rvc["supports_voice_cloning"] is True
 
 
 def test_project_speaker_bindings_round_trip(auth_client: TestClient):

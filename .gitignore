@@ -256,6 +256,20 @@ backend/storage/voice_lab/profiles/**/*.wav
 backend/storage/voice_lab/profiles/**/*.mp3
 backend/storage/voice_lab/profiles/**/*.m4a
 
+backend/storage/voice_models/**/dataset/*
+backend/storage/voice_models/**/processed/*
+backend/storage/voice_models/**/xtts/*
+backend/storage/voice_models/**/rvc/*
+backend/storage/voice_models/**/*.pth
+backend/storage/voice_models/**/*.ckpt
+backend/storage/voice_models/**/*.pt
+backend/storage/voice_models/**/*.onnx
+backend/storage/voice_models/**/*.bin
+backend/storage/voice_models/**/*.index
+backend/storage/voice_models/**/*.safetensors
+!backend/storage/voice_models/**/.gitkeep
+!backend/storage/voice_models/**/README.md
+
 # =========================================================
 # Test / cache artifacts
 # =========================================================

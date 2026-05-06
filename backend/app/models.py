@@ -68,6 +68,12 @@ class User(Base):
     voice_preview_jobs: Mapped[list["VoicePreviewJob"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    voice_reference_datasets: Mapped[list["VoiceReferenceDataset"]] = relationship(
+        back_populates="created_by", cascade="all, delete-orphan"
+    )
+    voice_calibration_batches: Mapped[list["VoiceCalibrationBatch"]] = relationship(
+        back_populates="created_by", cascade="all, delete-orphan"
+    )
 
 
 class UserPreference(Base):
@@ -227,6 +233,14 @@ class VoiceProfile(Base):
     espeak_pitch: Mapped[int | None] = mapped_column(Integer, nullable=True)
     espeak_word_gap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     espeak_amplitude: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    character_slug: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    reference_dataset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("voice_reference_datasets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    model_checkpoint_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_recipe_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    calibration_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_verified_render_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -241,6 +255,18 @@ class VoiceProfile(Base):
         back_populates="voice_profile", cascade="all, delete-orphan", order_by="VoiceReferenceAudio.created_at.asc()"
     )
     voice_preview_jobs: Mapped[list["VoicePreviewJob"]] = relationship(back_populates="voice_profile")
+    reference_datasets: Mapped[list["VoiceReferenceDataset"]] = relationship(
+        back_populates="voice_profile",
+        cascade="all, delete-orphan",
+        order_by="VoiceReferenceDataset.created_at.desc()",
+        foreign_keys="VoiceReferenceDataset.voice_profile_id",
+    )
+    active_reference_dataset: Mapped["VoiceReferenceDataset | None"] = relationship(
+        foreign_keys=[reference_dataset_id], post_update=True
+    )
+    voice_calibration_batches: Mapped[list["VoiceCalibrationBatch"]] = relationship(
+        back_populates="voice_profile", cascade="all, delete-orphan", order_by="VoiceCalibrationBatch.created_at.desc()"
+    )
 
 
 class CharacterPreset(Base):
@@ -278,6 +304,9 @@ class VoiceReferenceAudio(Base):
     voice_profile_id: Mapped[str] = mapped_column(
         ForeignKey("voice_profiles.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    reference_dataset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("voice_reference_datasets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
     original_storage_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     processed_storage_path: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -299,6 +328,73 @@ class VoiceReferenceAudio(Base):
 
     voice_profile: Mapped["VoiceProfile"] = relationship(back_populates="reference_audios")
     created_by: Mapped["User | None"] = relationship(back_populates="voice_reference_audios")
+    reference_dataset: Mapped["VoiceReferenceDataset | None"] = relationship(back_populates="reference_audios")
+
+
+class VoiceReferenceDataset(Base):
+    __tablename__ = "voice_reference_datasets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    voice_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("voice_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    character_slug: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="created", nullable=False)
+    total_duration_seconds: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    clean_speech_duration_seconds: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    accepted_clip_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rejected_clip_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metrics_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    prosody_metrics_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    selected_recipe_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    voice_profile: Mapped["VoiceProfile"] = relationship(
+        back_populates="reference_datasets", foreign_keys=[voice_profile_id]
+    )
+    reference_audios: Mapped[list["VoiceReferenceAudio"]] = relationship(
+        back_populates="reference_dataset", order_by="VoiceReferenceAudio.created_at.asc()"
+    )
+    created_by: Mapped["User | None"] = relationship(back_populates="voice_reference_datasets")
+    calibration_batches: Mapped[list["VoiceCalibrationBatch"]] = relationship(
+        back_populates="reference_dataset", cascade="all, delete-orphan"
+    )
+
+
+class VoiceCalibrationBatch(Base):
+    __tablename__ = "voice_calibration_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    voice_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("voice_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    reference_dataset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("voice_reference_datasets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="created", nullable=False)
+    provider_state_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    candidates_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    rankings_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    error_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    voice_profile: Mapped["VoiceProfile"] = relationship(back_populates="voice_calibration_batches")
+    reference_dataset: Mapped["VoiceReferenceDataset | None"] = relationship(back_populates="calibration_batches")
+    created_by: Mapped["User | None"] = relationship(back_populates="voice_calibration_batches")
 
 
 class ProjectSpeakerBinding(Base):

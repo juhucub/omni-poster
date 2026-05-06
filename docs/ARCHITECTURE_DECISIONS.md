@@ -268,3 +268,35 @@ Voice profiles persist reference processing and validation state:
 - TTS/OpenVoice provider integration.
 - Render metadata and generated job artifact storage.
 - Voice Lab and Project Editor comparison UI.
+
+## ADR-009: Use Dataset-Backed Character Voice Replication With Fail-Closed Verification
+
+Status: Accepted
+Date: 2026-05-05
+
+### Context
+
+OpenVoice reference audio is useful for tone-color conversion, but licensed near-identical character voice replication needs curated datasets, prosody targets, stronger provider options, attached trained artifacts, calibration scoring, and render-path verification.
+
+### Decision
+
+Character voice replication is a generic Voice Lab pipeline:
+
+- Voice profiles may have a reference dataset, character slug, attached model/checkpoint path, selected recipe JSON, calibration score, and last verified render job ID.
+- Reference datasets live under `VOICE_MODELS_DIR/{character_slug}` with separate `dataset`, `processed`, `xtts`, and `rvc` areas.
+- OpenVoice, XTTS, and RVC are provider adapters behind the TTS abstraction. XTTS/RVC are optional and report unavailable until configured.
+- Calibration batches synthesize candidate previews, analyze prosody, score similarity, and persist ranked recipes.
+- Render verification must fail closed for selected character recipes when provider, fallback, model path, segment audio, composite audio, or final extracted audio do not match expectations.
+
+### Consequences
+
+- OpenVoice must not be treated as the whole character replication stack.
+- Trained model artifacts and generated media remain local storage and must not be committed.
+- Full in-app XTTS/RVC training is deferred; the first supported flow attaches externally trained artifacts.
+
+### Files/Areas Affected
+
+- Voice profile and dataset models, migrations, schemas, and routes.
+- TTS provider registry and render metadata.
+- Voice Lab calibration UI.
+- Generated storage and `.gitignore`.

@@ -4,6 +4,7 @@ import apiClient, { apiBaseUrl } from '../api/client';
 import type {
   CharacterPreset,
   TTSFailure,
+  VoiceCalibrationBatch,
   VoiceCalibrationMatrix,
   VoiceLabPreview,
   VoiceProfile,
@@ -48,7 +49,7 @@ const VoiceLabPage: React.FC = () => {
   const [profiles, setProfiles] = useState<VoiceProfile[]>([]);
   const [providerCapabilities, setProviderCapabilities] = useState<VoiceProviderCapability[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [previewProviderPreference, setPreviewProviderPreference] = useState<'auto' | 'openvoice' | 'espeak'>('auto');
+  const [previewProviderPreference, setPreviewProviderPreference] = useState<'auto' | 'openvoice' | 'xtts' | 'rvc' | 'espeak'>('auto');
   const [form, setForm] = useState(emptyForm);
   const [preview, setPreview] = useState<VoiceLabPreview | null>(null);
   const [calibrationItems, setCalibrationItems] = useState<VoiceLabPreview[]>([]);
@@ -60,6 +61,9 @@ const VoiceLabPage: React.FC = () => {
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
   const [authorizationNote, setAuthorizationNote] = useState('');
+  const [characterSlug, setCharacterSlug] = useState('');
+  const [modelPath, setModelPath] = useState('');
+  const [characterBatch, setCharacterBatch] = useState<VoiceCalibrationBatch | null>(null);
 
   const apiBase = apiBaseUrl;
 
@@ -100,6 +104,10 @@ const VoiceLabPage: React.FC = () => {
   const unsupportedControls = Array.isArray(selectedVoiceProfile?.provider_metadata?.['unsupported_controls'])
     ? selectedVoiceProfile?.provider_metadata?.['unsupported_controls'].map((item) => String(item))
     : [];
+  const selectedRecipeStatus = (selectedVoiceProfile?.provider_metadata?.['selected_recipe_status'] || {}) as Record<string, unknown>;
+  const goldenPreviewUrl = String(selectedVoiceProfile?.provider_metadata?.['golden_preview_url'] || selectedRecipeStatus['golden_preview_url'] || '');
+  const recipeReady = Boolean(selectedRecipeStatus['ready_for_test_render']);
+  const recipeError = selectedRecipeStatus['error'] as { code?: string; message?: string } | undefined;
 
   const supportsControl = (controlName: string) => supportedControls.has(controlName);
 
@@ -177,6 +185,8 @@ const VoiceLabPage: React.FC = () => {
 
   useEffect(() => {
     hydrateForm(selectedPreset, selectedVoiceProfile);
+    setCharacterSlug(selectedVoiceProfile?.character_slug || selectedPreset?.display_name?.toLowerCase().replace(/[^a-z0-9]+/g, '_') || '');
+    setModelPath(selectedVoiceProfile?.model_checkpoint_path || '');
   }, [selectedPreset, selectedVoiceProfile]);
 
   const setControl = (key: string, value: string | number) => {
@@ -205,6 +215,9 @@ const VoiceLabPage: React.FC = () => {
         model_id: form.provider === 'openvoice' ? 'openvoice_v2' : null,
         language: form.language,
         voice_profile_id: selectedPreset?.voice_profile_id || null,
+        character_slug: characterSlug.trim() || null,
+        model_checkpoint_path: modelPath.trim() || null,
+        selected_recipe: selectedVoiceProfile?.selected_recipe || {},
         voice: form.voice.trim(),
         rate: Number(form.rate),
         pitch: Number(form.pitch),
@@ -307,6 +320,148 @@ const VoiceLabPage: React.FC = () => {
       await loadVoiceProfiles();
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to upload reference audio.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const ensureReferenceDataset = async () => {
+    if (!selectedVoiceProfile) {
+      throw new Error('Save the preset before creating a reference dataset.');
+    }
+    if (selectedVoiceProfile.reference_dataset_id && selectedVoiceProfile.reference_datasets?.length) {
+      return selectedVoiceProfile.reference_dataset_id;
+    }
+    const response = await apiClient.post(`/voice-profiles/${selectedVoiceProfile.id}/reference-datasets`, {
+      display_name: `${selectedVoiceProfile.display_name} reference dataset`,
+      character_slug: characterSlug || selectedVoiceProfile.character_slug || selectedVoiceProfile.display_name,
+    });
+    await loadVoiceProfiles();
+    return response.data.dataset.id as number;
+  };
+
+  const uploadDatasetClip = async () => {
+    if (!selectedVoiceProfile) {
+      setError('Save the preset before uploading dataset clips.');
+      return;
+    }
+    if (!referenceFile) {
+      setError('Choose an audio file first.');
+      return;
+    }
+    try {
+      setBusy('dataset-upload');
+      const datasetId = await ensureReferenceDataset();
+      const formData = new FormData();
+      formData.append('authorization_confirmed', String(authorizationConfirmed));
+      formData.append('authorization_note', authorizationNote);
+      formData.append('file', referenceFile);
+      await apiClient.post(`/voice-profiles/${selectedVoiceProfile.id}/reference-datasets/${datasetId}/clips`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setReferenceFile(null);
+      setAuthorizationConfirmed(false);
+      setAuthorizationNote('');
+      setInfo('Character dataset clip uploaded and processed.');
+      await loadVoiceProfiles();
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : detail?.message || err.message || 'Failed to upload dataset clip.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const analyzeReferenceDataset = async () => {
+    if (!selectedVoiceProfile?.reference_dataset_id) {
+      setError('Create or upload a character dataset first.');
+      return;
+    }
+    try {
+      setBusy('dataset-analyze');
+      await apiClient.post(`/voice-profiles/${selectedVoiceProfile.id}/reference-datasets/${selectedVoiceProfile.reference_dataset_id}/analyze`);
+      setInfo('Reference dataset analyzed.');
+      await loadVoiceProfiles();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to analyze reference dataset.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const attachCharacterModel = async () => {
+    if (!selectedVoiceProfile) {
+      setError('Save the preset before attaching a model.');
+      return;
+    }
+    if (!modelPath.trim()) {
+      setError('Enter a model/checkpoint path first.');
+      return;
+    }
+    try {
+      setBusy('attach-model');
+      await apiClient.post(`/voice-profiles/${selectedVoiceProfile.id}/models/attach`, {
+        provider: form.provider === 'rvc' ? 'rvc' : form.provider === 'openvoice' ? 'openvoice' : 'xtts',
+        character_slug: characterSlug.trim() || selectedVoiceProfile.character_slug || null,
+        model_checkpoint_path: modelPath.trim(),
+        reference_dataset_id: selectedVoiceProfile.reference_dataset_id,
+        recipe: selectedVoiceProfile.selected_recipe || {},
+      });
+      setInfo('Character model attached.');
+      await loadVoiceProfiles();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to attach character model.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runCharacterCalibrationBatch = async () => {
+    if (!selectedVoiceProfile) {
+      setError('Save the preset before generating character calibration previews.');
+      return;
+    }
+    try {
+      setBusy('character-calibration');
+      const response = await apiClient.post<VoiceCalibrationBatch>('/voice-lab/calibration-batches', {
+        voice_profile_id: selectedVoiceProfile.id,
+        reference_dataset_id: selectedVoiceProfile.reference_dataset_id,
+        calibration_script: form.sample_text,
+        candidates: [
+          {
+            provider: form.provider === 'rvc' ? 'rvc' : form.provider === 'openvoice' ? 'openvoice' : 'xtts',
+            rate: Number(form.controls.speaking_rate || 1),
+            pitch_shift: Number((form.controls as Record<string, unknown>).pitch || 0),
+            pause_scale: Number(form.controls.pause_length || 1),
+            energy_normalization: Number(form.controls.energy || 1),
+            model_checkpoint_path: modelPath || selectedVoiceProfile.model_checkpoint_path,
+            openvoice_tone_color: form.provider === 'openvoice',
+          },
+          { provider: 'openvoice', rate: 1, openvoice_tone_color: true },
+          { provider: 'rvc', rate: 1, rvc_index_rate: 0.75, model_checkpoint_path: modelPath || selectedVoiceProfile.model_checkpoint_path },
+        ],
+      });
+      setCharacterBatch(response.data);
+      setInfo(`Character calibration batch ${response.data.id} completed with ${response.data.rankings.length} ranked matches.`);
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : detail?.message || 'Failed to generate character calibration batch.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveCharacterRecipe = async (recipe: Record<string, unknown>) => {
+    if (!selectedVoiceProfile) {
+      return;
+    }
+    try {
+      setBusy('save-character-recipe');
+      await apiClient.post(`/voice-profiles/${selectedVoiceProfile.id}/calibration-recipe`, { recipe });
+      setInfo('Character replication recipe saved.');
+      await Promise.all([loadPresets(), loadVoiceProfiles()]);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save character recipe.');
     } finally {
       setBusy(null);
     }
@@ -610,6 +765,8 @@ const VoiceLabPage: React.FC = () => {
                 >
                   <option value="espeak">espeak fallback</option>
                   <option value="openvoice">OpenVoice</option>
+                  <option value="xtts">XTTS character clone</option>
+                  <option value="rvc">RVC conversion</option>
                 </select>
               </label>
               <label className="text-sm text-slate-300">
@@ -621,6 +778,8 @@ const VoiceLabPage: React.FC = () => {
                 >
                   <option value="espeak">espeak</option>
                   <option value="openvoice">OpenVoice</option>
+                  <option value="xtts">XTTS</option>
+                  <option value="rvc">RVC</option>
                 </select>
               </label>
               <label className="text-sm text-slate-300">
@@ -891,6 +1050,171 @@ const VoiceLabPage: React.FC = () => {
               </div>
             </div>
 
+            <div className="mt-5 rounded-2xl border border-cyan-300/20 bg-cyan-300/[0.04] p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-cyan-100">Character calibration</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    Dataset-backed matching with exact provider, model path, recipe, and render verification metadata.
+                  </div>
+                </div>
+                {selectedVoiceProfile?.calibration_score != null && (
+                  <div className="rounded-xl border border-emerald-300/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+                    Saved score {Number(selectedVoiceProfile.calibration_score).toFixed(3)}
+                  </div>
+                )}
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <label className="text-sm text-slate-300">
+                  Character slug
+                  <input
+                    value={characterSlug}
+                    onChange={(event) => setCharacterSlug(event.target.value)}
+                    className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-sm"
+                    placeholder="peter_griffin"
+                  />
+                </label>
+                <label className="text-sm text-slate-300">
+                  Model/checkpoint path
+                  <input
+                    value={modelPath}
+                    onChange={(event) => setModelPath(event.target.value)}
+                    className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-sm"
+                    placeholder="backend/storage/voice_models/name/xtts/model.pth"
+                  />
+                </label>
+              </div>
+              {selectedVoiceProfile?.character_slug === 'stewie_griffin' && (
+                <div className={`mt-4 rounded-xl border p-3 text-sm ${recipeReady ? 'border-emerald-300/30 bg-emerald-500/10 text-emerald-100' : 'border-amber-300/30 bg-amber-500/10 text-amber-100'}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="font-medium">Stewie selected recipe</div>
+                      <div className="mt-1 text-xs opacity-80">
+                        {recipeReady ? 'Golden preview selected · Ready for test render' : `Missing files · ${recipeError?.message || 'Recipe validation failed'}`}
+                      </div>
+                      {!Boolean(selectedRecipeStatus['render_verified']) && (
+                        <div className="mt-1 text-xs opacity-80">Recipe not render verified</div>
+                      )}
+                    </div>
+                    <div className="text-xs">
+                      Provider {String(selectedRecipeStatus['provider'] || selectedVoiceProfile.provider)}
+                    </div>
+                  </div>
+                  {goldenPreviewUrl && (
+                    <div className="mt-3 space-y-2">
+                      <audio controls src={`${apiBase}${goldenPreviewUrl}`} className="w-full" />
+                      <a href={`${apiBase}${goldenPreviewUrl}`} className="text-xs text-cyan-100 hover:text-white">
+                        Golden preview WAV
+                      </a>
+                    </div>
+                  )}
+                  {recipeReady && (
+                    <pre className="mt-3 max-h-36 overflow-auto rounded-lg bg-black/30 p-3 text-xs text-slate-200">
+                      {JSON.stringify(selectedVoiceProfile.selected_recipe, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              )}
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  onClick={uploadDatasetClip}
+                  disabled={!selectedVoiceProfile || busy === 'dataset-upload'}
+                  className="rounded-2xl border border-cyan-300/40 px-4 py-3 text-sm text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-50"
+                >
+                  {busy === 'dataset-upload' ? 'Processing...' : 'Upload/Manage Dataset'}
+                </button>
+                <button
+                  onClick={analyzeReferenceDataset}
+                  disabled={!selectedVoiceProfile?.reference_dataset_id || busy === 'dataset-analyze'}
+                  className="rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10 disabled:opacity-50"
+                >
+                  {busy === 'dataset-analyze' ? 'Analyzing...' : 'Analyze References'}
+                </button>
+                <button
+                  onClick={attachCharacterModel}
+                  disabled={!selectedVoiceProfile || busy === 'attach-model'}
+                  className="rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10 disabled:opacity-50"
+                >
+                  {busy === 'attach-model' ? 'Attaching...' : 'Train/Attach Character Model'}
+                </button>
+                <button
+                  onClick={runCharacterCalibrationBatch}
+                  disabled={!selectedVoiceProfile || busy === 'character-calibration'}
+                  className="rounded-2xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 disabled:opacity-50"
+                >
+                  {busy === 'character-calibration' ? 'Scoring...' : 'Generate Calibration Previews'}
+                </button>
+              </div>
+              {selectedVoiceProfile?.reference_datasets?.length ? (
+                <div className="mt-4 grid gap-3">
+                  {selectedVoiceProfile.reference_datasets.map((dataset) => (
+                    <div key={dataset.id} className="rounded-xl border border-white/10 bg-black/20 p-3 text-sm text-slate-300">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="font-medium text-slate-100">{dataset.display_name}</div>
+                          <div className="mt-1 text-xs text-slate-500">
+                            {dataset.character_slug} · {dataset.status} · {dataset.accepted_clip_count} accepted · {dataset.rejected_clip_count} rejected
+                          </div>
+                        </div>
+                        <div className="text-xs text-cyan-200">
+                          {Number(dataset.clean_speech_duration_seconds || 0).toFixed(2)}s clean speech
+                        </div>
+                      </div>
+                      <pre className="mt-3 max-h-36 overflow-auto rounded-lg bg-slate-950/60 p-3 text-xs text-slate-400">
+                        {JSON.stringify({ metrics: dataset.metrics, prosody: dataset.prosody_metrics }, null, 2)}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-4 rounded-xl border border-dashed border-white/10 px-3 py-4 text-sm text-slate-500">
+                  No character reference dataset yet. Uploading a dataset clip will create one for this profile.
+                </div>
+              )}
+              {characterBatch && (
+                <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-slate-100">Top matches</div>
+                      <div className="mt-1 text-xs text-slate-500">Batch {characterBatch.id} · {characterBatch.status}</div>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-3">
+                    {characterBatch.rankings.map((ranking, index) => {
+                      const recipe = (ranking.recipe || {}) as Record<string, unknown>;
+                      return (
+                        <div key={`${characterBatch.id}-${index}`} className="rounded-xl border border-white/10 p-3 text-sm text-slate-300">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <div className="font-medium text-slate-100">#{index + 1} score {Number(ranking.score || 0).toFixed(3)}</div>
+                              <div className="mt-1 text-xs text-slate-500">
+                                {String(ranking.provider || recipe.provider || 'provider')} · pitch {Number(ranking.pitch_score || 0).toFixed(3)} · rhythm {Number(ranking.rhythm_score || 0).toFixed(3)} · pause {Number(ranking.pause_score || 0).toFixed(3)}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => saveCharacterRecipe({ ...recipe, calibration_score: ranking.score })}
+                              disabled={busy === 'save-character-recipe'}
+                              className="rounded-xl border border-emerald-300/30 px-3 py-2 text-xs text-emerald-100 hover:bg-emerald-500/10 disabled:opacity-50"
+                            >
+                              Use this recipe
+                            </button>
+                          </div>
+                          {ranking.content_url && (
+                            <audio controls src={`${apiBase}${ranking.content_url}`} className="mt-3 w-full" />
+                          )}
+                        </div>
+                      );
+                    })}
+                    {characterBatch.rankings.length === 0 && (
+                      <div className="rounded-xl border border-dashed border-white/10 px-3 py-4 text-sm text-slate-500">
+                        No ranked previews completed. Provider diagnostics are available in the batch payload.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="mt-5 flex flex-wrap gap-3">
               <button
                 onClick={savePreset}
@@ -901,11 +1225,13 @@ const VoiceLabPage: React.FC = () => {
               </button>
               <select
                 value={previewProviderPreference}
-                onChange={(event) => setPreviewProviderPreference(event.target.value as 'auto' | 'openvoice' | 'espeak')}
+                onChange={(event) => setPreviewProviderPreference(event.target.value as 'auto' | 'openvoice' | 'xtts' | 'rvc' | 'espeak')}
                 className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
               >
                 <option value="auto">Preview: Auto</option>
                 <option value="openvoice">Preview: OpenVoice</option>
+                <option value="xtts">Preview: XTTS</option>
+                <option value="rvc">Preview: RVC</option>
                 <option value="espeak">Preview: espeak fallback</option>
               </select>
               <button

@@ -15,6 +15,14 @@ services:
       OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
       OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
       OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
+      VOICE_MODELS_DIR: ${VOICE_MODELS_DIR:-/data/uploads/voice_models}
+      XTTS_ENABLED: ${XTTS_ENABLED:-true}
+      XTTS_MODEL_DIR: ${XTTS_MODEL_DIR:-/data/uploads/voice_models}
+      XTTS_DEVICE: ${XTTS_DEVICE:-auto}
+      RVC_ENABLED: ${RVC_ENABLED:-false}
+      RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
+      RVC_RMVPE_PATH: ${RVC_RMVPE_PATH:-}
+      RVC_INFER_COMMAND: ${RVC_INFER_COMMAND:-}
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     ports: ["8000:8000"]
     depends_on:
@@ -25,6 +33,7 @@ services:
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../backend/storage/voice_models:/data/uploads/voice_models
       - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
       - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 
@@ -48,6 +57,14 @@ services:
       OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
       OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
       OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
+      VOICE_MODELS_DIR: ${VOICE_MODELS_DIR:-/data/uploads/voice_models}
+      XTTS_ENABLED: ${XTTS_ENABLED:-true}
+      XTTS_MODEL_DIR: ${XTTS_MODEL_DIR:-/data/uploads/voice_models}
+      XTTS_DEVICE: ${XTTS_DEVICE:-auto}
+      RVC_ENABLED: ${RVC_ENABLED:-false}
+      RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
+      RVC_RMVPE_PATH: ${RVC_RMVPE_PATH:-}
+      RVC_INFER_COMMAND: ${RVC_INFER_COMMAND:-}
     depends_on:
       api:
         condition: service_healthy
@@ -59,6 +76,7 @@ services:
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../backend/storage/voice_models:/data/uploads/voice_models
       - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
       - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 
@@ -76,6 +94,14 @@ services:
       OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
       OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
       OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
+      VOICE_MODELS_DIR: ${VOICE_MODELS_DIR:-/data/uploads/voice_models}
+      XTTS_ENABLED: ${XTTS_ENABLED:-true}
+      XTTS_MODEL_DIR: ${XTTS_MODEL_DIR:-/data/uploads/voice_models}
+      XTTS_DEVICE: ${XTTS_DEVICE:-auto}
+      RVC_ENABLED: ${RVC_ENABLED:-false}
+      RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
+      RVC_RMVPE_PATH: ${RVC_RMVPE_PATH:-}
+      RVC_INFER_COMMAND: ${RVC_INFER_COMMAND:-}
     depends_on:
       api:
         condition: service_healthy
@@ -87,6 +113,7 @@ services:
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../backend/storage/voice_models:/data/uploads/voice_models
       - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
       - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 
@@ -104,6 +131,14 @@ services:
       OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
       OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
       OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
+      VOICE_MODELS_DIR: ${VOICE_MODELS_DIR:-/data/uploads/voice_models}
+      XTTS_ENABLED: ${XTTS_ENABLED:-true}
+      XTTS_MODEL_DIR: ${XTTS_MODEL_DIR:-/data/uploads/voice_models}
+      XTTS_DEVICE: ${XTTS_DEVICE:-auto}
+      RVC_ENABLED: ${RVC_ENABLED:-false}
+      RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
+      RVC_RMVPE_PATH: ${RVC_RMVPE_PATH:-}
+      RVC_INFER_COMMAND: ${RVC_INFER_COMMAND:-}
     depends_on:
       api:
         condition: service_healthy
@@ -115,6 +150,7 @@ services:
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../backend/storage/voice_models:/data/uploads/voice_models
       - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
       - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 

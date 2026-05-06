@@ -4,6 +4,86 @@ Last updated: 2026-05-05
 
 This file is regression memory. Add to it when bugs are found or fixed. Do not remove entries unless they are obsolete and clearly replaced by a better rule.
 
+## Voice Lab Character Slug Edited But Not Persisted
+
+Date found:
+2026-05-05
+
+Symptom:
+Typing `stewie_griffin` into Voice Lab and pressing **Train/Attach Character Model** still did not show the **Stewie selected recipe** panel. The UI kept showing only "No character reference dataset yet" because the live `Stewie Griffin` voice profile row had `character_slug = None`.
+
+Root cause:
+Voice Lab kept `characterSlug` and `modelPath` as local UI state, but **Save Changes** did not include `character_slug`, `model_checkpoint_path`, or `selected_recipe` in the character preset payload. **Train/Attach Character Model** also did not send `character_slug`, and the attach route/schema/service could not persist it.
+
+Fix:
+Voice Lab now sends `character_slug`, `model_checkpoint_path`, and selected recipe metadata when saving a preset; attach-model now accepts and persists `character_slug`; the live Stewie profile was repaired to `character_slug='stewie_griffin'`, provider `xtts`, and model path `/data/uploads/voice_models/shared/xtts_v2`.
+
+Regression test:
+`python3 -m pytest backend/app/tests/test_vertical_slice.py -k 'stewie_selected_recipe or xtts_provider_uses_stewie or character_reference_dataset_upload_analyze_and_attach_model'` and `npm run build`.
+
+Rule:
+Do not rely on visible Voice Lab fields as proof that profile identity is persisted. Verify the backend `VoiceProfileSummary` includes `character_slug`, `model_checkpoint_path`, `selected_recipe_status.ready_for_test_render`, and the golden preview URL.
+
+## XTTS Enabled In Code But Not In Docker Runtime
+
+Date found:
+2026-05-05
+
+Symptom:
+The Stewie selected recipe validated locally, but Docker API/worker containers either reported `XTTS_ENABLED=False`, could not see `/data/uploads/voice_models/stewie_griffin/selected_recipe.json`, or failed XTTS imports/synthesis because OpenVoice/Melo dependency installs downgraded or disturbed Coqui XTTS dependencies.
+
+Root cause:
+Compose did not enable XTTS by default or mount the host `backend/storage/voice_models` tree into `/data/uploads/voice_models`, and the Dockerfile installed OpenVoice/Melo after Coqui XTTS without restoring the XTTS-critical runtime pins.
+
+Fix:
+Enabled XTTS in compose for API, worker, voice worker, and beat; mounted `backend/storage/voice_models` into `/data/uploads/voice_models`; pinned CPU `torch==2.8.0`/`torchaudio==2.8.0`; removed `torchcodec`; restored `transformers==4.57.6`/`tokenizers==0.22.2`; and pinned `setuptools==80.9.0` so legacy `pkg_resources` imports still work.
+
+Regression test:
+`docker compose -f deploy/compose/docker-compose.yml config`, Docker API/worker XTTS import checks, Docker API selected-recipe validation, Docker API `XTTSProvider().synthesize_line(...)` writing `stewie_recipe_smoke_container.wav`, and `python3 -m pytest backend/app/tests/test_vertical_slice.py -k 'xtts_provider_uses_stewie or stewie_selected_recipe'`.
+
+Rule:
+Do not claim XTTS is enabled from Python code or env vars alone. Verify the actual Docker API/worker runtime can import XTTS, see mounted voice model artifacts, validate the selected recipe, and synthesize through the provider without fallback.
+
+## Selected Character XTTS Recipe Bypassed During Render
+
+Date found:
+2026-05-05
+
+Symptom:
+A working Stewie Griffin XTTS smoke WAV and `selected_recipe.json` existed, but OmniPoster could still rely on DB profile defaults, generic XTTS settings, cache hits, or fallback TTS instead of the exact golden recipe and referenced files.
+
+Root cause:
+The XTTS provider did not load and validate `backend/storage/voice_models/stewie_griffin/selected_recipe.json` as the source of truth before synthesis, and render metadata did not expose the golden preview WAV plus exact `recipe_used` payload.
+
+Fix:
+Added a selected character recipe loader/validator, wired Stewie XTTS synthesis to validate checkpoint/reference/golden paths before use, disabled cache bypass for this validated recipe path, exposed Voice Lab golden-preview status, persisted `recipe_used` and `golden_preview_wav` in segment metadata, and expanded render verification audio checks.
+
+Regression test:
+`backend/app/tests/test_vertical_slice.py::test_stewie_selected_recipe_validates_required_paths`, `test_xtts_provider_uses_stewie_selected_recipe_exactly`, and `test_stewie_render_verification_requires_golden_preview`.
+
+Rule:
+For licensed character recipes, render and preview must use the saved selected-recipe file exactly, validate all referenced artifacts before synthesis, and fail closed instead of falling back or serving stale cached audio.
+
+## OpenVoice Treated As Complete Character Replication Stack
+
+Date found:
+2026-05-05
+
+Symptom:
+Character profiles could be calibrated through OpenVoice-style recipes, but the system did not persist a full per-character dataset, prosody target, attached XTTS/RVC model path, scored recipe, or render verification gate for near-identical licensed character replication.
+
+Root cause:
+The voice stack treated OpenVoice tone-color conversion as the primary clone path instead of one optional layer in a larger dataset-backed character voice pipeline.
+
+Fix:
+Added generic reference datasets, aggregate dataset metrics, prosody analysis, attached model/checkpoint metadata, selected recipe JSON, calibration scores, optional XTTS/RVC providers, scored calibration batches, render verification, and Peter/Stewie starter profile directories without committing media/checkpoints.
+
+Regression test:
+`backend/app/tests/test_vertical_slice.py::test_character_reference_dataset_upload_analyze_and_attach_model`, `test_prosody_analyzer_extracts_pitch_pause_and_energy`, `test_character_calibration_batch_scores_and_saves_recipe`, `test_character_render_verification_marks_profile_verified`, and `test_tts_provider_capabilities_route_returns_registry_state`.
+
+Rule:
+Do not claim character voice replication is near-identical from OpenVoice reference audio alone. Require dataset validation, target prosody metrics, exact provider/model/recipe persistence, scored previews, and render verification.
+
 ## Reference Audio Treated Like Full Performance Clone
 
 Date found:

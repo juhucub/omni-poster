@@ -102,7 +102,7 @@ def build_generation_voice_manifest(project_id: int, parsed_lines: list[dict], d
             profile_payload = _default_voice_profile_payload(speaker, slot_index)
 
         provider = str(profile_payload.get("provider") or "espeak").strip().lower()
-        fallback_allowed = provider != "openvoice"
+        fallback_allowed = provider not in {"openvoice", "xtts", "rvc"}
         profile_payload = {
             **profile_payload,
             "requested_provider": provider,

@@ -72,3 +72,7 @@ celery==5.4.0
 psycopg[binary]==3.2.9
 redis==5.0.8
 soundfile==0.13.1
+coqui-tts
+torch==2.8.0
+torchaudio==2.8.0
+transformers==4.57.6
