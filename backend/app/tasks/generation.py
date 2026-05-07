@@ -176,6 +176,19 @@ def process_generation_job(job_id: int) -> dict:
         job.status = "completed"
         job.progress = 100
         job.finished_at = datetime.utcnow()
+        if job.started_at:
+            generation_job_duration_seconds = max((job.finished_at - job.started_at).total_seconds(), 0.0)
+            job_tts_result = dict(job.tts_result_json or {})
+            job_tts_result["generation_job_duration_seconds"] = generation_job_duration_seconds
+            job.tts_result_json = job_tts_result
+            output_metadata = dict(output_asset.metadata_json or {})
+            output_metadata["generation_job_duration_seconds"] = generation_job_duration_seconds
+            if isinstance(output_metadata.get("tts_result"), dict):
+                output_metadata["tts_result"] = {
+                    **dict(output_metadata["tts_result"]),
+                    "generation_job_duration_seconds": generation_job_duration_seconds,
+                }
+            output_asset.metadata_json = output_metadata
         sync_project_state(project)
         create_notification(
             db,

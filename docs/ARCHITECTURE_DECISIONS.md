@@ -1,23 +1,35 @@
 # Omniposter Architecture Decisions
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 This file records architectural decisions that future Codex agents should not reverse casually.
 
-## ADR-001: Use Context Docs As Living Project Memory
+## ADR-001: Use Tiered Context Docs As Living Project Memory
 
 Status: Accepted
-Date: 2026-05-01
+Date: 2026-05-01, updated 2026-05-06
 
 ### Context
 
-Codex agents need durable project memory to avoid repeating mistakes, ignoring current status, or reversing prior decisions.
+Codex agents need durable project memory to avoid repeating mistakes, ignoring current status, or reversing prior decisions. Reading every full context doc for every narrow task wastes context tokens and makes focused work harder.
 
 ### Decision
 
-Omniposter uses a `/docs` level context system plus root `AGENTS.md`:
+Omniposter uses a tiered `/docs` context system plus root `AGENTS.md`.
+
+Always-read tier:
 
 - `AGENTS.md`
+- `docs/AGENT_BRIEF.md`
+- `docs/CONTEXT_INDEX.md`
+
+Routing/map tier:
+
+- `docs/TASK_ROUTING.md`
+- `docs/REPO_MAP.md`
+
+Full context tier, read selectively based on task scope:
+
 - `docs/PROJECT_MANUAL.md`
 - `docs/CURRENT_STATUS.md`
 - `docs/KNOWN_MISTAKES.md`
@@ -25,13 +37,14 @@ Omniposter uses a `/docs` level context system plus root `AGENTS.md`:
 - `docs/MVP_CHECKLIST.md`
 - `docs/CODEX_WORKFLOW.md`
 
-Agents must read these before implementation and update them only when necessary.
+Agents must use `docs/CONTEXT_INDEX.md`, `docs/TASK_ROUTING.md`, and `docs/REPO_MAP.md` to decide which full docs and code areas to inspect. Full-doc reading remains required for broad audits, MVP-wide verification, architecture changes, or explicit user requests.
 
 ### Consequences
 
 - Project knowledge is maintained in-repo.
 - Completion claims require evidence.
 - Documentation updates must be small and factual.
+- Context-token usage is reduced for narrow tasks without weakening evidence rules, regression memory, or architecture protection.
 
 ### Files/Areas Affected
 
