@@ -12,6 +12,7 @@ celery = Celery(
         "app.tasks.publish",
         "app.tasks.scheduler",
         "app.tasks.voice_preview",
+        "app.tasks.voice_operations",
     ],
 )
 
@@ -24,6 +25,8 @@ celery.conf.update(
         "app.tasks.scheduler.dispatch_due_publish_jobs": {"queue": "publish"},
         "app.tasks.voice_preview.process_voice_lab_preview": {"queue": "voice_preview"},
         "app.tasks.voice_preview.reconcile_stale_voice_preview_jobs": {"queue": "voice_preview"},
+        "app.tasks.voice_operations.process_voice_operation_job": {"queue": "voice_preview"},
+        "app.tasks.voice_operations.process_voice_calibration_batch": {"queue": "voice_preview"},
     },
     worker_max_tasks_per_child=200,
     task_acks_late=True,
@@ -38,6 +41,18 @@ celery.conf.update(
         "app.tasks.voice_preview.process_voice_lab_preview": {
             "soft_time_limit": 240,
             "time_limit": 300,
+            "acks_late": False,
+            "reject_on_worker_lost": False,
+        },
+        "app.tasks.voice_operations.process_voice_operation_job": {
+            "soft_time_limit": 840,
+            "time_limit": 900,
+            "acks_late": False,
+            "reject_on_worker_lost": False,
+        },
+        "app.tasks.voice_operations.process_voice_calibration_batch": {
+            "soft_time_limit": 840,
+            "time_limit": 900,
             "acks_late": False,
             "reject_on_worker_lost": False,
         },

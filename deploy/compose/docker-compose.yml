@@ -9,12 +9,39 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
       REDIS_URL: redis://redis:6379/0
+      OMNI_CONTAINER_ROLE: api
       BUNDLED_MEDIA_DIR: /app/backend/storage
       MEDIA_DIR: /data/uploads
       OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
       OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
       OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
       OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
+      VOICE_MODELS_DIR: ${VOICE_MODELS_DIR:-/data/uploads/voice_models}
+      XTTS_ENABLED: ${XTTS_ENABLED:-true}
+      XTTS_MODEL_DIR: ${XTTS_MODEL_DIR:-/data/uploads/voice_models}
+      XTTS_DEVICE: ${XTTS_DEVICE:-auto}
+      XTTS_WORKER_CACHE_ENABLED: ${XTTS_WORKER_CACHE_ENABLED:-true}
+      XTTS_WORKER_CACHE_MAX_ENTRIES: ${XTTS_WORKER_CACHE_MAX_ENTRIES:-2}
+      XTTS_TORCH_INFERENCE_MODE_ENABLED: ${XTTS_TORCH_INFERENCE_MODE_ENABLED:-true}
+      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-4}
+      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-1}
+      XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE: ${XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE:-}
+      RENDER_PROFILING_ENABLED: ${RENDER_PROFILING_ENABLED:-true}
+      RENDER_PREVIEW_WIDTH: ${RENDER_PREVIEW_WIDTH:-1080}
+      RENDER_PREVIEW_HEIGHT: ${RENDER_PREVIEW_HEIGHT:-1920}
+      RENDER_PREVIEW_FPS_CAP: ${RENDER_PREVIEW_FPS_CAP:-24}
+      RENDER_EXPORT_WIDTH: ${RENDER_EXPORT_WIDTH:-1080}
+      RENDER_EXPORT_HEIGHT: ${RENDER_EXPORT_HEIGHT:-1920}
+      RENDER_EXPORT_FPS_CAP: ${RENDER_EXPORT_FPS_CAP:-30}
+      RENDER_FFMPEG_THREAD_CAP: ${RENDER_FFMPEG_THREAD_CAP:-8}
+      RENDER_PREVIEW_ENCODE_PRESET: ${RENDER_PREVIEW_ENCODE_PRESET:-veryfast}
+      RENDER_PREVIEW_CRF: ${RENDER_PREVIEW_CRF:-24}
+      RENDER_EXPORT_ENCODE_PRESET: ${RENDER_EXPORT_ENCODE_PRESET:-faster}
+      RENDER_EXPORT_CRF: ${RENDER_EXPORT_CRF:-22}
+      RVC_ENABLED: ${RVC_ENABLED:-false}
+      RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
+      RVC_RMVPE_PATH: ${RVC_RMVPE_PATH:-}
+      RVC_INFER_COMMAND: ${RVC_INFER_COMMAND:-}
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     ports: ["8000:8000"]
     depends_on:
@@ -25,6 +52,7 @@ services:
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../backend/storage/voice_models:/data/uploads/voice_models
       - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
       - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 
@@ -42,12 +70,40 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
       REDIS_URL: redis://redis:6379/0
+      OMNI_CONTAINER_ROLE: generation_worker
       BUNDLED_MEDIA_DIR: /app/backend/storage
       MEDIA_DIR: /data/uploads
       OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
       OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
       OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
       OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
+      VOICE_MODELS_DIR: ${VOICE_MODELS_DIR:-/data/uploads/voice_models}
+      XTTS_ENABLED: ${XTTS_ENABLED:-true}
+      XTTS_MODEL_DIR: ${XTTS_MODEL_DIR:-/data/uploads/voice_models}
+      XTTS_DEVICE: ${XTTS_DEVICE:-auto}
+      XTTS_WORKER_CACHE_ENABLED: ${XTTS_WORKER_CACHE_ENABLED:-true}
+      XTTS_WORKER_CACHE_MAX_ENTRIES: ${XTTS_WORKER_CACHE_MAX_ENTRIES:-2}
+      XTTS_TORCH_INFERENCE_MODE_ENABLED: ${XTTS_TORCH_INFERENCE_MODE_ENABLED:-true}
+      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-4}
+      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-1}
+      XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE: ${XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE:-}
+      RENDER_PROFILING_ENABLED: ${RENDER_PROFILING_ENABLED:-true}
+      RENDER_PREVIEW_WIDTH: ${RENDER_PREVIEW_WIDTH:-1080}
+      RENDER_PREVIEW_HEIGHT: ${RENDER_PREVIEW_HEIGHT:-1920}
+      RENDER_PREVIEW_FPS_CAP: ${RENDER_PREVIEW_FPS_CAP:-24}
+      RENDER_EXPORT_WIDTH: ${RENDER_EXPORT_WIDTH:-1080}
+      RENDER_EXPORT_HEIGHT: ${RENDER_EXPORT_HEIGHT:-1920}
+      RENDER_EXPORT_FPS_CAP: ${RENDER_EXPORT_FPS_CAP:-30}
+      RENDER_FFMPEG_THREAD_CAP: ${RENDER_FFMPEG_THREAD_CAP:-8}
+      RENDER_PREVIEW_ENCODE_PRESET: ${RENDER_PREVIEW_ENCODE_PRESET:-veryfast}
+      RENDER_PREVIEW_CRF: ${RENDER_PREVIEW_CRF:-24}
+      RENDER_EXPORT_ENCODE_PRESET: ${RENDER_EXPORT_ENCODE_PRESET:-faster}
+      RENDER_EXPORT_CRF: ${RENDER_EXPORT_CRF:-22}
+      CELERY_GENERATION_CONCURRENCY: ${CELERY_GENERATION_CONCURRENCY:-1}
+      RVC_ENABLED: ${RVC_ENABLED:-false}
+      RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
+      RVC_RMVPE_PATH: ${RVC_RMVPE_PATH:-}
+      RVC_INFER_COMMAND: ${RVC_INFER_COMMAND:-}
     depends_on:
       api:
         condition: service_healthy
@@ -55,10 +111,11 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    command: ["celery", "-A", "app.celery_app.celery", "worker", "-Q", "generation,publish", "--concurrency=2"]
+    command: ["sh", "-c", "celery -A app.celery_app.celery worker -Q generation,publish --concurrency=${CELERY_GENERATION_CONCURRENCY:-1}"]
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../backend/storage/voice_models:/data/uploads/voice_models
       - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
       - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 
@@ -70,12 +127,27 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
       REDIS_URL: redis://redis:6379/0
+      OMNI_CONTAINER_ROLE: voice_worker
       BUNDLED_MEDIA_DIR: /app/backend/storage
       MEDIA_DIR: /data/uploads
       OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
       OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
       OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
       OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
+      VOICE_MODELS_DIR: ${VOICE_MODELS_DIR:-/data/uploads/voice_models}
+      XTTS_ENABLED: ${XTTS_ENABLED:-true}
+      XTTS_MODEL_DIR: ${XTTS_MODEL_DIR:-/data/uploads/voice_models}
+      XTTS_DEVICE: ${XTTS_DEVICE:-auto}
+      XTTS_WORKER_CACHE_ENABLED: ${XTTS_WORKER_CACHE_ENABLED:-true}
+      XTTS_WORKER_CACHE_MAX_ENTRIES: ${XTTS_WORKER_CACHE_MAX_ENTRIES:-2}
+      XTTS_TORCH_INFERENCE_MODE_ENABLED: ${XTTS_TORCH_INFERENCE_MODE_ENABLED:-true}
+      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-4}
+      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-1}
+      XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE: ${XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE:-}
+      RVC_ENABLED: ${RVC_ENABLED:-false}
+      RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
+      RVC_RMVPE_PATH: ${RVC_RMVPE_PATH:-}
+      RVC_INFER_COMMAND: ${RVC_INFER_COMMAND:-}
     depends_on:
       api:
         condition: service_healthy
@@ -83,10 +155,11 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    command: ["celery", "-A", "app.celery_app.celery", "worker", "-Q", "voice_preview", "--concurrency=1"]
+    command: ["sh", "-c", "celery -A app.celery_app.celery worker -Q voice_preview --concurrency=1 --max-tasks-per-child=${CELERY_VOICE_MAX_TASKS_PER_CHILD:-1}"]
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../backend/storage/voice_models:/data/uploads/voice_models
       - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
       - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 
@@ -104,6 +177,20 @@ services:
       OPENVOICE_REPO_DIR: ${OPENVOICE_REPO_DIR:-/opt/openvoice/repo}
       OPENVOICE_CHECKPOINTS_DIR: ${OPENVOICE_CHECKPOINTS_DIR:-/opt/openvoice/checkpoints_v2}
       OPENVOICE_DEVICE: ${OPENVOICE_DEVICE:-auto}
+      VOICE_MODELS_DIR: ${VOICE_MODELS_DIR:-/data/uploads/voice_models}
+      XTTS_ENABLED: ${XTTS_ENABLED:-true}
+      XTTS_MODEL_DIR: ${XTTS_MODEL_DIR:-/data/uploads/voice_models}
+      XTTS_DEVICE: ${XTTS_DEVICE:-auto}
+      XTTS_WORKER_CACHE_ENABLED: ${XTTS_WORKER_CACHE_ENABLED:-true}
+      XTTS_WORKER_CACHE_MAX_ENTRIES: ${XTTS_WORKER_CACHE_MAX_ENTRIES:-2}
+      XTTS_TORCH_INFERENCE_MODE_ENABLED: ${XTTS_TORCH_INFERENCE_MODE_ENABLED:-true}
+      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-4}
+      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-1}
+      XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE: ${XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE:-}
+      RVC_ENABLED: ${RVC_ENABLED:-false}
+      RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
+      RVC_RMVPE_PATH: ${RVC_RMVPE_PATH:-}
+      RVC_INFER_COMMAND: ${RVC_INFER_COMMAND:-}
     depends_on:
       api:
         condition: service_healthy
@@ -115,6 +202,7 @@ services:
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
+      - ../../backend/storage/voice_models:/data/uploads/voice_models
       - ../../vendor/OpenVoice:/opt/openvoice/repo:ro
       - ../../vendor/OpenVoice/checkpoints_v2:/opt/openvoice/checkpoints_v2:ro
 

@@ -28,6 +28,7 @@ import type {
   ScriptLine,
   ScriptRevision,
   SocialAccount,
+  ProjectPreviewSettings,
 } from '../api/models';
 import Sidebar from '../components/Sidebar';
 
@@ -55,6 +56,28 @@ const linesToDraft = (lines: ScriptLine[]) =>
   lines.map((line) => `<${line.speaker}> ${line.text}`).join('\n');
 
 const normalizeDraft = (value: string) => value.trim().replace(/\r\n/g, '\n');
+
+const defaultPreviewSettings: ProjectPreviewSettings = {
+  background_asset_id: null,
+  background_preset_id: null,
+  background_source_type: null,
+  background_url: null,
+  background_metadata: {},
+  speaker_mappings: [],
+  layout: {
+    character_scale: 1,
+    chat_font_size_px: 18,
+  },
+};
+
+const clampPreviewLayout = (settings: ProjectPreviewSettings): ProjectPreviewSettings => ({
+  ...settings,
+  layout: {
+    // Match backend renderer bounds so saved controls cannot create an impossible preview state.
+    character_scale: Math.min(Math.max(Number(settings.layout?.character_scale || 1), 0.75), 1.5),
+    chat_font_size_px: Math.min(Math.max(Number(settings.layout?.chat_font_size_px || 18), 12), 32),
+  },
+});
 
 const generationStageLabel = (job: GenerationJob | null) => {
   if (!job) {
@@ -108,6 +131,7 @@ const ProjectEditorPage: React.FC = () => {
   const [routing, setRouting] = useState<RoutingSuggestion | null>(null);
   const [history, setHistory] = useState<{ jobs: PublishJob[]; posts: PublishedPost[] }>({ jobs: [], posts: [] });
   const [speakerBindings, setSpeakerBindings] = useState<SpeakerBinding[]>([]);
+  const [previewSettings, setPreviewSettings] = useState<ProjectPreviewSettings>(defaultPreviewSettings);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
   const [publishJob, setPublishJob] = useState<PublishJob | null>(null);
@@ -154,6 +178,30 @@ const ProjectEditorPage: React.FC = () => {
     const names = (scriptLines.length ? scriptLines : script?.parsed_lines || []).map((line) => line.speaker.trim()).filter(Boolean);
     return Array.from(new Set(names));
   }, [script?.parsed_lines, scriptLines]);
+  const selectedBackgroundUrl = useMemo(
+    () => backgroundAsset?.content_url || previewSettings.background_url || null,
+    [backgroundAsset?.content_url, previewSettings.background_url]
+  );
+  const previewSpeakerMappings = useMemo(
+    () =>
+      detectedSpeakers.map((speakerName) => {
+        // Script speakers own the preview order; bindings attach the reusable character and voice profile.
+        const binding = speakerBindings.find((item) => item.speaker_name === speakerName);
+        const preset = binding
+          ? characterPresets.find((item) => item.id === binding.character_preset_id)
+          : null;
+        const sample = scriptLines.find((line) => line.speaker.trim() === speakerName && line.text.trim());
+        return {
+          speaker_name: speakerName,
+          character_display_name: binding?.character_display_name || preset?.display_name || null,
+          character_portrait_url: binding?.character_portrait_url || preset?.portrait_url || null,
+          voice_profile_id: binding?.voice_profile_id || preset?.voice_profile_id || null,
+          provider: binding?.provider || preset?.tts_provider || null,
+          sample_text: sample?.text || 'Dialogue text will appear here.',
+        };
+      }),
+    [characterPresets, detectedSpeakers, scriptLines, speakerBindings]
+  );
 
   const toUtcIso = (value: string) => (value ? new Date(value).toISOString() : null);
   const apiBase = apiBaseUrl;
@@ -165,6 +213,41 @@ const ProjectEditorPage: React.FC = () => {
       return path;
     }
     return `${apiBase}${path.startsWith('/') ? path : `/${path}`}`;
+  };
+  const persistPreviewLayout = async (nextSettings: ProjectPreviewSettings) => {
+    const normalized = clampPreviewLayout(nextSettings);
+    setPreviewSettings(normalized);
+    try {
+      const response = await apiClient.patch<ProjectPreviewSettings>(`/projects/${id}/preview-settings`, {
+        layout: normalized.layout,
+      });
+      setPreviewSettings(clampPreviewLayout(response.data));
+      setError(null);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save preview layout settings.');
+    }
+  };
+
+  const adjustCharacterScale = (delta: number) => {
+    const next = {
+      ...previewSettings,
+      layout: {
+        ...previewSettings.layout,
+        character_scale: Number((previewSettings.layout.character_scale + delta).toFixed(2)),
+      },
+    };
+    void persistPreviewLayout(next);
+  };
+
+  const adjustChatFontSize = (delta: number) => {
+    const next = {
+      ...previewSettings,
+      layout: {
+        ...previewSettings.layout,
+        chat_font_size_px: previewSettings.layout.chat_font_size_px + delta,
+      },
+    };
+    void persistPreviewLayout(next);
   };
 
   const hydrateScriptState = (revision: ScriptRevision | null) => {
@@ -209,6 +292,7 @@ const ProjectEditorPage: React.FC = () => {
       ]);
 
       setProject(projectResponse.data);
+      setPreviewSettings(clampPreviewLayout(projectResponse.data.preview_settings || defaultPreviewSettings));
       setAssets(assetsResponse.data);
       setPresets(presetsResponse.data);
       setCharacterPresets(characterPresetsResponse.data.items);
@@ -226,6 +310,7 @@ const ProjectEditorPage: React.FC = () => {
         setGenerationJob(activeGenerationResponse.data);
       } catch (activeErr: any) {
         if (activeErr.response?.status === 404) {
+          // Keep completed render diagnostics visible after refresh when there is no active worker job.
           setGenerationJob(latestGenerationJob);
         } else {
           throw activeErr;
@@ -305,9 +390,25 @@ const ProjectEditorPage: React.FC = () => {
 
     try {
       setBusy('upload');
-      await apiClient.post(`/projects/${id}/assets/background`, formData, {
+      const response = await apiClient.post<Asset>(`/projects/${id}/assets/background`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
+      setAssets((current) => [response.data, ...current.filter((asset) => asset.id !== response.data.id)]);
+      setProject((current) =>
+        current
+          ? { ...current, background_asset_id: response.data.id, background_source_type: response.data.source_type }
+          : current
+      );
+      setPreviewSettings((current) =>
+        clampPreviewLayout({
+          ...current,
+          background_asset_id: response.data.id,
+          background_preset_id: response.data.preset_key,
+          background_source_type: response.data.source_type,
+          background_url: response.data.content_url,
+          background_metadata: response.data.metadata,
+        })
+      );
       setSelectedFile(null);
       await loadAll();
     } catch (err: any) {
@@ -320,7 +421,23 @@ const ProjectEditorPage: React.FC = () => {
   const choosePreset = async (presetKey: string) => {
     try {
       setBusy(`preset-${presetKey}`);
-      await apiClient.post(`/projects/${id}/assets/background/preset/${presetKey}`);
+      const response = await apiClient.post<Asset>(`/projects/${id}/assets/background/preset/${presetKey}`);
+      setAssets((current) => [response.data, ...current.filter((asset) => asset.id !== response.data.id)]);
+      setProject((current) =>
+        current
+          ? { ...current, background_asset_id: response.data.id, background_source_type: response.data.source_type }
+          : current
+      );
+      setPreviewSettings((current) =>
+        clampPreviewLayout({
+          ...current,
+          background_asset_id: response.data.id,
+          background_preset_id: response.data.preset_key,
+          background_source_type: response.data.source_type,
+          background_url: response.data.content_url,
+          background_metadata: response.data.metadata,
+        })
+      );
       await loadAll();
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Background preset selection failed.');
@@ -412,6 +529,8 @@ const ProjectEditorPage: React.FC = () => {
         existing.character_display_name = preset.display_name;
         existing.voice_profile_id = preset.voice_profile_id;
         existing.provider = preset.tts_provider;
+        existing.character_portrait_filename = preset.portrait_filename;
+        existing.character_portrait_url = preset.portrait_url;
       } else {
         nextBindings.push({
           id: 0,
@@ -420,6 +539,8 @@ const ProjectEditorPage: React.FC = () => {
           character_display_name: preset.display_name,
           voice_profile_id: preset.voice_profile_id,
           provider: preset.tts_provider,
+          character_portrait_filename: preset.portrait_filename,
+          character_portrait_url: preset.portrait_url,
         });
       }
       await saveSpeakerBindings(nextBindings);
@@ -443,6 +564,7 @@ const ProjectEditorPage: React.FC = () => {
       }
       if (detectedSpeakers.length > 0) {
         const ensuredBindings = detectedSpeakers.map((speakerName) => {
+          // Queueing a render should snapshot every detected speaker, including newly typed script names.
           const existing = speakerBindings.find((item) => item.speaker_name === speakerName);
           if (existing) {
             return existing;
@@ -458,6 +580,8 @@ const ProjectEditorPage: React.FC = () => {
             character_display_name: suggestedPreset?.display_name || '',
             voice_profile_id: suggestedPreset?.voice_profile_id || '',
             provider: suggestedPreset?.tts_provider || 'espeak',
+            character_portrait_filename: suggestedPreset?.portrait_filename || null,
+            character_portrait_url: suggestedPreset?.portrait_url || null,
           };
         });
         if (ensuredBindings.some((item) => !item.character_preset_id)) {
@@ -934,27 +1058,46 @@ const ProjectEditorPage: React.FC = () => {
                       {detectedSpeakers.map((speakerName) => {
                         const binding = speakerBindings.find((item) => item.speaker_name === speakerName);
                         return (
-                          <div key={speakerName} className="grid gap-3 rounded-2xl border border-white/10 bg-black/20 p-3 md:grid-cols-[0.4fr_0.6fr]">
+                          <div key={speakerName} className="rounded-2xl border border-white/10 bg-black/20 p-3">
                             <div>
                               <div className="text-sm font-medium text-slate-200">{speakerName}</div>
                               <div className="mt-1 text-xs text-slate-500">
                                 {binding ? `${binding.character_display_name} · ${binding.provider}` : 'No preset selected yet'}
                               </div>
                             </div>
-                            <select
-                              value={binding?.character_preset_id || ''}
-                              onChange={(event) => updateSpeakerBinding(speakerName, event.target.value)}
-                              className="rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm"
-                            >
-                              <option value="" disabled>
-                                Select a character preset
-                              </option>
-                              {characterPresets.map((preset) => (
-                                <option key={preset.id} value={preset.id}>
-                                  {preset.display_name} · {preset.tts_provider}
-                                </option>
-                              ))}
-                            </select>
+                            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                              {characterPresets.map((preset) => {
+                                const selected = binding?.character_preset_id === preset.id;
+                                return (
+                                  <button
+                                    key={preset.id}
+                                    onClick={() => updateSpeakerBinding(speakerName, preset.id)}
+                                    disabled={busy === `binding-${speakerName}`}
+                                    className={`flex items-center gap-3 rounded-xl border p-3 text-left text-sm transition ${
+                                      selected
+                                        ? 'border-cyan-300/60 bg-cyan-300/10 text-cyan-100'
+                                        : 'border-white/10 bg-slate-950/50 text-slate-300 hover:bg-white/10'
+                                    } disabled:opacity-60`}
+                                  >
+                                    <div className="grid h-14 w-12 shrink-0 place-items-center overflow-hidden rounded-lg border border-white/10 bg-black/30 text-[10px] text-slate-500">
+                                      {preset.portrait_url ? (
+                                        <img
+                                          src={toApiHref(preset.portrait_url)}
+                                          alt={preset.display_name}
+                                          className="h-full w-full object-cover"
+                                        />
+                                      ) : (
+                                        <span>Image</span>
+                                      )}
+                                    </div>
+                                    <span className="min-w-0">
+                                      <span className="block truncate font-medium">{preset.display_name}</span>
+                                      <span className="mt-1 block truncate text-xs text-slate-500">{preset.tts_provider}</span>
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
                         );
                       })}
@@ -1333,6 +1476,128 @@ const ProjectEditorPage: React.FC = () => {
             </section>
 
             <section className="space-y-6">
+              <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-xl font-semibold">Pre-Render Preview</h2>
+                    <p className="mt-2 text-sm text-slate-400">Selections update here before any render job is queued.</p>
+                  </div>
+                  <div className="text-right text-xs uppercase tracking-[0.2em] text-slate-500">
+                    {previewSettings.background_source_type || project?.background_source_type || 'draft'}
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_13rem]">
+                  <div className="relative mx-auto aspect-[9/16] w-full max-w-[22rem] overflow-hidden rounded-[2rem] border border-white/10 bg-slate-950 shadow-[0_24px_70px_rgba(2,6,23,0.45)]">
+                    {selectedBackgroundUrl ? (
+                      <video
+                        src={toApiHref(selectedBackgroundUrl)}
+                        muted
+                        loop
+                        playsInline
+                        autoPlay
+                        preload="metadata"
+                        className="absolute inset-0 h-full w-full object-cover opacity-75"
+                      />
+                    ) : (
+                      <div className="absolute inset-0 grid place-items-center bg-slate-950 text-sm text-slate-500">
+                        Select a background
+                      </div>
+                    )}
+                    <div className="absolute inset-x-0 bottom-[18%] flex items-end justify-between px-4">
+                      {previewSpeakerMappings.slice(0, 2).map((mapping, index) => (
+                        <div key={mapping.speaker_name} className="flex max-w-[42%] flex-col items-center gap-2">
+                          <div
+                            className="grid place-items-center overflow-hidden rounded-2xl border border-white/15 bg-slate-950/65"
+                            style={{
+                              width: `${96 * previewSettings.layout.character_scale}px`,
+                              height: `${150 * previewSettings.layout.character_scale}px`,
+                            }}
+                          >
+                            {mapping.character_portrait_url ? (
+                              <img
+                                src={toApiHref(mapping.character_portrait_url)}
+                                alt={mapping.character_display_name || mapping.speaker_name}
+                                className="h-full w-full object-contain"
+                              />
+                            ) : (
+                              <span className="px-2 text-center text-xs text-slate-400">
+                                {mapping.speaker_name}
+                              </span>
+                            )}
+                          </div>
+                          <div className="max-w-full rounded-full bg-black/60 px-3 py-1 text-center text-xs text-slate-100">
+                            {mapping.character_display_name || mapping.speaker_name}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="absolute inset-x-5 bottom-6 space-y-2">
+                      {(previewSpeakerMappings.length ? previewSpeakerMappings : [{ speaker_name: 'Speaker', sample_text: 'Dialogue text will appear here.' }]).slice(0, 2).map((mapping) => (
+                        <div key={mapping.speaker_name} className="rounded-2xl border border-white/10 bg-black/70 px-4 py-3 shadow-lg">
+                          <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-200">
+                            {mapping.speaker_name}
+                          </div>
+                          <div
+                            className="mt-1 leading-snug text-slate-100"
+                            style={{ fontSize: `${previewSettings.layout.chat_font_size_px}px` }}
+                          >
+                            {mapping.sample_text || 'Dialogue text will appear here.'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                      <div className="text-sm font-medium text-slate-100">Character Size</div>
+                      <div className="mt-2 text-2xl font-semibold text-cyan-100">
+                        {previewSettings.layout.character_scale.toFixed(2)}x
+                      </div>
+                      <div className="mt-3 flex gap-2">
+                        <button
+                          onClick={() => adjustCharacterScale(-0.05)}
+                          disabled={previewSettings.layout.character_scale <= 0.75}
+                          className="rounded-xl border border-white/10 px-3 py-2 text-sm hover:bg-white/10 disabled:opacity-40"
+                        >
+                          Smaller
+                        </button>
+                        <button
+                          onClick={() => adjustCharacterScale(0.05)}
+                          disabled={previewSettings.layout.character_scale >= 1.5}
+                          className="rounded-xl border border-white/10 px-3 py-2 text-sm hover:bg-white/10 disabled:opacity-40"
+                        >
+                          Larger
+                        </button>
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                      <div className="text-sm font-medium text-slate-100">Chat Font</div>
+                      <div className="mt-2 text-2xl font-semibold text-cyan-100">
+                        {previewSettings.layout.chat_font_size_px}px
+                      </div>
+                      <div className="mt-3 flex gap-2">
+                        <button
+                          onClick={() => adjustChatFontSize(-1)}
+                          disabled={previewSettings.layout.chat_font_size_px <= 12}
+                          className="rounded-xl border border-white/10 px-3 py-2 text-sm hover:bg-white/10 disabled:opacity-40"
+                        >
+                          Smaller
+                        </button>
+                        <button
+                          onClick={() => adjustChatFontSize(1)}
+                          disabled={previewSettings.layout.chat_font_size_px >= 32}
+                          className="rounded-xl border border-white/10 px-3 py-2 text-sm hover:bg-white/10 disabled:opacity-40"
+                        >
+                          Larger
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                 <h2 className="text-xl font-semibold">Current Output</h2>
                 <p className="mt-2 text-sm text-slate-400">The latest render stays centered in a responsive phone-frame preview so review playback matches the rest of the workspace.</p>

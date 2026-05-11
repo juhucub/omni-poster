@@ -12,6 +12,7 @@ os.environ.setdefault("OAUTH_TOKEN_ENCRYPTION_KEY", "test-oauth-encryption-key")
 os.environ.setdefault("FRONTEND_URL", "http://localhost:3000")
 os.environ.setdefault("MEDIA_DIR", "test_storage")
 os.environ.setdefault("BUNDLED_MEDIA_DIR", "test_storage/bundled")
+os.environ.setdefault("VOICE_MODELS_DIR", "test_storage/voice_models")
 os.environ.setdefault("YOUTUBE_CLIENT_ID", "youtube-client-id")
 os.environ.setdefault("YOUTUBE_CLIENT_SECRET", "youtube-client-secret")
 os.environ.setdefault("YOUTUBE_REDIRECT_URI", "http://testserver/social-accounts/youtube/callback")
@@ -27,7 +28,7 @@ from app.main import app
 TEST_DB_PATH = Path("test_omniposter.db")
 TEST_MEDIA_DIR = Path("test_storage")
 TEST_BUNDLED_MEDIA_DIR = TEST_MEDIA_DIR / "bundled"
-ALEMBIC_REVISION = "20260426_0007"
+ALEMBIC_REVISION = "20260511_0011"
 
 
 @pytest.fixture(autouse=True)

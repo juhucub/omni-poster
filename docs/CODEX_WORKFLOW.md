@@ -1,22 +1,22 @@
 # Omniposter Codex Workflow
 
-Last updated: 2026-05-01
+Last updated: 2026-05-06
 
 This is the required workflow for Codex tasks in Omniposter.
 
 ## 1. Read Context First
 
-Before changing anything, read:
+Before changing anything, always read:
 
 ```bash
 cat AGENTS.md
-cat docs/PROJECT_MANUAL.md
-cat docs/CURRENT_STATUS.md
-cat docs/KNOWN_MISTAKES.md
-cat docs/ARCHITECTURE_DECISIONS.md
-cat docs/MVP_CHECKLIST.md
-cat docs/CODEX_WORKFLOW.md
+cat docs/AGENT_BRIEF.md
+cat docs/CONTEXT_INDEX.md
 ```
+
+Then use `docs/CONTEXT_INDEX.md`, `docs/TASK_ROUTING.md`, and `docs/REPO_MAP.md` to choose the full context docs and code areas required for the task.
+
+Do not read every full context doc unless the task is broad, architectural, MVP-wide, or explicitly asks for a full audit.
 
 If a file is missing, create a minimal version and mention it in the final response.
 
@@ -37,17 +37,17 @@ Architecture changes require reading `docs/ARCHITECTURE_DECISIONS.md` carefully 
 
 ## 3. Audit Before Editing
 
-Before implementation, inspect relevant files.
+Before implementation, inspect relevant files. Prefer targeted inspection using `docs/TASK_ROUTING.md` and `docs/REPO_MAP.md` before broad repository scans.
 
-Recommended commands:
+Targeted examples:
 
 ```bash
-find . -maxdepth 3 -type f | sort | sed 's#^./##' | head -200
-find . -maxdepth 4 -type f \( -name '*.py' -o -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' -o -name '*.md' \) | sort
-grep -R "FastAPI\|APIRouter\|Celery\|ffmpeg\|OpenVoice\|tts\|voice\|preset\|character\|speaker\|segment" -n backend frontend docs 2>/dev/null | head -200
+rg --files backend/app/services backend/app/routers backend/app/tasks backend/app/tests frontend/src/pages frontend/src/api docs
+rg -n "OpenVoice|XTTS|RVC|tts|voice|provider" backend/app/services backend/app/routers backend/app/tests frontend/src/pages
+rg -n "background|preset|character|speaker|segment|generation" backend/app frontend/src docs
 ```
 
-Adapt commands to the actual repo structure.
+Use broader scans only when targeted inspection does not locate the relevant code or the task scope is broad. Exclude `.git`, `.venv`, `dist`, `build`, `__pycache__`, generated media, dependency caches, Docker volumes, and storage outputs.
 
 ## 4. Build A Small Plan
 
@@ -233,6 +233,27 @@ What this changes or constrains.
 - A new required output format is introduced.
 - A new safety rule should apply to every Codex task.
 
+### Update `docs/AGENT_BRIEF.md` only when:
+
+- The highest-value always-read project memory changes.
+- A new non-negotiable safety rule should be visible in the short brief.
+- Current P0 priorities materially change.
+
+### Update `docs/CONTEXT_INDEX.md` only when:
+
+- A context doc is added, removed, renamed, or its read conditions change.
+- The read-first strategy changes.
+
+### Update `docs/TASK_ROUTING.md` only when:
+
+- A common task type needs new routing guidance.
+- Relevant docs or code areas for an existing task type change.
+
+### Update `docs/REPO_MAP.md` only when:
+
+- Major backend, frontend, runtime, storage, or test areas move or are added.
+- A concise map entry becomes misleading.
+
 ### Update `AGENTS.md` only when:
 
 - A global agent instruction changes.
@@ -291,6 +312,10 @@ At the end of this task, decide whether any Codex context docs need to be update
 Treat these files as living project memory:
 
 - AGENTS.md
+- docs/AGENT_BRIEF.md
+- docs/CONTEXT_INDEX.md
+- docs/TASK_ROUTING.md
+- docs/REPO_MAP.md
 - docs/PROJECT_MANUAL.md
 - docs/CURRENT_STATUS.md
 - docs/KNOWN_MISTAKES.md
@@ -302,23 +327,21 @@ Required behavior:
 
 1. Always read these files before implementation:
    - AGENTS.md
-   - docs/PROJECT_MANUAL.md
-   - docs/CURRENT_STATUS.md
-   - docs/KNOWN_MISTAKES.md
-   - docs/ARCHITECTURE_DECISIONS.md
-   - docs/MVP_CHECKLIST.md
-   - docs/CODEX_WORKFLOW.md
+   - docs/AGENT_BRIEF.md
+   - docs/CONTEXT_INDEX.md
 
-2. After implementation or audit, update docs only when necessary.
+2. Use docs/CONTEXT_INDEX.md, docs/TASK_ROUTING.md, and docs/REPO_MAP.md to decide which full docs and code areas are required.
 
-3. If no doc update is needed, explicitly say:
+3. After implementation or audit, update docs only when necessary.
+
+4. If no doc update is needed, explicitly say:
    “No doc updates needed because: [reason].”
 
-4. Never mark something as complete without evidence from code, tests, or manual verification.
+5. Never mark something as complete without evidence from code, tests, or manual verification.
 
-5. Never overwrite the Project Manual casually. Only update docs/PROJECT_MANUAL.md if the user’s product intent, MVP scope, architecture, or roadmap has changed.
+6. Never overwrite the Project Manual casually. Only update docs/PROJECT_MANUAL.md if the user’s product intent, MVP scope, architecture, or roadmap has changed.
 
-6. Always keep documentation updates small, factual, and evidence-based.
+7. Always keep documentation updates small, factual, and evidence-based.
 
 Final response must include:
 
@@ -330,6 +353,7 @@ Final response must include:
 ## Documentation Updates
 ## Remaining Risks
 ## Recommended Next Task
+# User Flow To Follow For Testing Functionality (if necessary)
 ```
 
 ## Recommended Codex Prompt Pattern
@@ -344,6 +368,7 @@ Task:
 
 Constraints:
 - Read the Codex context docs first.
+- Use docs/CONTEXT_INDEX.md, docs/TASK_ROUTING.md, and docs/REPO_MAP.md for targeted context.
 - Keep the change scoped.
 - Do not touch .git.
 - Do not commit generated media, checkpoints, or local storage outputs.
@@ -372,7 +397,7 @@ Audit the current Omniposter repository against docs/MVP_CHECKLIST.md.
 
 Do not implement features yet.
 
-Read all Codex context docs first. Then inspect backend, frontend, Docker, storage, tests, and health-check code. Update docs/CURRENT_STATUS.md and docs/MVP_CHECKLIST.md with evidence-based statuses only. Do not mark anything Complete without file paths, endpoints, tests, or command results. Add missing known mistakes only if you find repeated regression risks in code.
+Read the always-read Codex context docs first, then use docs/CONTEXT_INDEX.md, docs/TASK_ROUTING.md, and docs/REPO_MAP.md to choose the full docs and code areas required for an MVP audit. Inspect backend, frontend, Docker, storage, tests, and health-check code. Update docs/CURRENT_STATUS.md and docs/MVP_CHECKLIST.md with evidence-based statuses only. Do not mark anything Complete without file paths, endpoints, tests, or command results. Add missing known mistakes only if you find repeated regression risks in code.
 
 Run the safest available verification commands, such as backend tests, frontend build/tests, and Docker health checks if configured.
 

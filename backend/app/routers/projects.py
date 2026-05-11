@@ -11,13 +11,15 @@ from app.schemas import (
     OkResponse,
     ProjectCreateRequest,
     ProjectListResponse,
+    ProjectPreviewSettings,
+    ProjectPreviewSettingsUpdate,
     ProjectSummary,
     ProjectUpdateRequest,
     SpeakerBindingListResponse,
     SpeakerBindingRequest,
 )
 from app.services.audit import record_audit
-from app.services.project_state import sync_project_state, to_project_summary
+from app.services.project_state import sync_project_state, to_project_preview_settings, to_project_summary, update_project_preview_settings
 from app.services.voice_profiles import list_project_speaker_bindings, suggest_project_speaker_bindings, upsert_project_speaker_bindings
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -73,6 +75,30 @@ def create_project(
 def get_project(project_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     project = get_owned_project(db, current_user.id, project_id)
     return to_project_summary(project)
+
+
+@router.get("/{project_id}/preview-settings", response_model=ProjectPreviewSettings)
+def get_project_preview_settings(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = get_owned_project(db, current_user.id, project_id)
+    return to_project_preview_settings(project)
+
+
+@router.patch("/{project_id}/preview-settings", response_model=ProjectPreviewSettings)
+def patch_project_preview_settings(
+    project_id: int,
+    payload: ProjectPreviewSettingsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = get_owned_project(db, current_user.id, project_id)
+    update_project_preview_settings(project, payload.model_dump(exclude_unset=True))
+    db.commit()
+    db.refresh(project)
+    return to_project_preview_settings(project)
 
 
 @router.patch("/{project_id}", response_model=ProjectSummary)

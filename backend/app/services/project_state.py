@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from app.models import (
     Asset,
     GenerationJob,
@@ -17,6 +19,9 @@ from app.schemas import (
     NotificationSummary,
     OutputVideoSummary,
     ProjectSummary,
+    ProjectPreviewLayout,
+    ProjectPreviewSettings,
+    ProjectPreviewSpeakerMapping,
     PublishJobSummary,
     ReviewCommentSummary,
     ReviewQueueItemSummary,
@@ -24,6 +29,148 @@ from app.schemas import (
     ScriptLine,
     ScriptRevisionSummary,
 )
+from app.services.voice_profiles import character_preset_portrait_url
+
+
+DEFAULT_CHARACTER_SCALE = 1.0
+DEFAULT_CHAT_FONT_SIZE_PX = 18
+
+
+def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = default
+    return min(max(numeric, minimum), maximum)
+
+
+def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        numeric = default
+    return min(max(numeric, minimum), maximum)
+
+
+def normalize_preview_layout(payload: dict | None) -> ProjectPreviewLayout:
+    layout = dict(payload or {})
+    # These bounds mirror the renderer so UI state cannot request off-canvas portraits or unreadable captions.
+    return ProjectPreviewLayout(
+        character_scale=_clamp_float(layout.get("character_scale"), 0.75, 1.5, DEFAULT_CHARACTER_SCALE),
+        chat_font_size_px=_clamp_int(layout.get("chat_font_size_px"), 12, 32, DEFAULT_CHAT_FONT_SIZE_PX),
+    )
+
+
+def _background_asset_for_project(project: Project) -> Asset | None:
+    if project.background_asset_id:
+        selected = next((asset for asset in project.assets if asset.id == project.background_asset_id), None)
+        if selected:
+            return selected
+    background_assets = [asset for asset in project.assets if asset.kind in {"background_video", "background_preset"}]
+    background_assets.sort(key=lambda asset: asset.created_at, reverse=True)
+    return background_assets[0] if background_assets else None
+
+
+def _preview_settings_from_stored(project: Project) -> ProjectPreviewSettings:
+    stored = dict(project.preview_settings_json or {})
+    return ProjectPreviewSettings(
+        background_asset_id=stored.get("background_asset_id"),
+        background_preset_id=stored.get("background_preset_id"),
+        background_source_type=stored.get("background_source_type"),
+        background_url=stored.get("background_url"),
+        background_metadata=dict(stored.get("background_metadata") or {}),
+        speaker_mappings=[
+            ProjectPreviewSpeakerMapping(**item)
+            for item in list(stored.get("speaker_mappings") or [])
+            if isinstance(item, dict)
+        ],
+        layout=normalize_preview_layout(dict(stored.get("layout") or {})),
+    )
+
+
+def to_project_preview_settings(project: Project) -> ProjectPreviewSettings:
+    stored = _preview_settings_from_stored(project)
+    background_asset = _background_asset_for_project(project)
+    if background_asset:
+        # Rehydrate persisted preview state from the selected asset so refreshes keep the same Video Lab view.
+        stored.background_asset_id = background_asset.id
+        stored.background_preset_id = background_asset.preset_key
+        stored.background_source_type = background_asset.source_type
+        stored.background_url = asset_content_url(background_asset.id)
+        stored.background_metadata = {
+            "kind": background_asset.kind,
+            "source_type": background_asset.source_type,
+            "preset_key": background_asset.preset_key,
+            "original_filename": background_asset.original_filename,
+            "mime_type": background_asset.mime_type,
+            **dict(background_asset.metadata_json or {}),
+        }
+
+    sample_by_speaker: dict[str, str] = {}
+    for line in project.current_script_revision.parsed_lines_json if project.current_script_revision else []:
+        speaker = str(line.get("speaker") or "").strip()
+        text = str(line.get("text") or "").strip()
+        if speaker and text and speaker not in sample_by_speaker:
+            sample_by_speaker[speaker] = text
+
+    binding_by_speaker = {binding.speaker_name: binding for binding in project.speaker_bindings}
+    speaker_names = list(sample_by_speaker) or list(binding_by_speaker)
+    mappings: list[ProjectPreviewSpeakerMapping] = []
+    for speaker_name in speaker_names:
+        # Script speakers drive the preview order; bindings only fill in character/profile details.
+        binding = binding_by_speaker.get(speaker_name)
+        preset = binding.character_preset if binding else None
+        mappings.append(
+            ProjectPreviewSpeakerMapping(
+                speaker_name=speaker_name,
+                voice_profile_id=preset.voice_profile_id if preset else None,
+                character_preset_id=preset.id if preset else None,
+                character_display_name=preset.display_name if preset else None,
+                character_portrait_filename=preset.portrait_filename if preset else None,
+                character_portrait_url=character_preset_portrait_url(preset) if preset else None,
+                display_label=preset.display_name if preset else speaker_name,
+                sample_text=sample_by_speaker.get(speaker_name),
+            )
+        )
+    stored.speaker_mappings = mappings
+    return stored
+
+
+def update_project_preview_settings(project: Project, payload: dict[str, Any]) -> ProjectPreviewSettings:
+    current = _preview_settings_from_stored(project)
+    if "layout" in payload and payload["layout"] is not None:
+        current.layout = normalize_preview_layout(dict(payload["layout"] or {}))
+    for key in ("background_asset_id", "background_preset_id", "background_source_type", "background_url"):
+        if key in payload:
+            setattr(current, key, payload[key])
+    if "background_metadata" in payload and payload["background_metadata"] is not None:
+        current.background_metadata = dict(payload["background_metadata"] or {})
+    if "speaker_mappings" in payload and payload["speaker_mappings"] is not None:
+        current.speaker_mappings = [
+            ProjectPreviewSpeakerMapping(**item)
+            for item in list(payload["speaker_mappings"] or [])
+            if isinstance(item, dict)
+        ]
+    project.preview_settings_json = current.model_dump()
+    return current
+
+
+def sync_project_preview_background(project: Project, asset: Asset) -> ProjectPreviewSettings:
+    current = _preview_settings_from_stored(project)
+    current.background_asset_id = asset.id
+    current.background_preset_id = asset.preset_key
+    current.background_source_type = asset.source_type
+    current.background_url = asset_content_url(asset.id)
+    current.background_metadata = {
+        "kind": asset.kind,
+        "source_type": asset.source_type,
+        "preset_key": asset.preset_key,
+        "original_filename": asset.original_filename,
+        "mime_type": asset.mime_type,
+        **dict(asset.metadata_json or {}),
+    }
+    project.preview_settings_json = current.model_dump()
+    return current
 
 
 def asset_content_url(asset_id: int) -> str:
@@ -97,6 +244,7 @@ def to_generation_summary(job: GenerationJob) -> GenerationJobSummary:
         provider_name=job.provider_name,
         error_message=job.error_message,
         voice_manifest=job.voice_manifest_json or {},
+        preview_settings=ProjectPreviewSettings(**(job.render_settings_json or {})),
         tts_result=job.tts_result_json or {},
         provider_state=job.provider_state_json or {},
         output_video_id=job.output_video.id if job.output_video else None,
@@ -167,6 +315,7 @@ def to_publish_job_summary(job: PublishJob) -> PublishJobSummary:
 
 
 def to_speaker_binding_summary(binding) -> SpeakerBindingSummary:
+    portrait_url = character_preset_portrait_url(binding.character_preset)
     return SpeakerBindingSummary(
         id=binding.id,
         speaker_name=binding.speaker_name,
@@ -174,6 +323,8 @@ def to_speaker_binding_summary(binding) -> SpeakerBindingSummary:
         character_display_name=binding.character_preset.display_name,
         voice_profile_id=binding.character_preset.voice_profile_id,
         provider=binding.character_preset.voice_profile.provider,
+        character_portrait_filename=binding.character_preset.portrait_filename,
+        character_portrait_url=portrait_url,
     )
 
 
@@ -216,6 +367,7 @@ def to_project_summary(project: Project) -> ProjectSummary:
         latest_review=to_review_summary(latest_review(project)),
         latest_notifications=[to_notification_summary(item) for item in recent_notifications],
         speaker_bindings=[to_speaker_binding_summary(item) for item in project.speaker_bindings],
+        preview_settings=to_project_preview_settings(project),
     )
 
 

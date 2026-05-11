@@ -1,6 +1,6 @@
 # AGENTS.md - Omniposter Codex Agent Instructions
 
-Last updated: 2026-05-01
+Last updated: 2026-05-06
 
 You are a Codex development agent working on **Omniposter**, a creator workflow tool for generating repeatable video content from reusable assets.
 
@@ -8,22 +8,36 @@ Your job is not only to change code. Your job is to preserve project memory, avo
 
 ## Required Read-First Files
 
-Before any implementation, audit, refactor, or bug fix, read these files in this exact order:
+Before any implementation, audit, refactor, or bug fix, read:
 
-1. `AGENTS.md`
-2. `docs/PROJECT_MANUAL.md`
-3. `docs/CURRENT_STATUS.md`
-4. `docs/KNOWN_MISTAKES.md`
-5. `docs/ARCHITECTURE_DECISIONS.md`
-6. `docs/MVP_CHECKLIST.md`
-7. `docs/CODEX_WORKFLOW.md`
+1. AGENTS.md
+2. docs/AGENT_BRIEF.md
+3. docs/CONTEXT_INDEX.md
+
+Then use docs/CONTEXT_INDEX.md, docs/TASK_ROUTING.md, and docs/REPO_MAP.md to decide which full context docs and code areas are required for the specific task.
+
+Do not read every full context document unless the task is broad, architectural, MVP-wide, or explicitly asks for a full audit.
 
 If any file is missing, create a minimal version before proceeding and mention that in the final response.
 
-## Codex Docs Hiearchy
+## Codex Docs Hierarchy
 
 `AGENTS.md`
 - Tell Codex what to read and how to behave.
+
+`docs/AGENT_BRIEF.md`
+- Short always-read project memory summary.
+- Captures highest-value product, priority, and regression-safety facts.
+
+`docs/CONTEXT_INDEX.md`
+- Routing index for deciding which full context docs to read.
+- Prevents default full-doc loading for narrow tasks.
+
+`docs/TASK_ROUTING.md`
+- Maps common task types to relevant docs and code areas.
+
+`docs/REPO_MAP.md`
+- Concise backend, frontend, test, runtime, and storage map for targeted inspection.
 
 `docs/PROJECT_MANUAL.md`
 - Product and architecture source of truth.
@@ -52,7 +66,7 @@ If any file is missing, create a minimal version before proceeding and mention t
 
 ### Evidence Rules
 
-- Never mark a featuew as complete without evidence.
+- Never mark a feature as complete without evidence.
 - Evidence must come from code, tests, endpoint behavior, manual verification, command output, or exact implementation locations.
 - If you cannot verify something, mark it `Not Verified`, not `Complete`.
 - Do not claim a bug is fixed unless you can explain the previous symptom, root cause, changed files, and verification result.
@@ -89,6 +103,10 @@ At the end of every implementation or audit, decide whether the context docs nee
 Living project memory files:
 
 - `AGENTS.md`
+- `docs/AGENT_BRIEF.md`
+- `docs/CONTEXT_INDEX.md`
+- `docs/TASK_ROUTING.md`
+- `docs/REPO_MAP.md`
 - `docs/PROJECT_MANUAL.md`
 - `docs/CURRENT_STATUS.md`
 - `docs/KNOWN_MISTAKES.md`

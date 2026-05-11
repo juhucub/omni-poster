@@ -17,6 +17,7 @@ from fastapi import HTTPException, UploadFile, status
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import settings
+from app.services.character_voice_recipes import selected_character_recipe_status
 from app.db import SessionLocal
 from app.models import CharacterPreset, Project, ProjectSpeakerBinding, VoiceProfile, VoiceReferenceAudio
 
@@ -54,6 +55,7 @@ def voice_reference_audio_dir() -> Path:
 
 
 def voice_reference_audio_profile_dir(voice_profile_id: str) -> Path:
+    # Profile ids can come from runtime presets, so sanitize before creating artifact directories.
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", voice_profile_id).strip("._") or "profile"
     path = voice_reference_audio_dir() / safe_id
     path.mkdir(parents=True, exist_ok=True)
@@ -74,6 +76,12 @@ def voice_cache_dir() -> Path:
 
 def voice_embedding_dir() -> Path:
     path = _runtime_lab_dir() / "embeddings"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def voice_models_dir() -> Path:
+    path = Path(settings.VOICE_MODELS_DIR)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -177,6 +185,12 @@ def _fallback_voice_settings(payload: dict[str, Any]) -> dict[str, Any]:
         "pitch": payload.get("pitch"),
         "word_gap": payload.get("word_gap"),
         "amplitude": payload.get("amplitude"),
+        "character_slug": payload.get("character_slug"),
+        "reference_dataset_id": payload.get("reference_dataset_id"),
+        "model_checkpoint_path": payload.get("model_checkpoint_path"),
+        "selected_recipe": payload.get("selected_recipe") or {},
+        "calibration_score": payload.get("calibration_score"),
+        "last_verified_render_job_id": payload.get("last_verified_render_job_id"),
     }
     for key, value in legacy.items():
         if settings_payload.get(key) is None and value is not None:
@@ -210,6 +224,11 @@ def _default_profile_payload(payload: dict[str, Any], preset_id: str | None = No
         "style_json": _normalize_style(payload),
         "controls_json": controls,
         "provider_metadata_json": dict(payload.get("provider_metadata") or {}),
+        "character_slug": payload.get("character_slug"),
+        "model_checkpoint_path": payload.get("model_checkpoint_path"),
+        "selected_recipe_json": dict(payload.get("selected_recipe") or {}),
+        "calibration_score": payload.get("calibration_score"),
+        "last_verified_render_job_id": payload.get("last_verified_render_job_id"),
         "espeak_voice": payload.get("voice") or settings.TTS_ESPEAK_VOICE_SLOT_1,
         "espeak_rate": int(payload.get("rate") if payload.get("rate") is not None else settings.TTS_ESPEAK_RATE),
         "espeak_pitch": int(payload.get("pitch") if payload.get("pitch") is not None else settings.TTS_ESPEAK_PITCH),
@@ -242,6 +261,7 @@ def _serialize_reference_audio(item: VoiceReferenceAudio) -> dict[str, Any]:
     return {
         "id": item.id,
         "voice_profile_id": item.voice_profile_id,
+        "reference_dataset_id": item.reference_dataset_id,
         "storage_path": item.storage_path,
         "original_storage_path": original_path,
         "processed_storage_path": processed_path,
@@ -264,6 +284,26 @@ def _serialize_reference_audio(item: VoiceReferenceAudio) -> dict[str, Any]:
         "authorization_confirmed": item.authorization_confirmed,
         "authorization_note": item.authorization_note,
         "created_at": item.created_at,
+    }
+
+
+def _serialize_reference_dataset(item: Any) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "voice_profile_id": item.voice_profile_id,
+        "character_slug": item.character_slug,
+        "display_name": item.display_name,
+        "storage_path": item.storage_path,
+        "status": item.status,
+        "total_duration_seconds": float(item.total_duration_seconds or 0.0),
+        "clean_speech_duration_seconds": float(item.clean_speech_duration_seconds or 0.0),
+        "accepted_clip_count": int(item.accepted_clip_count or 0),
+        "rejected_clip_count": int(item.rejected_clip_count or 0),
+        "metrics": dict(item.metrics_json or {}),
+        "prosody_metrics": dict(item.prosody_metrics_json or {}),
+        "selected_recipe": dict(item.selected_recipe_json or {}),
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
     }
 
 
@@ -365,11 +405,22 @@ def _voice_profile_provider_metadata(profile: VoiceProfile) -> dict[str, Any]:
             "pitch",
             "rhythm",
         ]
+    if profile.character_slug == "stewie_griffin":
+        status_payload = selected_character_recipe_status("stewie_griffin")
+        metadata["selected_recipe_status"] = status_payload
+        if status_payload.get("ready_for_test_render"):
+            metadata["golden_preview_url"] = status_payload.get("golden_preview_url")
+            metadata["golden_preview_wav"] = status_payload.get("golden_preview")
+            metadata["selected_recipe_source"] = str(settings.VOICE_MODELS_DIR) + "/stewie_griffin/selected_recipe.json"
     return metadata
 
 
 def serialize_voice_profile(profile: VoiceProfile) -> dict[str, Any]:
     provider_metadata = _voice_profile_provider_metadata(profile)
+    selected_recipe = dict(profile.selected_recipe_json or {})
+    if profile.character_slug == "stewie_griffin" and (provider_metadata.get("selected_recipe_status") or {}).get("ready_for_test_render"):
+        selected_recipe = dict(provider_metadata["selected_recipe_status"])
+    associated_preset = _associated_character_preset(profile)
     return {
         "id": profile.id,
         "display_name": profile.display_name,
@@ -388,15 +439,42 @@ def serialize_voice_profile(profile: VoiceProfile) -> dict[str, Any]:
         "espeak_pitch": profile.espeak_pitch,
         "espeak_word_gap": profile.espeak_word_gap,
         "espeak_amplitude": profile.espeak_amplitude,
+        "character_slug": profile.character_slug,
+        "reference_dataset_id": profile.reference_dataset_id,
+        "model_checkpoint_path": profile.model_checkpoint_path,
+        "selected_recipe": selected_recipe,
+        "calibration_score": profile.calibration_score,
+        "last_verified_render_job_id": profile.last_verified_render_job_id,
+        "associated_character_preset_id": associated_preset.id if associated_preset else None,
+        "associated_character_display_name": associated_preset.display_name if associated_preset else None,
+        "associated_character_image_url": character_preset_portrait_url(associated_preset) if associated_preset else None,
         "reference_audio_count": len(profile.reference_audios),
         "reference_audios": [_serialize_reference_audio(item) for item in profile.reference_audios],
+        "reference_datasets": [_serialize_reference_dataset(item) for item in profile.reference_datasets],
         "created_at": profile.created_at,
         "updated_at": profile.updated_at,
-    }
+}
+
+
+def _associated_character_preset(profile: VoiceProfile) -> CharacterPreset | None:
+    presets = sorted(profile.presets or [], key=lambda item: (item.display_name.lower(), item.id))
+    return presets[0] if presets else None
+
+
+def character_preset_portrait_url(preset: CharacterPreset | None) -> str | None:
+    if not preset or not preset.portrait_filename:
+        return None
+    portrait_path = resolve_character_portrait_path({"portrait_filename": preset.portrait_filename})
+    if not portrait_path:
+        return None
+    return f"/character-presets/{preset.id}/portrait"
 
 
 def runtime_voice_profile_payload(profile: VoiceProfile, display_name: str) -> dict[str, Any]:
     provider_metadata = _voice_profile_provider_metadata(profile)
+    selected_recipe = dict(profile.selected_recipe_json or {})
+    if profile.character_slug == "stewie_griffin" and (provider_metadata.get("selected_recipe_status") or {}).get("ready_for_test_render"):
+        selected_recipe = dict(provider_metadata["selected_recipe_status"])
     return {
         "id": profile.id,
         "display_name": display_name,
@@ -427,8 +505,15 @@ def runtime_voice_profile_payload(profile: VoiceProfile, display_name: str) -> d
         ],
         "language": profile.language,
         "model_id": profile.model_id,
+        "model_checkpoint_path": profile.model_checkpoint_path,
+        "selected_recipe": selected_recipe,
+        "reference_dataset_id": profile.reference_dataset_id,
+        "character_slug": profile.character_slug,
+        "calibration_score": profile.calibration_score,
+        "last_verified_render_job_id": profile.last_verified_render_job_id,
         "embedding_path": provider_metadata.get("embedding_artifact_path"),
         "provider_metadata": provider_metadata,
+        "fallback_allowed": False if profile.character_slug == "stewie_griffin" and profile.provider == "xtts" else True,
         **_voice_profile_style_fields(profile),
     }
 
@@ -442,6 +527,7 @@ def serialize_character_preset(preset: CharacterPreset) -> dict[str, Any]:
         "display_name": preset.display_name,
         "speaker_names": list(preset.speaker_names_json or []),
         "portrait_filename": preset.portrait_filename,
+        "portrait_url": character_preset_portrait_url(preset),
         "voice_profile_id": profile.id,
         "tts_provider": profile.provider,
         "provider_preference": "auto",
@@ -531,6 +617,15 @@ def update_voice_profile_calibration_recipe(
 
     profile.controls_json = {key: value for key, value in controls.items() if value is not None}
     profile.style_json = {key: value for key, value in style.items() if value is not None}
+    profile.selected_recipe_json = dict(recipe)
+    if recipe.get("provider") is not None:
+        profile.provider = str(recipe["provider"]).lower()
+    if recipe.get("model_checkpoint_path") is not None:
+        profile.model_checkpoint_path = str(recipe["model_checkpoint_path"])
+    if recipe.get("reference_dataset_id") is not None:
+        profile.reference_dataset_id = int(recipe["reference_dataset_id"])
+    if recipe.get("calibration_score") is not None:
+        profile.calibration_score = float(recipe["calibration_score"])
     metadata = dict(profile.provider_metadata_json or {})
     metadata["last_calibration_recipe"] = dict(recipe)
     metadata["calibration_status"] = "saved"
@@ -541,6 +636,7 @@ def update_voice_profile_calibration_recipe(
 
 
 def invalidate_voice_profile_embedding(profile: VoiceProfile, db: Session) -> None:
+    # Reference changes invalidate both embeddings and selected chunks; stale identity artifacts are worse than a rebuild.
     paths_to_remove: set[Path] = set()
     if profile.embedding_path:
         paths_to_remove.add(Path(profile.embedding_path))
@@ -569,6 +665,7 @@ def _ffmpeg_binary() -> str | None:
 
 
 def _normalize_reference_audio_upload(content: bytes, filename: str, *, voice_profile_id: str) -> tuple[Path, Path, int]:
+    """Store the original upload and a normalized mono WAV used by validation and provider prep."""
     ffmpeg_binary = _ffmpeg_binary()
     if not ffmpeg_binary:
         raise HTTPException(
@@ -710,6 +807,7 @@ def _validate_reference_audio(path: Path, *, duration_ms: int, speech_windows: l
     warnings: list[dict[str, Any]] = []
     hard_failures: list[dict[str, Any]] = []
 
+    # Hard failures block cloning inputs; warnings remain visible so usable-but-risky clips can be audited.
     if duration_ms < REFERENCE_AUDIO_MIN_DURATION_MS:
         hard_failures.append({"code": "too_short", "message": "Reference audio is too short after normalization."})
     if speech_duration <= 0 or speech_ratio < REFERENCE_AUDIO_HARD_MIN_SPEECH_RATIO:
@@ -903,6 +1001,7 @@ def _process_reference_audio_for_embedding(
     validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     speech_windows = speech_windows if speech_windows is not None else _detect_reference_speech_windows(path, duration_ms)
+    # Embedding prep uses bounded speech chunks so long uploads do not dominate OpenVoice identity extraction.
     selected_windows = _select_reference_chunks(speech_windows, duration_ms)
     chunks = _extract_reference_chunks(path, voice_profile_id, reference_audio_id, selected_windows)
     if not chunks:
@@ -965,6 +1064,11 @@ def ensure_seeded_voice_presets(db: Session) -> None:
                 style_json=profile_payload["style_json"],
                 controls_json=profile_payload["controls_json"],
                 provider_metadata_json=profile_payload["provider_metadata_json"],
+                character_slug=profile_payload["character_slug"],
+                model_checkpoint_path=profile_payload["model_checkpoint_path"],
+                selected_recipe_json=profile_payload["selected_recipe_json"],
+                calibration_score=profile_payload["calibration_score"],
+                last_verified_render_job_id=profile_payload["last_verified_render_job_id"],
                 espeak_voice=profile_payload["espeak_voice"],
                 espeak_rate=profile_payload["espeak_rate"],
                 espeak_pitch=profile_payload["espeak_pitch"],
@@ -999,7 +1103,11 @@ def list_voice_profiles(db: Session | None = None) -> list[dict[str, Any]]:
         ensure_seeded_voice_presets(session)
         profiles = (
             session.query(VoiceProfile)
-            .options(joinedload(VoiceProfile.reference_audios), joinedload(VoiceProfile.presets))
+            .options(
+                joinedload(VoiceProfile.reference_audios),
+                joinedload(VoiceProfile.reference_datasets),
+                joinedload(VoiceProfile.presets),
+            )
             .order_by(VoiceProfile.display_name.asc(), VoiceProfile.id.asc())
             .all()
         )
@@ -1011,7 +1119,11 @@ def get_voice_profile(profile_id: str, db: Session | None = None) -> dict[str, A
         ensure_seeded_voice_presets(session)
         profile = (
             session.query(VoiceProfile)
-            .options(joinedload(VoiceProfile.reference_audios), joinedload(VoiceProfile.presets))
+            .options(
+                joinedload(VoiceProfile.reference_audios),
+                joinedload(VoiceProfile.reference_datasets),
+                joinedload(VoiceProfile.presets),
+            )
             .filter(VoiceProfile.id == profile_id)
             .one_or_none()
         )
@@ -1023,7 +1135,11 @@ def get_voice_profile_model(profile_id: str, db: Session | None) -> VoiceProfile
         ensure_seeded_voice_presets(session)
         return (
             session.query(VoiceProfile)
-            .options(joinedload(VoiceProfile.reference_audios), joinedload(VoiceProfile.presets))
+            .options(
+                joinedload(VoiceProfile.reference_audios),
+                joinedload(VoiceProfile.reference_datasets),
+                joinedload(VoiceProfile.presets),
+            )
             .filter(VoiceProfile.id == profile_id)
             .one_or_none()
         )
@@ -1062,6 +1178,18 @@ def upsert_voice_profile(payload: dict[str, Any], current_user_id: int, db: Sess
     profile.espeak_pitch = payload.get("espeak_pitch") if payload.get("espeak_pitch") is not None else normalized["espeak_pitch"]
     profile.espeak_word_gap = payload.get("espeak_word_gap") if payload.get("espeak_word_gap") is not None else normalized["espeak_word_gap"]
     profile.espeak_amplitude = payload.get("espeak_amplitude") if payload.get("espeak_amplitude") is not None else normalized["espeak_amplitude"]
+    if "character_slug" in payload:
+        profile.character_slug = payload.get("character_slug")
+    if "reference_dataset_id" in payload:
+        profile.reference_dataset_id = payload.get("reference_dataset_id")
+    if "model_checkpoint_path" in payload:
+        profile.model_checkpoint_path = payload.get("model_checkpoint_path")
+    if "selected_recipe" in payload:
+        profile.selected_recipe_json = dict(payload.get("selected_recipe") or {})
+    if "calibration_score" in payload:
+        profile.calibration_score = payload.get("calibration_score")
+    if "last_verified_render_job_id" in payload:
+        profile.last_verified_render_job_id = payload.get("last_verified_render_job_id")
     db.commit()
     db.refresh(profile)
     return serialize_voice_profile(get_voice_profile_model(profile.id, db))
@@ -1233,6 +1361,33 @@ def save_reference_audio_upload(
     authorization_confirmed: bool,
     authorization_note: str | None,
     db: Session,
+    reference_dataset_id: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    content = file.file.read()
+    return save_reference_audio_content(
+        content=content,
+        filename=file.filename or "",
+        content_type=file.content_type,
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user_id,
+        authorization_confirmed=authorization_confirmed,
+        authorization_note=authorization_note,
+        db=db,
+        reference_dataset_id=reference_dataset_id,
+    )
+
+
+def save_reference_audio_content(
+    *,
+    content: bytes,
+    filename: str,
+    content_type: str | None,
+    voice_profile_id: str,
+    current_user_id: int,
+    authorization_confirmed: bool,
+    authorization_note: str | None,
+    db: Session,
+    reference_dataset_id: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     ensure_seeded_voice_presets(db)
     if not authorization_confirmed:
@@ -1245,18 +1400,17 @@ def save_reference_audio_upload(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice profile not found")
     ensure_voice_profile_editable(profile, current_user_id)
     allowed_types = {item.strip() for item in settings.VOICE_LAB_ALLOWED_AUDIO_TYPES.split(",") if item.strip()}
-    if file.content_type not in allowed_types:
+    if content_type not in allowed_types:
         raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported reference audio type")
-    if not file.filename:
+    if not filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
 
-    content = file.file.read()
     if len(content) > settings.VOICE_LAB_MAX_REFERENCE_AUDIO_SIZE_BYTES:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Reference audio exceeds max size")
     sha256 = _sha256_bytes(content)
     original_path, destination, duration_ms = _normalize_reference_audio_upload(
         content,
-        file.filename,
+        filename,
         voice_profile_id=voice_profile_id,
     )
     speech_windows = _detect_reference_speech_windows(destination, duration_ms)
@@ -1270,6 +1424,7 @@ def save_reference_audio_upload(
 
     reference = VoiceReferenceAudio(
         voice_profile_id=voice_profile_id,
+        reference_dataset_id=reference_dataset_id,
         storage_path=str(destination),
         original_storage_path=str(original_path),
         processed_storage_path=str(destination),
@@ -1285,6 +1440,7 @@ def save_reference_audio_upload(
     )
     db.add(reference)
     db.flush()
+    # The new reference becomes the identity source of truth, so any prepared embedding must be rebuilt.
     invalidate_voice_profile_embedding(profile, db)
     processed_reference = _process_reference_audio_for_embedding(
         destination,
@@ -1298,7 +1454,7 @@ def save_reference_audio_upload(
     processed_by_id = dict(next_metadata.get("processed_reference_audio") or {})
     processed_by_id[str(reference.id)] = {
         **processed_reference,
-        "original_filename": file.filename,
+        "original_filename": filename,
         "original_reference_path": str(original_path),
         "original_reference_url": f"/voice-profiles/{voice_profile_id}/reference-audio/{reference.id}/original",
         "processed_reference_path": str(destination),
@@ -1314,7 +1470,7 @@ def save_reference_audio_upload(
             "reference_validation": validation,
             "processed_reference_audio": processed_by_id,
             "last_reference_audio_id": reference.id,
-            "last_reference_original_filename": file.filename,
+            "last_reference_original_filename": filename,
             "last_reference_original_path": str(original_path),
             "last_reference_audio_path": str(destination),
             "last_reference_processed_path": str(destination),
@@ -1333,7 +1489,7 @@ def save_reference_audio_upload(
         "voice.reference_audio.uploaded metadata=%s",
         {
             "voice_profile_id": voice_profile_id,
-            "original_uploaded_filename": file.filename,
+            "original_uploaded_filename": filename,
             "original_reference_path": str(original_path),
             "stored_reference_path": str(destination),
             "file_size_bytes": len(content),
@@ -1378,6 +1534,7 @@ def resolve_voice_reference_audio_artifact(
     path = Path(target).resolve()
     root = voice_reference_audio_profile_dir(voice_profile_id).resolve()
     try:
+        # Artifact serving is profile-scoped to avoid leaking arbitrary local reference files.
         path.relative_to(root)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reference audio artifact not found") from exc

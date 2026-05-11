@@ -20,9 +20,14 @@ from app.schemas import (
 )
 from app.services.audit import record_audit
 from app.services.notifications import create_notification
-from app.services.project_state import sync_project_state, to_generation_summary, to_output_video_summary
+from app.services.project_state import sync_project_state, to_generation_summary, to_output_video_summary, to_project_preview_settings
 from app.services.storage import guess_mime_type, resolve_generated_job_artifact
-from app.services.voice_profiles import get_character_preset_model, resolve_preset_for_project_speaker, runtime_voice_profile_payload
+from app.services.voice_profiles import (
+    character_preset_portrait_url,
+    get_character_preset_model,
+    resolve_preset_for_project_speaker,
+    runtime_voice_profile_payload,
+)
 from app.tasks.generation import (
     ACTIVE_GENERATION_STATUSES,
     process_generation_job,
@@ -76,6 +81,7 @@ def _default_voice_profile_payload(speaker: str, slot_index: int) -> dict:
 
 
 def build_generation_voice_manifest(project_id: int, parsed_lines: list[dict], db: Session) -> dict:
+    """Snapshot speaker voice/profile choices so the worker renders the same mapping the UI queued."""
     speakers: dict[str, dict] = {}
     speaker_order: list[str] = []
     for index, line in enumerate(parsed_lines):
@@ -90,19 +96,24 @@ def build_generation_voice_manifest(project_id: int, parsed_lines: list[dict], d
         profile_payload: dict
         character_preset_id = None
         character_display_name = speaker
+        character_portrait_filename = None
+        character_portrait_url = None
         if preset:
             character_preset_id = preset["id"]
             character_display_name = preset["display_name"]
+            character_portrait_filename = preset.get("portrait_filename")
             preset_model = get_character_preset_model(preset["id"], db)
             if preset_model:
                 profile_payload = runtime_voice_profile_payload(preset_model.voice_profile, preset_model.display_name)
+                character_portrait_url = character_preset_portrait_url(preset_model)
             else:
                 profile_payload = _default_voice_profile_payload(speaker, slot_index)
         else:
             profile_payload = _default_voice_profile_payload(speaker, slot_index)
 
         provider = str(profile_payload.get("provider") or "espeak").strip().lower()
-        fallback_allowed = provider != "openvoice"
+        # Explicit clone-capable providers fail closed in render jobs instead of silently switching voices.
+        fallback_allowed = provider not in {"openvoice", "xtts", "rvc"}
         profile_payload = {
             **profile_payload,
             "requested_provider": provider,
@@ -113,6 +124,8 @@ def build_generation_voice_manifest(project_id: int, parsed_lines: list[dict], d
             "slot_index": slot_index,
             "character_preset_id": character_preset_id,
             "character_display_name": character_display_name,
+            "character_portrait_filename": character_portrait_filename,
+            "character_portrait_url": character_portrait_url,
             "voice_profile_id": profile_payload.get("id"),
             "provider": provider,
             "requested_provider": provider,
@@ -184,6 +197,8 @@ def create_generation_job(
         output_kind=payload.output_kind,
         provider_name=payload.provider_name,
         voice_manifest_json=build_generation_voice_manifest(project.id, script_revision.parsed_lines_json, db),
+        # Preview settings are snapshotted with the job because users may keep editing the project while it renders.
+        render_settings_json=to_project_preview_settings(project).model_dump(),
         status="queued",
         progress=0,
     )
@@ -244,6 +259,7 @@ def get_generation_job_artifact(
     )
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation job not found")
+    # Artifact paths are resolved after ownership checks so debug WAV/JSON files stay project-private.
     artifact = resolve_generated_job_artifact(job.id, artifact_path)
     return FileResponse(
         artifact,

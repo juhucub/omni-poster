@@ -1,23 +1,35 @@
 # Omniposter Architecture Decisions
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 This file records architectural decisions that future Codex agents should not reverse casually.
 
-## ADR-001: Use Context Docs As Living Project Memory
+## ADR-001: Use Tiered Context Docs As Living Project Memory
 
 Status: Accepted
-Date: 2026-05-01
+Date: 2026-05-01, updated 2026-05-06
 
 ### Context
 
-Codex agents need durable project memory to avoid repeating mistakes, ignoring current status, or reversing prior decisions.
+Codex agents need durable project memory to avoid repeating mistakes, ignoring current status, or reversing prior decisions. Reading every full context doc for every narrow task wastes context tokens and makes focused work harder.
 
 ### Decision
 
-Omniposter uses a `/docs` level context system plus root `AGENTS.md`:
+Omniposter uses a tiered `/docs` context system plus root `AGENTS.md`.
+
+Always-read tier:
 
 - `AGENTS.md`
+- `docs/AGENT_BRIEF.md`
+- `docs/CONTEXT_INDEX.md`
+
+Routing/map tier:
+
+- `docs/TASK_ROUTING.md`
+- `docs/REPO_MAP.md`
+
+Full context tier, read selectively based on task scope:
+
 - `docs/PROJECT_MANUAL.md`
 - `docs/CURRENT_STATUS.md`
 - `docs/KNOWN_MISTAKES.md`
@@ -25,13 +37,14 @@ Omniposter uses a `/docs` level context system plus root `AGENTS.md`:
 - `docs/MVP_CHECKLIST.md`
 - `docs/CODEX_WORKFLOW.md`
 
-Agents must read these before implementation and update them only when necessary.
+Agents must use `docs/CONTEXT_INDEX.md`, `docs/TASK_ROUTING.md`, and `docs/REPO_MAP.md` to decide which full docs and code areas to inspect. Full-doc reading remains required for broad audits, MVP-wide verification, architecture changes, or explicit user requests.
 
 ### Consequences
 
 - Project knowledge is maintained in-repo.
 - Completion claims require evidence.
 - Documentation updates must be small and factual.
+- Context-token usage is reduced for narrow tasks without weakening evidence rules, regression memory, or architecture protection.
 
 ### Files/Areas Affected
 
@@ -268,3 +281,35 @@ Voice profiles persist reference processing and validation state:
 - TTS/OpenVoice provider integration.
 - Render metadata and generated job artifact storage.
 - Voice Lab and Project Editor comparison UI.
+
+## ADR-009: Use Dataset-Backed Character Voice Replication With Fail-Closed Verification
+
+Status: Accepted
+Date: 2026-05-05
+
+### Context
+
+OpenVoice reference audio is useful for tone-color conversion, but licensed near-identical character voice replication needs curated datasets, prosody targets, stronger provider options, attached trained artifacts, calibration scoring, and render-path verification.
+
+### Decision
+
+Character voice replication is a generic Voice Lab pipeline:
+
+- Voice profiles may have a reference dataset, character slug, attached model/checkpoint path, selected recipe JSON, calibration score, and last verified render job ID.
+- Reference datasets live under `VOICE_MODELS_DIR/{character_slug}` with separate `dataset`, `processed`, `xtts`, and `rvc` areas.
+- OpenVoice, XTTS, and RVC are provider adapters behind the TTS abstraction. XTTS/RVC are optional and report unavailable until configured.
+- Calibration batches synthesize candidate previews, analyze prosody, score similarity, and persist ranked recipes.
+- Render verification must fail closed for selected character recipes when provider, fallback, model path, segment audio, composite audio, or final extracted audio do not match expectations.
+
+### Consequences
+
+- OpenVoice must not be treated as the whole character replication stack.
+- Trained model artifacts and generated media remain local storage and must not be committed.
+- Full in-app XTTS/RVC training is deferred; the first supported flow attaches externally trained artifacts.
+
+### Files/Areas Affected
+
+- Voice profile and dataset models, migrations, schemas, and routes.
+- TTS provider registry and render metadata.
+- Voice Lab calibration UI.
+- Generated storage and `.gitignore`.
