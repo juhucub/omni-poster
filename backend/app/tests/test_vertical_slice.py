@@ -26,6 +26,7 @@ from app.services.tts import LocalSpeechService, OpenVoiceProvider, SpeechSegmen
 from app.tasks.generation import STALE_GENERATION_ERROR, process_generation_job, reconcile_stale_generation_jobs
 from app.tasks.publish import process_publish_job
 from app.tasks.scheduler import dispatch_due_publish_jobs
+from app.tasks.voice_operations import process_voice_calibration_batch, process_voice_operation_job
 from app.tasks.voice_preview import process_voice_lab_preview
 
 
@@ -39,6 +40,22 @@ class StubRegistry:
 
     def healthcheck(self):
         return self.state
+
+
+def _run_voice_operation(auth_client: TestClient, response):
+    assert response.status_code == 202
+    operation_id = response.json()["id"]
+    result = process_voice_operation_job(operation_id)
+    assert result["status"] in {"completed", "failed"}
+    polled = auth_client.get(f"/voice-lab/operations/{operation_id}")
+    assert polled.status_code == 200
+    return polled
+
+
+@pytest.fixture(autouse=True)
+def stub_voice_operation_apply_async(monkeypatch):
+    monkeypatch.setattr(process_voice_operation_job, "apply_async", lambda **_kwargs: None)
+    monkeypatch.setattr(process_voice_calibration_batch, "apply_async", lambda **_kwargs: None)
 
 
 class StubProvider:
@@ -261,6 +278,13 @@ def test_character_presets_list_and_runtime_override(auth_client: TestClient):
     deleted = auth_client.delete(f"/character-presets/{created_id}")
     assert deleted.status_code == 200
     assert get_character_preset(created_id) is None
+
+
+def test_bundled_voice_lab_presets_are_empty():
+    bundled_file = Path(__file__).resolve().parents[2] / "storage" / "character_presets.json"
+    payload = json.loads(bundled_file.read_text(encoding="utf-8"))
+
+    assert payload == []
 
 
 def test_character_portrait_prefers_bundled_media_dir_over_runtime(auth_client: TestClient, tmp_path: Path):
@@ -729,24 +753,27 @@ def test_reference_audio_upload_normalizes_audio_and_invalidates_embedding(auth_
         },
     )
 
-    assert response.status_code == 201
-    assert response.json()["reference_audio"]["mime_type"] == "audio/wav"
-    assert response.json()["reference_audio"]["storage_path"].endswith(".wav")
-    assert response.json()["reference_audio"]["original_storage_path"].endswith("original.mp3")
-    assert response.json()["reference_audio"]["processed_storage_path"].endswith("processed_reference.wav")
-    assert response.json()["reference_audio"]["processed_sha256"]
-    assert response.json()["reference_audio"]["validation_status"] == "passed"
-    assert response.json()["reference_audio"]["original_content_url"].endswith("/original")
-    assert response.json()["reference_audio"]["processed_content_url"].endswith("/processed")
-    assert response.json()["reference_audio"]["duration_ms"] >= 1800
-    assert response.json()["voice_profile"]["embedding_path"] is None
-    assert response.json()["voice_profile"]["provider_metadata"]["embedding_status"] == "not_prepared"
-    assert response.json()["voice_profile"]["provider_metadata"]["reference_validation_status"] == "passed"
+    assert response.status_code == 202
+    assert response.json()["operation_type"] == "reference_audio_upload"
+    processed = _run_voice_operation(auth_client, response)
+    payload = processed.json()["result"]
+    assert payload["reference_audio"]["mime_type"] == "audio/wav"
+    assert payload["reference_audio"]["storage_path"].endswith(".wav")
+    assert payload["reference_audio"]["original_storage_path"].endswith("original.mp3")
+    assert payload["reference_audio"]["processed_storage_path"].endswith("processed_reference.wav")
+    assert payload["reference_audio"]["processed_sha256"]
+    assert payload["reference_audio"]["validation_status"] == "passed"
+    assert payload["reference_audio"]["original_content_url"].endswith("/original")
+    assert payload["reference_audio"]["processed_content_url"].endswith("/processed")
+    assert payload["reference_audio"]["duration_ms"] >= 1800
+    assert payload["voice_profile"]["embedding_path"] is None
+    assert payload["voice_profile"]["provider_metadata"]["embedding_status"] == "not_prepared"
+    assert payload["voice_profile"]["provider_metadata"]["reference_validation_status"] == "passed"
     assert stale_embedding.exists() is False
     assert stale_hashed_embedding.exists() is False
 
-    original_response = auth_client.get(response.json()["reference_audio"]["original_content_url"])
-    processed_response = auth_client.get(response.json()["reference_audio"]["processed_content_url"])
+    original_response = auth_client.get(payload["reference_audio"]["original_content_url"])
+    processed_response = auth_client.get(payload["reference_audio"]["processed_content_url"])
     assert original_response.status_code == 200
     assert processed_response.status_code == 200
     assert processed_response.content.startswith(b"RIFF")
@@ -803,17 +830,17 @@ def test_character_reference_dataset_upload_analyze_and_attach_model(auth_client
         files={"file": ("reference.mp3", b"fake-mp3", "audio/mpeg")},
         data={"authorization_confirmed": "true", "authorization_note": "licensed"},
     )
-    assert uploaded.status_code == 201
-    assert uploaded.json()["reference_audio"]["reference_dataset_id"] == dataset_id
-    assert uploaded.json()["dataset"]["accepted_clip_count"] == 1
-    assert uploaded.json()["dataset"]["metrics"]["clean_speech_duration_seconds"] > 0
+    uploaded_result = _run_voice_operation(auth_client, uploaded).json()["result"]
+    assert uploaded_result["reference_audio"]["reference_dataset_id"] == dataset_id
+    assert uploaded_result["dataset"]["accepted_clip_count"] == 1
+    assert uploaded_result["dataset"]["metrics"]["clean_speech_duration_seconds"] > 0
 
     analyzed = auth_client.post(
         f"/voice-profiles/vp_peter_griffin_character_v1/reference-datasets/{dataset_id}/analyze"
     )
-    assert analyzed.status_code == 200
-    assert analyzed.json()["dataset"]["status"] == "analyzed"
-    assert analyzed.json()["dataset"]["prosody_metrics"]["pitch_median_hz"] > 0
+    analyzed_result = _run_voice_operation(auth_client, analyzed).json()["result"]
+    assert analyzed_result["dataset"]["status"] == "analyzed"
+    assert analyzed_result["dataset"]["prosody_metrics"]["pitch_median_hz"] > 0
 
     checkpoint = tmp_path / "xtts" / "model.pth"
     checkpoint.parent.mkdir(parents=True)
@@ -827,10 +854,10 @@ def test_character_reference_dataset_upload_analyze_and_attach_model(auth_client
             "recipe": {"provider": "xtts", "speaking_rate": 0.95},
         },
     )
-    assert attached.status_code == 200
-    assert attached.json()["provider"] == "xtts"
-    assert attached.json()["model_checkpoint_path"] == str(checkpoint)
-    assert attached.json()["selected_recipe"]["reference_dataset_id"] == dataset_id
+    attached_result = _run_voice_operation(auth_client, attached).json()["result"]["voice_profile"]
+    assert attached_result["provider"] == "xtts"
+    assert attached_result["model_checkpoint_path"] == str(checkpoint)
+    assert attached_result["selected_recipe"]["reference_dataset_id"] == dataset_id
 
 
 def test_prosody_analyzer_extracts_pitch_pause_and_energy(tmp_path: Path):
@@ -898,7 +925,10 @@ def test_character_calibration_batch_scores_and_saves_recipe(auth_client: TestCl
             "rvc": {"available": False, "reason": "disabled"},
         }
 
+    synthesize_calls = {"count": 0}
+
     def fake_synthesize_line(self, *, text, voice_profile, output_path, requested_provider=None, fallback_allowed=True, options=None):
+        synthesize_calls["count"] += 1
         _write_sine_wav(output_path, seconds=1.2, frequency=220.0)
         from app.services.tts import SynthesisResult
 
@@ -923,21 +953,32 @@ def test_character_calibration_batch_scores_and_saves_recipe(auth_client: TestCl
         json={
             "voice_profile_id": "vp_stewie_griffin_character_v1",
             "calibration_script": "Victory is mine.",
-            "candidates": [{"provider": "espeak", "rate": 1.0, "pitch_shift": 0.0}],
+            "candidates": [{"provider": "xtts", "rate": 1.0, "pitch_shift": 0.0, "temperature": 0.85, "split_sentences": False}],
         },
     )
-    assert batch.status_code == 201
-    assert batch.json()["status"] == "completed"
-    assert batch.json()["rankings"][0]["score"] > 0.5
-    recipe = batch.json()["rankings"][0]["recipe"]
-    recipe["calibration_score"] = batch.json()["rankings"][0]["score"]
+    assert batch.status_code == 202
+    assert batch.json()["status"] == "queued"
+    assert synthesize_calls["count"] == 0
+    process_voice_calibration_batch(batch.json()["id"])
+    assert synthesize_calls["count"] == 1
+    completed = auth_client.get(f"/voice-lab/calibration-batches/{batch.json()['id']}")
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completed"
+    assert completed.json()["rankings"][0]["score"] > 0.5
+    recipe = completed.json()["rankings"][0]["recipe"]
+    assert recipe["provider"] == "xtts"
+    assert recipe["temperature"] == 0.85
+    assert recipe["split_sentences"] is False
+    recipe["calibration_score"] = completed.json()["rankings"][0]["score"]
 
     saved = auth_client.post(
         "/voice-profiles/vp_stewie_griffin_character_v1/calibration-recipe",
         json={"recipe": recipe},
     )
     assert saved.status_code == 200
-    assert saved.json()["selected_recipe"]["provider"] == "espeak"
+    assert saved.json()["selected_recipe"]["provider"] == "xtts"
+    assert saved.json()["selected_recipe"]["temperature"] == 0.85
+    assert saved.json()["selected_recipe"]["split_sentences"] is False
     assert saved.json()["calibration_score"] == recipe["calibration_score"]
 
 
@@ -1107,6 +1148,114 @@ def test_xtts_provider_uses_stewie_selected_recipe_exactly(monkeypatch, tmp_path
     assert result["reference_audio_count"] == 2
     assert result["recipe_used"]["checkpoint_dir"] == str(tree["checkpoint_dir"])
     assert result["golden_preview_wav"] == str(tree["golden_preview"])
+    stage_names = [stage["name"] for stage in profiler.to_dict()["stages"]]
+    assert "xtts.config_load" in stage_names
+    assert "xtts.checkpoint_load" in stage_names
+    assert "xtts.conditioning_latents" in stage_names
+    assert "xtts.inference" in stage_names
+    assert "xtts.wav_save" in stage_names
+
+
+def test_xtts_provider_loads_checkpoint_directory_with_explicit_config(monkeypatch, tmp_path: Path):
+    XTTSProvider.clear_worker_cache()
+    checkpoint_dir = tmp_path / "shared" / "xtts_v2"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "config.json").write_text("{}", encoding="utf-8")
+    (checkpoint_dir / "vocab.json").write_text("{}", encoding="utf-8")
+    (checkpoint_dir / "model.pth").write_bytes(b"model")
+    reference_path = tmp_path / "peter_ref.wav"
+    _write_sine_wav(reference_path, seconds=0.8, frequency=180)
+    monkeypatch.setattr(settings, "XTTS_DEVICE", "cpu")
+    monkeypatch.setattr(settings, "XTTS_WORKER_CACHE_ENABLED", False)
+    recorded: dict[str, object] = {}
+
+    class FakeConfig:
+        def load_json(self, path):
+            recorded["config_path"] = path
+
+    class FakeModel:
+        def load_checkpoint(self, config, checkpoint_dir, eval):
+            recorded["checkpoint_dir"] = checkpoint_dir
+            recorded["eval"] = eval
+
+        def to(self, device):
+            recorded["device"] = device
+
+        def get_conditioning_latents(self, audio_path):
+            recorded["reference_wavs"] = audio_path
+            return "latent", "embedding"
+
+        def inference(self, text, language, latent, embedding, **kwargs):
+            recorded["text"] = text
+            recorded["language"] = language
+            recorded["inference_kwargs"] = kwargs
+            return {"wav": [0.0] * 24000}
+
+    class FakeXtts:
+        @staticmethod
+        def init_from_config(config):
+            recorded["init_from_config"] = True
+            return FakeModel()
+
+    class FakeTensor:
+        def unsqueeze(self, axis):
+            recorded["unsqueeze_axis"] = axis
+            return self
+
+    def fake_torchaudio_save(path, tensor, sample_rate):
+        recorded["output_path"] = path
+        recorded["sample_rate"] = sample_rate
+        _write_sine_wav(Path(path), seconds=0.8, sample_rate=sample_rate)
+
+    modules = {
+        "TTS": types.ModuleType("TTS"),
+        "TTS.tts": types.ModuleType("TTS.tts"),
+        "TTS.tts.configs": types.ModuleType("TTS.tts.configs"),
+        "TTS.tts.configs.xtts_config": types.ModuleType("TTS.tts.configs.xtts_config"),
+        "TTS.tts.models": types.ModuleType("TTS.tts.models"),
+        "TTS.tts.models.xtts": types.ModuleType("TTS.tts.models.xtts"),
+        "torch": types.ModuleType("torch"),
+        "torchaudio": types.ModuleType("torchaudio"),
+    }
+    modules["TTS.tts.configs.xtts_config"].XttsConfig = FakeConfig
+    modules["TTS.tts.models.xtts"].Xtts = FakeXtts
+    modules["torch"].tensor = lambda wav: FakeTensor()
+    modules["torchaudio"].save = fake_torchaudio_save
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    provider = XTTSProvider()
+    monkeypatch.setattr(provider, "healthcheck", lambda: {"available": True, "reason": None, "metadata": {"device": "cpu"}})
+    output_path = tmp_path / "peter.wav"
+    profiler = RenderProfiler(job_id=6, project_id=3, output_kind="preview", rss_reader=lambda: 100)
+
+    result = provider.synthesize_line(
+        text="This should use the explicit config file.",
+        voice_profile={
+            "id": "vp_peter",
+            "display_name": "Peter Griffin",
+            "provider": "xtts",
+            "character_slug": "peter_griffin",
+            "language": "en",
+            "model_checkpoint_path": str(checkpoint_dir),
+            "reference_audios": [{"processed_storage_path": str(reference_path)}],
+            "controls": {"speaking_rate": 1.05},
+            "selected_recipe": {"provider": "xtts", "speaking_rate": 1.05, "split_sentences": True},
+        },
+        output_path=output_path,
+        options={"profiler": profiler, "output_kind": "preview"},
+    )
+
+    assert recorded["config_path"] == str(checkpoint_dir / "config.json")
+    assert recorded["checkpoint_dir"] == str(checkpoint_dir)
+    assert recorded["reference_wavs"] == [str(reference_path)]
+    assert recorded["language"] == "en"
+    assert recorded["inference_kwargs"]["speed"] == 1.05
+    assert recorded["sample_rate"] == 24000
+    assert result["provider_used"] == "xtts"
+    assert result["reference_audio_count"] == 1
+    assert result["recipe_used"]["checkpoint_dir"] == str(checkpoint_dir)
+    assert result["recipe_used"]["config_path"] == str(checkpoint_dir / "config.json")
     stage_names = [stage["name"] for stage in profiler.to_dict()["stages"]]
     assert "xtts.config_load" in stage_names
     assert "xtts.checkpoint_load" in stage_names
@@ -1565,8 +1714,10 @@ def test_reference_audio_upload_rejects_unreadable_audio(auth_client: TestClient
         },
     )
 
-    assert response.status_code == 400
-    assert "could not be decoded or normalized" in response.json()["detail"]
+    failed = _run_voice_operation(auth_client, response).json()
+    assert failed["status"] == "failed"
+    assert failed["error"]["http_status"] == 400
+    assert "could not be decoded or normalized" in failed["error"]["detail"]
 
 
 def test_reference_audio_upload_only_trims_leading_silence(auth_client: TestClient, monkeypatch):
@@ -1608,7 +1759,8 @@ def test_reference_audio_upload_only_trims_leading_silence(auth_client: TestClie
         },
     )
 
-    assert response.status_code == 201
+    processed = _run_voice_operation(auth_client, response)
+    assert processed.json()["status"] == "completed"
     command = next(command for command in recorded["commands"] if command[-1] != "-" and "-ss" not in command)
     assert "-af" in command
     silence_filter = command[command.index("-af") + 1]
@@ -1656,8 +1808,8 @@ def test_reference_audio_upload_processes_long_mp3_into_short_chunks(auth_client
         },
     )
 
-    assert response.status_code == 201
-    metadata = response.json()["voice_profile"]["provider_metadata"]
+    processed = _run_voice_operation(auth_client, response)
+    metadata = processed.json()["result"]["voice_profile"]["provider_metadata"]
     assert metadata["processed_reference_duration_seconds"] <= 60.0
     assert len(metadata["processed_reference_paths"]) == 6
     assert all(Path(path).exists() for path in metadata["processed_reference_paths"])
@@ -1714,8 +1866,10 @@ def test_reference_audio_upload_rejects_mostly_silent_audio(auth_client: TestCli
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"]["validation"]["hard_failures"][0]["code"] == "too_much_silence"
+    failed = _run_voice_operation(auth_client, response).json()
+    assert failed["status"] == "failed"
+    assert failed["error"]["http_status"] == 400
+    assert failed["error"]["detail"]["validation"]["hard_failures"][0]["code"] == "too_much_silence"
 
 
 def test_reference_audio_upload_rejects_clipped_audio(auth_client: TestClient, monkeypatch):
@@ -1761,8 +1915,10 @@ def test_reference_audio_upload_rejects_clipped_audio(auth_client: TestClient, m
         },
     )
 
-    assert response.status_code == 400
-    codes = [item["code"] for item in response.json()["detail"]["validation"]["hard_failures"]]
+    failed = _run_voice_operation(auth_client, response).json()
+    assert failed["status"] == "failed"
+    assert failed["error"]["http_status"] == 400
+    codes = [item["code"] for item in failed["error"]["detail"]["validation"]["hard_failures"]]
     assert "clipping_detected" in codes
 
 
@@ -1818,11 +1974,12 @@ def test_reference_audio_upload_accepts_soft_warning_metadata(auth_client: TestC
         },
     )
 
-    assert response.status_code == 201
-    validation = response.json()["reference_audio"]["validation"]
-    assert response.json()["reference_audio"]["validation_status"] == "warning"
+    processed = _run_voice_operation(auth_client, response).json()
+    payload = processed["result"]
+    validation = payload["reference_audio"]["validation"]
+    assert payload["reference_audio"]["validation_status"] == "warning"
     assert validation["warnings"][0]["code"] == "poor_speech_ratio"
-    assert response.json()["voice_profile"]["provider_metadata"]["reference_validation_status"] == "warning"
+    assert payload["voice_profile"]["provider_metadata"]["reference_validation_status"] == "warning"
 
 
 def test_prepare_voice_profile_persists_embedding_metadata(auth_client: TestClient, monkeypatch):
@@ -1888,7 +2045,10 @@ def test_prepare_voice_profile_persists_embedding_metadata(auth_client: TestClie
     finally:
         db.close()
 
+    prepare_calls = {"count": 0}
+
     def fake_prepare_voice_profile(self, voice_profile, requested_provider=None):
+        prepare_calls["count"] += 1
         return {
             "provider_used": "openvoice",
             "provider_state": {"openvoice": {"available": True}},
@@ -1910,8 +2070,12 @@ def test_prepare_voice_profile_persists_embedding_metadata(auth_client: TestClie
 
     response = auth_client.post("/voice-profiles/vp_host_calm_v1/prepare")
 
-    assert response.status_code == 200
-    assert response.json()["cached_artifact_path"] == str(artifact_path)
+    assert response.status_code == 202
+    assert response.json()["operation_type"] == "voice_profile_prepare"
+    assert prepare_calls["count"] == 0
+    completed = _run_voice_operation(auth_client, response)
+    assert prepare_calls["count"] == 1
+    assert completed.json()["result"]["cached_artifact_path"] == str(artifact_path)
     listed = auth_client.get("/voice-profiles")
     profile = next(item for item in listed.json()["items"] if item["id"] == "vp_host_calm_v1")
     assert profile["embedding_path"] == str(artifact_path)
@@ -1955,7 +2119,10 @@ def test_prepare_voice_profile_marks_failed_when_embedding_extraction_fails(auth
 
     response = auth_client.post("/voice-profiles/vp_host_calm_v1/prepare")
 
-    assert response.status_code == 503
+    assert response.status_code == 202
+    failed = _run_voice_operation(auth_client, response)
+    assert failed.json()["status"] == "failed"
+    assert failed.json()["error"]["http_status"] == 503
     listed = auth_client.get("/voice-profiles")
     profile = next(item for item in listed.json()["items"] if item["id"] == "vp_host_calm_v1")
     assert profile["embedding_path"] is None
@@ -3019,7 +3186,7 @@ def test_render_audio_assembly_uses_segment_audio_paths(monkeypatch):
     service = ProjectRenderService()
     segment_path = generated_job_segment_dir(77) / "000_host.wav"
     _write_wav(segment_path, seconds=1.1)
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {"image_heights": []}
     segments = [
         SpeechSegment(
             speaker="Host",
@@ -3073,7 +3240,7 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
     caption_path = tmp_path / "caption.png"
     portrait_path.write_bytes(b"fake-portrait")
     caption_path.write_bytes(b"fake-caption")
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {"image_heights": []}
 
     def fake_synthesize_dialogue(self, parsed_lines, work_dir):
         assert work_dir == segment_dir
@@ -3102,7 +3269,10 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
             ),
         ]
 
-    def fake_run(command, check, capture_output, text):
+    def fake_run(command, *args, **kwargs):
+        if not command or command[0] != "ffmpeg":
+            stdout = "arm64\n" if kwargs.get("text") or kwargs.get("encoding") else b"Mach-O 64-bit"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
         output_audio_path = Path(command[-1])
         if "-filter_complex" in command:
             concat_list_path = output_audio_path.parent / "dialogue_segments.txt"
@@ -3144,6 +3314,8 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
             self.path = path
 
         def resized(self, height=None, new_size=None):
+            if height is not None:
+                captured["image_heights"].append(height)
             return self
 
         def with_opacity(self, opacity):
@@ -3203,7 +3375,11 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
     monkeypatch.setattr(LocalSpeechService, "synthesize_dialogue", fake_synthesize_dialogue)
     monkeypatch.setattr("app.services.rendering.subprocess.run", fake_run)
     monkeypatch.setattr(service, "_resolve_character_portrait", lambda speaker, slot_index, work_dir: portrait_path)
-    monkeypatch.setattr(service, "_build_dialogue_card", lambda segment, work_dir: caption_path)
+    def fake_dialogue_card(segment, work_dir, chat_font_size_px=18):
+        captured["chat_font_size_px"] = chat_font_size_px
+        return caption_path
+
+    monkeypatch.setattr(service, "_build_dialogue_card", fake_dialogue_card)
 
     result = service.render_preview(
         project_id=1,
@@ -3215,6 +3391,7 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
         style_preset="none",
         output_kind="preview",
         voice_manifest={"speakers": {}},
+        render_settings={"layout": {"character_scale": 1.25, "chat_font_size_px": 24}},
         job_id=job_id,
     )
 
@@ -3230,6 +3407,11 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
     assert tts_result["assembly"]["final_video_audio_path"] == captured["final_video_audio_path"]
     assert tts_result["assembly"]["final_video_audio_artifact_url"].endswith("/audio/final_video_audio.wav")
     assert tts_result["render_profile"]["artifact_url"].endswith("/generation_profile.json")
+    assert tts_result["render_settings"]["layout"] == {"character_scale": 1.25, "chat_font_size_px": 24}
+    assert result["metadata"]["render_settings"]["layout"] == {"character_scale": 1.25, "chat_font_size_px": 24}
+    assert captured["chat_font_size_px"] == 24
+    assert 775 in captured["image_heights"]
+    assert 975 in captured["image_heights"]
     assert result["metadata"]["render_profile_artifact_url"].endswith("/generation_profile.json")
     profile_path = generated_job_segment_dir(job_id).parent / "generation_profile.json"
     profile_payload = json.loads(profile_path.read_text(encoding="utf-8"))
@@ -3239,6 +3421,7 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
     assert "moviepy.ffmpeg_encode_and_mp4_write" in stage_names
     assert profile_payload["context"]["segment_count"] == 2
     assert profile_payload["context"]["resolution"] == {"width": 1080, "height": 1920}
+    assert profile_payload["context"]["preview_layout"] == {"character_scale": 1.25, "chat_font_size_px": 24}
     assert profile_payload["context"]["ffmpeg_threads"] >= 1
     assert tts_result["segments"][0]["audio_path"] == str(host_segment)
     assert tts_result["segments"][0]["audio_path_used_for_final_assembly"] == str(host_segment)
@@ -3678,6 +3861,99 @@ def test_project_speaker_bindings_round_trip(auth_client: TestClient):
     }
 
 
+def test_project_preview_settings_save_load_background_speakers_and_layout(auth_client: TestClient):
+    _write_voice_manifest_presets()
+    character_dir = Path("test_storage") / "bundled" / "characters"
+    character_dir.mkdir(parents=True, exist_ok=True)
+    (character_dir / "speaker_1.png").write_bytes(b"host-portrait")
+    preset_dir = Path("test_storage") / "bundled" / "presets"
+    preset_dir.mkdir(parents=True, exist_ok=True)
+    (preset_dir / "aurora_grid.mp4").write_bytes(b"preset-video")
+
+    project = auth_client.post("/projects", json={"name": "Preview Settings", "target_platform": "youtube"})
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+    script = auth_client.put(
+        f"/projects/{project_id}/script",
+        json={"raw_text": "<Host> This is the preview line.\n<Guest> This is mapped too.", "source": "manual"},
+    )
+    assert script.status_code == 200
+    selected_background = auth_client.post(f"/projects/{project_id}/assets/background/preset/aurora_grid")
+    assert selected_background.status_code == 201
+    bindings = auth_client.put(
+        f"/projects/{project_id}/speaker-bindings",
+        json={
+            "items": [
+                {"speaker_name": "Host", "character_preset_id": "host_clone_v1"},
+                {"speaker_name": "Guest", "character_preset_id": "guest_local_v1"},
+            ]
+        },
+    )
+    assert bindings.status_code == 200
+
+    updated = auth_client.patch(
+        f"/projects/{project_id}/preview-settings",
+        json={"layout": {"character_scale": 1.35, "chat_font_size_px": 24}},
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["background_asset_id"] == selected_background.json()["id"]
+    assert body["background_preset_id"] == "aurora_grid"
+    assert body["background_source_type"] == "preset"
+    assert body["background_url"] == f"/assets/{selected_background.json()['id']}/content"
+    assert body["layout"] == {"character_scale": 1.35, "chat_font_size_px": 24}
+    host_mapping = next(item for item in body["speaker_mappings"] if item["speaker_name"] == "Host")
+    assert host_mapping["voice_profile_id"] == "vp_host_clone_v1"
+    assert host_mapping["character_portrait_url"] == "/character-presets/host_clone_v1/portrait"
+    assert host_mapping["sample_text"] == "This is the preview line."
+
+    reloaded = auth_client.get(f"/projects/{project_id}/preview-settings")
+    assert reloaded.status_code == 200
+    assert reloaded.json()["layout"] == {"character_scale": 1.35, "chat_font_size_px": 24}
+
+
+def test_preview_layout_bounds_are_enforced(auth_client: TestClient):
+    project = auth_client.post("/projects", json={"name": "Preview Bounds", "target_platform": "youtube"})
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+
+    too_large = auth_client.patch(
+        f"/projects/{project_id}/preview-settings",
+        json={"layout": {"character_scale": 2.0, "chat_font_size_px": 48}},
+    )
+
+    assert too_large.status_code == 422
+
+
+def test_voice_profile_summary_exposes_associated_character_image(auth_client: TestClient):
+    _write_voice_manifest_presets()
+    character_dir = Path("test_storage") / "bundled" / "characters"
+    character_dir.mkdir(parents=True, exist_ok=True)
+    (character_dir / "speaker_1.png").write_bytes(b"host-portrait")
+
+    profiles = auth_client.get("/voice-profiles")
+
+    assert profiles.status_code == 200
+    host = next(item for item in profiles.json()["items"] if item["id"] == "vp_host_clone_v1")
+    assert host["associated_character_preset_id"] == "host_clone_v1"
+    assert host["associated_character_display_name"] == "Host"
+    assert host["associated_character_image_url"] == "/character-presets/host_clone_v1/portrait"
+
+
+def test_character_images_are_not_loaded_from_background_preset_directories(auth_client: TestClient):
+    _write_voice_manifest_presets()
+    preset_dir = Path("test_storage") / "bundled" / "presets"
+    preset_dir.mkdir(parents=True, exist_ok=True)
+    (preset_dir / "speaker_1.png").write_bytes(b"not-a-character")
+
+    presets = auth_client.get("/character-presets")
+
+    assert presets.status_code == 200
+    host = next(item for item in presets.json()["items"] if item["id"] == "host_clone_v1")
+    assert host["portrait_filename"] == "speaker_1.png"
+    assert host["portrait_url"] is None
+
+
 def _create_project_flow(client: TestClient) -> dict:
     project = client.post("/projects", json={"name": "First Project", "target_platform": "youtube"})
     assert project.status_code == 201
@@ -3850,6 +4126,38 @@ def test_generation_job_snapshots_selected_voice_profiles(auth_client: TestClien
     assert manifest["speakers"]["Guest"]["fallback_allowed"] is True
 
 
+def test_generation_job_snapshots_preview_settings(auth_client: TestClient, monkeypatch):
+    _write_voice_manifest_presets()
+    character_dir = Path("test_storage") / "bundled" / "characters"
+    character_dir.mkdir(parents=True, exist_ok=True)
+    (character_dir / "speaker_1.png").write_bytes(b"host-portrait")
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+    settings_response = auth_client.patch(
+        f"/projects/{flow['project_id']}/preview-settings",
+        json={"layout": {"character_scale": 1.4, "chat_font_size_px": 26}},
+    )
+    assert settings_response.status_code == 200
+
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+
+    assert create_job.status_code == 201
+    body = create_job.json()
+    assert body["preview_settings"]["background_asset_id"] == flow["asset_id"]
+    assert body["preview_settings"]["layout"] == {"character_scale": 1.4, "chat_font_size_px": 26}
+    assert body["preview_settings"]["speaker_mappings"][0]["speaker_name"] == "Host"
+    assert body["voice_manifest"]["speakers"]["Host"]["character_portrait_url"] == "/character-presets/host_clone_v1/portrait"
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, body["id"])
+        assert job.render_settings_json["layout"] == {"character_scale": 1.4, "chat_font_size_px": 26}
+    finally:
+        db.close()
+
+
 def test_saved_calibration_recipe_is_snapshotted_for_video_render(auth_client: TestClient, monkeypatch):
     _write_voice_manifest_presets()
     auth_client.get("/character-presets")
@@ -3902,6 +4210,11 @@ def test_saved_calibration_recipe_is_snapshotted_for_video_render(auth_client: T
 def test_generation_worker_uses_persisted_voice_manifest_after_binding_changes(auth_client: TestClient, monkeypatch):
     _write_voice_manifest_presets()
     flow = _create_project_flow(auth_client)
+    layout_response = auth_client.patch(
+        f"/projects/{flow['project_id']}/preview-settings",
+        json={"layout": {"character_scale": 1.2, "chat_font_size_px": 22}},
+    )
+    assert layout_response.status_code == 200
     monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
     create_job = auth_client.post(
         f"/projects/{flow['project_id']}/generation-jobs",
@@ -3927,6 +4240,7 @@ def test_generation_worker_uses_persisted_voice_manifest_after_binding_changes(a
 
     def fake_render_preview(self, *args, **kwargs):
         captured["voice_manifest"] = kwargs["voice_manifest"]
+        captured["render_settings"] = kwargs["render_settings"]
         segment_path = generated_job_segment_dir(kwargs["job_id"]) / "000_host.wav"
         _write_wav(segment_path, seconds=1.5)
         artifact_url = generated_job_artifact_url(kwargs["job_id"], segment_path)
@@ -3935,9 +4249,11 @@ def test_generation_worker_uses_persisted_voice_manifest_after_binding_changes(a
             "output_path": str(source_preview),
             "duration_seconds": 1.5,
             "metadata": {
+                "render_settings": kwargs["render_settings"],
                 "render_profile_artifact_url": profile_url,
                 "tts_result": {
                     "status": "completed",
+                    "render_settings": kwargs["render_settings"],
                     "provider_state": {"openvoice": {"available": True}},
                     "render_profile": {"artifact_url": profile_url, "summary": {"total_duration_seconds": 1.23}},
                     "segments": [
@@ -3960,6 +4276,7 @@ def test_generation_worker_uses_persisted_voice_manifest_after_binding_changes(a
 
     assert result["ok"] is True
     assert captured["voice_manifest"]["speakers"]["Host"]["voice_profile_id"] == "vp_host_clone_v1"
+    assert captured["render_settings"]["layout"] == {"character_scale": 1.2, "chat_font_size_px": 22}
     job = auth_client.get(f"/generation-jobs/{job_id}")
     assert job.status_code == 200
     assert job.json()["tts_result"]["segments"][0]["provider_used"] == "openvoice"
@@ -3970,6 +4287,7 @@ def test_generation_worker_uses_persisted_voice_manifest_after_binding_changes(a
     assert outputs.status_code == 200
     assert outputs.json()["items"][0]["asset"]["metadata"]["tts_result"]["segments"][0]["voice_profile_id"] == "vp_host_clone_v1"
     assert outputs.json()["items"][0]["asset"]["metadata"]["tts_result"]["segments"][0]["artifact_url"].endswith("/segments/000_host.wav")
+    assert outputs.json()["items"][0]["asset"]["metadata"]["render_settings"]["layout"] == {"character_scale": 1.2, "chat_font_size_px": 22}
 
 
 def test_generation_worker_persists_tts_provider_failure(auth_client: TestClient, monkeypatch):

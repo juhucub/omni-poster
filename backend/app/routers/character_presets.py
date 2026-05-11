@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
@@ -23,17 +24,25 @@ from app.schemas import (
     VoiceLabPreviewRequest,
     VoiceLabPreviewResponse,
     VoiceModelAttachRequest,
+    VoiceOperationJobSummary,
     VoiceProfileListResponse,
-    VoiceProfilePrepareResponse,
     VoiceProfileRequest,
     VoiceProfileSummary,
-    VoiceReferenceDatasetClipUploadResponse,
     VoiceReferenceDatasetCreateRequest,
     VoiceReferenceDatasetResponse,
-    VoiceReferenceAudioUploadResponse,
 )
 from app.services.tts import TTSOrchestrator, TTSProviderError, apply_voice_lab_overrides
 from app.services.character_voice_recipes import CharacterVoiceRecipeError, validate_selected_character_recipe
+from app.services.memory_logging import log_memory_event
+from app.services.voice_operation_jobs import (
+    create_voice_operation_job,
+    get_voice_operation_job,
+    mark_voice_operation_failed,
+    mark_voice_operation_queued,
+    serialize_voice_operation_job,
+    stage_voice_reference_upload,
+    validate_voice_operation_profile,
+)
 from app.services.voice_preview_jobs import (
     create_voice_preview_job,
     get_voice_preview_job,
@@ -51,26 +60,23 @@ from app.services.voice_profiles import (
     resolve_voice_reference_audio_artifact,
     resolve_character_portrait_path,
     runtime_voice_profile_payload,
-    save_reference_audio_upload,
     update_voice_profile_calibration_recipe,
-    update_voice_profile_preparation_metadata,
     upsert_character_preset,
     upsert_voice_profile,
     voice_lab_preview_dir,
 )
 from app.services.voice_replication import (
-    analyze_voice_reference_dataset,
-    attach_character_voice_model,
     create_calibration_batch,
     create_reference_dataset,
     save_best_calibration_recipe,
     serialize_calibration_batch,
-    upload_reference_dataset_clip,
     verify_character_voice_render,
 )
 from app.tasks.voice_preview import process_voice_lab_preview
+from app.tasks.voice_operations import process_voice_calibration_batch, process_voice_operation_job
 
 router = APIRouter(tags=["character_presets"])
+logger = logging.getLogger(__name__)
 
 VOICE_CALIBRATION_TEST_PHRASES = [
     "I need this line to sound calm, specific, and unmistakably like me.",
@@ -84,6 +90,43 @@ DEFAULT_CALIBRATION_RECIPES = [
     {"base_speaker": "EN-US", "style_preset": "default", "speaking_rate": 0.95, "pause_bias": 1.0, "pitch": 1, "energy": 1.1},
     {"base_speaker": "EN-BR", "style_preset": "default", "speaking_rate": 1.0, "pause_bias": 1.25, "pitch": -1, "energy": 1.0},
 ]
+
+
+def _queue_voice_operation(job, db: Session):
+    celery_task_id = f"voice-operation-{job.id}"
+    log_memory_event(
+        logger,
+        "voice.operation.api_before_enqueue",
+        operation_type=job.operation_type,
+        voice_profile_id=job.voice_profile_id,
+        reference_dataset_id=job.reference_dataset_id,
+        job_id=job.id,
+        stage=job.stage,
+    )
+    try:
+        process_voice_operation_job.apply_async(kwargs={"job_id": job.id}, task_id=celery_task_id)
+        job = mark_voice_operation_queued(job, celery_task_id=celery_task_id, db=db)
+    except Exception as exc:
+        job = mark_voice_operation_failed(
+            job,
+            error={
+                "code": "voice_operation_queue_failed",
+                "message": f"Voice operation could not be queued: {exc}",
+                "http_status": 503,
+            },
+            db=db,
+        )
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=job.error_json) from exc
+    log_memory_event(
+        logger,
+        "voice.operation.api_after_enqueue",
+        operation_type=job.operation_type,
+        voice_profile_id=job.voice_profile_id,
+        reference_dataset_id=job.reference_dataset_id,
+        job_id=job.id,
+        stage=job.stage,
+    )
+    return job
 
 
 def _calibration_recipe_controls(recipe: dict[str, object]) -> dict[str, object]:
@@ -126,7 +169,7 @@ def _preview_execution_policy(
         "requested_provider": requested_provider,
         "selected_provider": selected_provider,
         "fallback_allowed": resolved_fallback_allowed if requested_provider in {"", "auto"} else False,
-        "requires_worker": selected_provider == "openvoice",
+        "requires_worker": selected_provider in {"openvoice", "xtts", "rvc"},
         "provider_state": selection["provider_state"],
     }
 
@@ -214,7 +257,7 @@ def update_voice_profile(
     return VoiceProfileSummary(**profile)
 
 
-@router.post("/voice-profiles/reference-audio", response_model=VoiceReferenceAudioUploadResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/voice-profiles/reference-audio", response_model=VoiceOperationJobSummary, status_code=status.HTTP_202_ACCEPTED)
 def upload_reference_audio(
     voice_profile_id: str = Form(...),
     authorization_confirmed: bool = Form(...),
@@ -223,7 +266,7 @@ def upload_reference_audio(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    voice_profile, reference_audio = save_reference_audio_upload(
+    request = stage_voice_reference_upload(
         file=file,
         voice_profile_id=voice_profile_id,
         current_user_id=current_user.id,
@@ -231,10 +274,15 @@ def upload_reference_audio(
         authorization_note=authorization_note,
         db=db,
     )
-    return VoiceReferenceAudioUploadResponse(
-        voice_profile=VoiceProfileSummary(**voice_profile),
-        reference_audio=reference_audio,
+    job = create_voice_operation_job(
+        operation_type="reference_audio_upload",
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user.id,
+        db=db,
+        request=request,
     )
+    job = _queue_voice_operation(job, db)
+    return VoiceOperationJobSummary(**serialize_voice_operation_job(job))
 
 
 @router.post(
@@ -263,8 +311,8 @@ def create_voice_reference_dataset(
 
 @router.post(
     "/voice-profiles/{voice_profile_id}/reference-datasets/{reference_dataset_id}/clips",
-    response_model=VoiceReferenceDatasetClipUploadResponse,
-    status_code=status.HTTP_201_CREATED,
+    response_model=VoiceOperationJobSummary,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def upload_voice_reference_dataset_clip(
     voice_profile_id: str,
@@ -275,25 +323,31 @@ def upload_voice_reference_dataset_clip(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    voice_profile, dataset, reference_audio = upload_reference_dataset_clip(
-        voice_profile_id=voice_profile_id,
-        reference_dataset_id=reference_dataset_id,
+    request = stage_voice_reference_upload(
         file=file,
+        voice_profile_id=voice_profile_id,
         current_user_id=current_user.id,
         authorization_confirmed=authorization_confirmed,
         authorization_note=authorization_note,
         db=db,
+        reference_dataset_id=reference_dataset_id,
     )
-    return VoiceReferenceDatasetClipUploadResponse(
-        voice_profile=VoiceProfileSummary(**voice_profile),
-        dataset=dataset,
-        reference_audio=reference_audio,
+    job = create_voice_operation_job(
+        operation_type="reference_dataset_clip_upload",
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user.id,
+        db=db,
+        reference_dataset_id=reference_dataset_id,
+        request=request,
     )
+    job = _queue_voice_operation(job, db)
+    return VoiceOperationJobSummary(**serialize_voice_operation_job(job))
 
 
 @router.post(
     "/voice-profiles/{voice_profile_id}/reference-datasets/{reference_dataset_id}/analyze",
-    response_model=VoiceReferenceDatasetResponse,
+    response_model=VoiceOperationJobSummary,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def analyze_voice_reference_dataset_route(
     voice_profile_id: str,
@@ -301,37 +355,47 @@ def analyze_voice_reference_dataset_route(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    voice_profile, dataset = analyze_voice_reference_dataset(
+    validate_voice_operation_profile(
         voice_profile_id=voice_profile_id,
-        reference_dataset_id=reference_dataset_id,
         current_user_id=current_user.id,
         db=db,
+        reference_dataset_id=reference_dataset_id,
     )
-    return VoiceReferenceDatasetResponse(
-        voice_profile=VoiceProfileSummary(**voice_profile),
-        dataset=dataset,
+    job = create_voice_operation_job(
+        operation_type="reference_dataset_analyze",
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user.id,
+        db=db,
+        reference_dataset_id=reference_dataset_id,
+        request={"reference_dataset_id": reference_dataset_id},
     )
+    job = _queue_voice_operation(job, db)
+    return VoiceOperationJobSummary(**serialize_voice_operation_job(job))
 
 
-@router.post("/voice-profiles/{voice_profile_id}/models/attach", response_model=VoiceProfileSummary)
+@router.post("/voice-profiles/{voice_profile_id}/models/attach", response_model=VoiceOperationJobSummary, status_code=status.HTTP_202_ACCEPTED)
 def attach_voice_character_model(
     voice_profile_id: str,
     payload: VoiceModelAttachRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    profile = attach_character_voice_model(
+    validate_voice_operation_profile(
         voice_profile_id=voice_profile_id,
-        provider=payload.provider,
-        character_slug=payload.character_slug,
-        model_checkpoint_path=payload.model_checkpoint_path,
-        model_index_path=payload.model_index_path,
-        reference_dataset_id=payload.reference_dataset_id,
-        recipe=payload.recipe,
         current_user_id=current_user.id,
         db=db,
+        reference_dataset_id=payload.reference_dataset_id,
     )
-    return VoiceProfileSummary(**profile)
+    job = create_voice_operation_job(
+        operation_type="voice_model_attach",
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user.id,
+        db=db,
+        reference_dataset_id=payload.reference_dataset_id,
+        request=payload.model_dump(),
+    )
+    job = _queue_voice_operation(job, db)
+    return VoiceOperationJobSummary(**serialize_voice_operation_job(job))
 
 
 @router.get("/voice-profiles/{voice_profile_id}/reference-audio/{reference_audio_id}/{artifact_kind}")
@@ -358,49 +422,26 @@ def get_voice_reference_audio_artifact(
     )
 
 
-@router.post("/voice-profiles/{voice_profile_id}/prepare", response_model=VoiceProfilePrepareResponse)
+@router.post("/voice-profiles/{voice_profile_id}/prepare", response_model=VoiceOperationJobSummary, status_code=status.HTTP_202_ACCEPTED)
 def prepare_voice_profile(
     voice_profile_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    profile_model = get_voice_profile_model(voice_profile_id, db)
-    if not profile_model:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice profile not found.")
-    ensure_voice_profile_editable(profile_model, current_user.id)
-    orchestrator = TTSOrchestrator()
-    payload = runtime_voice_profile_payload(profile_model, profile_model.display_name)
-    try:
-        result = orchestrator.prepare_voice_profile(payload)
-    except TTSProviderError as exc:
-        profile_model.embedding_path = None
-        metadata = dict(profile_model.provider_metadata_json or {})
-        metadata.update(
-            {
-                "embedding_status": "failed",
-                "embedding_ready": False,
-                "embedding_artifact_path": None,
-                "last_error": exc.as_dict(),
-            }
-        )
-        profile_model.provider_metadata_json = metadata
-        db.commit()
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.as_dict()) from exc
-    profile_model = update_voice_profile_preparation_metadata(
-        profile_model,
-        embedding_path=result.get("cached_artifact_path"),
-        provider_metadata=result.get("provider_metadata"),
+    validate_voice_operation_profile(
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user.id,
         db=db,
     )
-    profile = get_voice_profile(profile_model.id, db)
-    return VoiceProfilePrepareResponse(
-        voice_profile=VoiceProfileSummary(**profile),
-        provider_used=result["provider_used"],
-        provider_state=result["provider_state"],
-        prepared=result["prepared"],
-        cached_artifact_path=result.get("cached_artifact_path"),
-        message=result["message"],
+    job = create_voice_operation_job(
+        operation_type="voice_profile_prepare",
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user.id,
+        db=db,
+        request={},
     )
+    job = _queue_voice_operation(job, db)
+    return VoiceOperationJobSummary(**serialize_voice_operation_job(job))
 
 
 @router.get("/tts/providers", response_model=ProviderCapabilityListResponse)
@@ -670,7 +711,7 @@ def save_voice_profile_calibration_recipe(
     return VoiceProfileSummary(**profile)
 
 
-@router.post("/voice-lab/calibration-batches", response_model=VoiceCalibrationBatchSummary, status_code=status.HTTP_201_CREATED)
+@router.post("/voice-lab/calibration-batches", response_model=VoiceCalibrationBatchSummary, status_code=status.HTTP_202_ACCEPTED)
 def create_voice_calibration_batch(
     payload: VoiceCalibrationBatchRequest,
     current_user: User = Depends(get_current_user),
@@ -684,7 +725,55 @@ def create_voice_calibration_batch(
         current_user_id=current_user.id,
         db=db,
     )
+    celery_task_id = f"voice-calibration-batch-{batch['id']}"
+    log_memory_event(
+        logger,
+        "voice.calibration.api_before_enqueue",
+        operation_type="voice_calibration_batch",
+        voice_profile_id=batch["voice_profile_id"],
+        reference_dataset_id=batch.get("reference_dataset_id"),
+        job_id=batch["id"],
+        stage=batch["status"],
+    )
+    try:
+        process_voice_calibration_batch.apply_async(kwargs={"batch_id": batch["id"]}, task_id=celery_task_id)
+    except Exception as exc:
+        from app.models import VoiceCalibrationBatch
+
+        batch_model = db.get(VoiceCalibrationBatch, batch["id"])
+        if batch_model:
+            batch_model.status = "failed"
+            batch_model.error_json = {
+                "code": "calibration_batch_queue_failed",
+                "message": f"Voice calibration batch could not be queued: {exc}",
+                "http_status": 503,
+            }
+            db.commit()
+            db.refresh(batch_model)
+            batch = serialize_calibration_batch(batch_model)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=batch.get("error")) from exc
+    log_memory_event(
+        logger,
+        "voice.calibration.api_after_enqueue",
+        operation_type="voice_calibration_batch",
+        voice_profile_id=batch["voice_profile_id"],
+        reference_dataset_id=batch.get("reference_dataset_id"),
+        job_id=batch["id"],
+        stage=batch["status"],
+    )
     return VoiceCalibrationBatchSummary(**batch)
+
+
+@router.get("/voice-lab/operations/{job_id}", response_model=VoiceOperationJobSummary)
+def get_voice_operation_status(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = get_voice_operation_job(job_id, current_user.id, db)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice operation job not found.")
+    return VoiceOperationJobSummary(**serialize_voice_operation_job(job))
 
 
 @router.get("/voice-lab/calibration-batches/{batch_id}", response_model=VoiceCalibrationBatchSummary)

@@ -9,6 +9,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
       REDIS_URL: redis://redis:6379/0
+      OMNI_CONTAINER_ROLE: api
       BUNDLED_MEDIA_DIR: /app/backend/storage
       MEDIA_DIR: /data/uploads
       OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
@@ -22,8 +23,8 @@ services:
       XTTS_WORKER_CACHE_ENABLED: ${XTTS_WORKER_CACHE_ENABLED:-true}
       XTTS_WORKER_CACHE_MAX_ENTRIES: ${XTTS_WORKER_CACHE_MAX_ENTRIES:-2}
       XTTS_TORCH_INFERENCE_MODE_ENABLED: ${XTTS_TORCH_INFERENCE_MODE_ENABLED:-true}
-      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-0}
-      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-0}
+      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-4}
+      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-1}
       XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE: ${XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE:-}
       RENDER_PROFILING_ENABLED: ${RENDER_PROFILING_ENABLED:-true}
       RENDER_PREVIEW_WIDTH: ${RENDER_PREVIEW_WIDTH:-1080}
@@ -69,6 +70,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
       REDIS_URL: redis://redis:6379/0
+      OMNI_CONTAINER_ROLE: generation_worker
       BUNDLED_MEDIA_DIR: /app/backend/storage
       MEDIA_DIR: /data/uploads
       OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
@@ -82,8 +84,8 @@ services:
       XTTS_WORKER_CACHE_ENABLED: ${XTTS_WORKER_CACHE_ENABLED:-true}
       XTTS_WORKER_CACHE_MAX_ENTRIES: ${XTTS_WORKER_CACHE_MAX_ENTRIES:-2}
       XTTS_TORCH_INFERENCE_MODE_ENABLED: ${XTTS_TORCH_INFERENCE_MODE_ENABLED:-true}
-      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-0}
-      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-0}
+      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-4}
+      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-1}
       XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE: ${XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE:-}
       RENDER_PROFILING_ENABLED: ${RENDER_PROFILING_ENABLED:-true}
       RENDER_PREVIEW_WIDTH: ${RENDER_PREVIEW_WIDTH:-1080}
@@ -97,7 +99,7 @@ services:
       RENDER_PREVIEW_CRF: ${RENDER_PREVIEW_CRF:-24}
       RENDER_EXPORT_ENCODE_PRESET: ${RENDER_EXPORT_ENCODE_PRESET:-faster}
       RENDER_EXPORT_CRF: ${RENDER_EXPORT_CRF:-22}
-      CELERY_GENERATION_CONCURRENCY: ${CELERY_GENERATION_CONCURRENCY:-2}
+      CELERY_GENERATION_CONCURRENCY: ${CELERY_GENERATION_CONCURRENCY:-1}
       RVC_ENABLED: ${RVC_ENABLED:-false}
       RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
       RVC_RMVPE_PATH: ${RVC_RMVPE_PATH:-}
@@ -109,7 +111,7 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    command: ["sh", "-c", "celery -A app.celery_app.celery worker -Q generation,publish --concurrency=${CELERY_GENERATION_CONCURRENCY:-2}"]
+    command: ["sh", "-c", "celery -A app.celery_app.celery worker -Q generation,publish --concurrency=${CELERY_GENERATION_CONCURRENCY:-1}"]
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
@@ -125,6 +127,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://omni:omni@postgres:5432/omni_dev
       REDIS_URL: redis://redis:6379/0
+      OMNI_CONTAINER_ROLE: voice_worker
       BUNDLED_MEDIA_DIR: /app/backend/storage
       MEDIA_DIR: /data/uploads
       OPENVOICE_ENABLED: ${OPENVOICE_ENABLED:-true}
@@ -138,8 +141,8 @@ services:
       XTTS_WORKER_CACHE_ENABLED: ${XTTS_WORKER_CACHE_ENABLED:-true}
       XTTS_WORKER_CACHE_MAX_ENTRIES: ${XTTS_WORKER_CACHE_MAX_ENTRIES:-2}
       XTTS_TORCH_INFERENCE_MODE_ENABLED: ${XTTS_TORCH_INFERENCE_MODE_ENABLED:-true}
-      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-0}
-      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-0}
+      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-4}
+      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-1}
       XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE: ${XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE:-}
       RVC_ENABLED: ${RVC_ENABLED:-false}
       RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}
@@ -152,7 +155,7 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    command: ["celery", "-A", "app.celery_app.celery", "worker", "-Q", "voice_preview", "--concurrency=1"]
+    command: ["sh", "-c", "celery -A app.celery_app.celery worker -Q voice_preview --concurrency=1 --max-tasks-per-child=${CELERY_VOICE_MAX_TASKS_PER_CHILD:-1}"]
     volumes:
       - ../../backend/storage:/app/backend/storage:ro
       - api_uploads:/data/uploads
@@ -181,8 +184,8 @@ services:
       XTTS_WORKER_CACHE_ENABLED: ${XTTS_WORKER_CACHE_ENABLED:-true}
       XTTS_WORKER_CACHE_MAX_ENTRIES: ${XTTS_WORKER_CACHE_MAX_ENTRIES:-2}
       XTTS_TORCH_INFERENCE_MODE_ENABLED: ${XTTS_TORCH_INFERENCE_MODE_ENABLED:-true}
-      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-0}
-      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-0}
+      XTTS_CPU_NUM_THREADS: ${XTTS_CPU_NUM_THREADS:-4}
+      XTTS_CPU_INTEROP_THREADS: ${XTTS_CPU_INTEROP_THREADS:-1}
       XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE: ${XTTS_PREVIEW_SPLIT_SENTENCES_OVERRIDE:-}
       RVC_ENABLED: ${RVC_ENABLED:-false}
       RVC_MODELS_DIR: ${RVC_MODELS_DIR:-/data/uploads/voice_models}

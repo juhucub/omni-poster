@@ -182,6 +182,9 @@ export interface VoiceProfile {
   selected_recipe: Record<string, unknown>;
   calibration_score: number | null;
   last_verified_render_job_id: number | null;
+  associated_character_preset_id: string | null;
+  associated_character_display_name: string | null;
+  associated_character_image_url: string | null;
   reference_audio_count: number;
   reference_audios: VoiceReferenceAudio[];
   reference_datasets: VoiceReferenceDataset[];
@@ -248,6 +251,25 @@ export interface VoiceCalibrationBatch {
   updated_at: string;
 }
 
+export interface VoiceOperationJob {
+  id: number;
+  user_id: number;
+  voice_profile_id: string;
+  reference_dataset_id: number | null;
+  operation_type: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  progress: number;
+  stage: string | null;
+  request: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: Record<string, unknown> | null;
+  celery_task_id: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface SpeakerBinding {
   id: number;
   speaker_name: string;
@@ -255,6 +277,34 @@ export interface SpeakerBinding {
   character_display_name: string;
   voice_profile_id: string;
   provider: string;
+  character_portrait_filename: string | null;
+  character_portrait_url: string | null;
+}
+
+export interface ProjectPreviewLayout {
+  character_scale: number;
+  chat_font_size_px: number;
+}
+
+export interface ProjectPreviewSpeakerMapping {
+  speaker_name: string;
+  voice_profile_id: string | null;
+  character_preset_id: string | null;
+  character_display_name: string | null;
+  character_portrait_filename: string | null;
+  character_portrait_url: string | null;
+  display_label: string | null;
+  sample_text: string | null;
+}
+
+export interface ProjectPreviewSettings {
+  background_asset_id: number | null;
+  background_preset_id: string | null;
+  background_source_type: string | null;
+  background_url: string | null;
+  background_metadata: Record<string, unknown>;
+  speaker_mappings: ProjectPreviewSpeakerMapping[];
+  layout: ProjectPreviewLayout;
 }
 
 export interface GenerationJob {
@@ -267,6 +317,7 @@ export interface GenerationJob {
   provider_name: string;
   error_message: string | null;
   voice_manifest: Record<string, unknown>;
+  preview_settings: ProjectPreviewSettings;
   tts_result: Record<string, unknown>;
   provider_state: Record<string, unknown>;
   output_video_id: number | null;
@@ -393,4 +444,5 @@ export interface Project {
   latest_review: ReviewQueueItem | null;
   latest_notifications: NotificationSummary[];
   speaker_bindings: SpeakerBinding[];
+  preview_settings: ProjectPreviewSettings;
 }

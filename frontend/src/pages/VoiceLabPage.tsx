@@ -7,6 +7,7 @@ import type {
   VoiceCalibrationBatch,
   VoiceCalibrationMatrix,
   VoiceLabPreview,
+  VoiceOperationJob,
   VoiceProfile,
   VoiceProviderCapability,
 } from '../api/models';
@@ -66,6 +67,15 @@ const VoiceLabPage: React.FC = () => {
   const [characterBatch, setCharacterBatch] = useState<VoiceCalibrationBatch | null>(null);
 
   const apiBase = apiBaseUrl;
+  const toApiHref = (path: string | null | undefined) => {
+    if (!path) {
+      return '#';
+    }
+    if (/^https?:\/\//i.test(path)) {
+      return path;
+    }
+    return `${apiBase}${path.startsWith('/') ? path : `/${path}`}`;
+  };
 
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedId) || null,
@@ -81,12 +91,14 @@ const VoiceLabPage: React.FC = () => {
     () => providerCapabilities.find((capability) => capability.provider === form.provider) || null,
     [providerCapabilities, form.provider]
   );
+  const selectedAssociatedImageUrl = selectedVoiceProfile?.associated_character_image_url || selectedPreset?.portrait_url || null;
 
   const supportedControls = useMemo(
     () => new Set((selectedProviderCapability?.supported_controls || []).map((item) => String(item))),
     [selectedProviderCapability]
   );
 
+  // Provider metadata is the bridge between Voice Lab prep and Video Lab render snapshots.
   const embeddingStatus = String(
     selectedVoiceProfile?.provider_metadata?.['embedding_status'] ||
       (selectedVoiceProfile?.embedding_path ? 'ready' : selectedVoiceProfile?.reference_audio_count ? 'not_prepared' : 'pending_reference_audio')
@@ -144,6 +156,7 @@ const VoiceLabPage: React.FC = () => {
       notes: preset.notes || '',
       sample_text: preset.sample_text || emptyForm.sample_text,
       controls: {
+        // Keep saved profile controls when returning from Video Lab while filling any new UI controls.
         ...emptyForm.controls,
         ...(profile?.controls || {}),
         ...(preset.controls || {}),
@@ -275,6 +288,36 @@ const VoiceLabPage: React.FC = () => {
     }
   };
 
+  const voiceOperationMessage = (job: VoiceOperationJob, fallback: string) => {
+    const detail = job.error?.detail;
+    if (typeof detail === 'string') {
+      return detail;
+    }
+    if (detail && typeof detail === 'object' && 'message' in detail) {
+      return String((detail as Record<string, unknown>).message);
+    }
+    return typeof job.error?.message === 'string' ? job.error.message : fallback;
+  };
+
+  const pollVoiceOperation = async (job: VoiceOperationJob, successMessage: string) => {
+    let current = job;
+    setInfo(`${successMessage} Queued on the voice worker.`);
+    for (let attempt = 0; attempt < 105; attempt += 1) {
+      if (current.status === 'completed') {
+        setInfo(successMessage);
+        return current;
+      }
+      if (current.status === 'failed') {
+        throw new Error(voiceOperationMessage(current, 'Voice operation failed.'));
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      const response = await apiClient.get<VoiceOperationJob>(`/voice-lab/operations/${current.id}`);
+      current = response.data;
+    }
+    setInfo('Voice operation is still running on the worker.');
+    return current;
+  };
+
   const prepareVoice = async () => {
     if (!selectedPreset?.voice_profile_id) {
       setError('Save the preset before preparing a voice profile.');
@@ -282,13 +325,13 @@ const VoiceLabPage: React.FC = () => {
     }
     try {
       setBusy('prepare');
-      await apiClient.post(`/voice-profiles/${selectedPreset.voice_profile_id}/prepare`);
-      setInfo('Voice preparation completed or is ready on demand.');
+      const response = await apiClient.post<VoiceOperationJob>(`/voice-profiles/${selectedPreset.voice_profile_id}/prepare`);
+      await pollVoiceOperation(response.data, 'Voice preparation completed or is ready on demand.');
       await loadVoiceProfiles();
     } catch (err: any) {
       const detail = err.response?.data?.detail;
       setProviderError(detail || null);
-      setError(typeof detail === 'string' ? detail : detail?.message || 'Failed to prepare voice.');
+      setError(typeof detail === 'string' ? detail : detail?.message || err.message || 'Failed to prepare voice.');
     } finally {
       setBusy(null);
     }
@@ -310,16 +353,17 @@ const VoiceLabPage: React.FC = () => {
       formData.append('authorization_confirmed', String(authorizationConfirmed));
       formData.append('authorization_note', authorizationNote);
       formData.append('file', referenceFile);
-      await apiClient.post('/voice-profiles/reference-audio', formData, {
+      const response = await apiClient.post<VoiceOperationJob>('/voice-profiles/reference-audio', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
+      await pollVoiceOperation(response.data, 'Reference audio uploaded and processed.');
       setReferenceFile(null);
       setAuthorizationConfirmed(false);
       setAuthorizationNote('');
-      setInfo('Reference audio uploaded.');
       await loadVoiceProfiles();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to upload reference audio.');
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : detail?.message || err.message || 'Failed to upload reference audio.');
     } finally {
       setBusy(null);
     }
@@ -356,13 +400,13 @@ const VoiceLabPage: React.FC = () => {
       formData.append('authorization_confirmed', String(authorizationConfirmed));
       formData.append('authorization_note', authorizationNote);
       formData.append('file', referenceFile);
-      await apiClient.post(`/voice-profiles/${selectedVoiceProfile.id}/reference-datasets/${datasetId}/clips`, formData, {
+      const response = await apiClient.post<VoiceOperationJob>(`/voice-profiles/${selectedVoiceProfile.id}/reference-datasets/${datasetId}/clips`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
+      await pollVoiceOperation(response.data, 'Character dataset clip uploaded and processed.');
       setReferenceFile(null);
       setAuthorizationConfirmed(false);
       setAuthorizationNote('');
-      setInfo('Character dataset clip uploaded and processed.');
       await loadVoiceProfiles();
     } catch (err: any) {
       const detail = err.response?.data?.detail;
@@ -379,11 +423,12 @@ const VoiceLabPage: React.FC = () => {
     }
     try {
       setBusy('dataset-analyze');
-      await apiClient.post(`/voice-profiles/${selectedVoiceProfile.id}/reference-datasets/${selectedVoiceProfile.reference_dataset_id}/analyze`);
-      setInfo('Reference dataset analyzed.');
+      const response = await apiClient.post<VoiceOperationJob>(`/voice-profiles/${selectedVoiceProfile.id}/reference-datasets/${selectedVoiceProfile.reference_dataset_id}/analyze`);
+      await pollVoiceOperation(response.data, 'Reference dataset analyzed.');
       await loadVoiceProfiles();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to analyze reference dataset.');
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : detail?.message || err.message || 'Failed to analyze reference dataset.');
     } finally {
       setBusy(null);
     }
@@ -400,20 +445,69 @@ const VoiceLabPage: React.FC = () => {
     }
     try {
       setBusy('attach-model');
-      await apiClient.post(`/voice-profiles/${selectedVoiceProfile.id}/models/attach`, {
+      const response = await apiClient.post<VoiceOperationJob>(`/voice-profiles/${selectedVoiceProfile.id}/models/attach`, {
         provider: form.provider === 'rvc' ? 'rvc' : form.provider === 'openvoice' ? 'openvoice' : 'xtts',
         character_slug: characterSlug.trim() || selectedVoiceProfile.character_slug || null,
         model_checkpoint_path: modelPath.trim(),
         reference_dataset_id: selectedVoiceProfile.reference_dataset_id,
         recipe: selectedVoiceProfile.selected_recipe || {},
       });
-      setInfo('Character model attached.');
+      await pollVoiceOperation(response.data, 'Character model attached.');
       await loadVoiceProfiles();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to attach character model.');
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : detail?.message || err.message || 'Failed to attach character model.');
     } finally {
       setBusy(null);
     }
+  };
+
+  const characterCalibrationCandidates = () => {
+    const selectedProvider = form.provider === 'rvc' ? 'rvc' : form.provider === 'openvoice' ? 'openvoice' : 'xtts';
+    const checkpointPath = modelPath || selectedVoiceProfile?.model_checkpoint_path || undefined;
+    const baseRate = Number(form.controls.speaking_rate || 1);
+    const pitchShift = Number((form.controls as Record<string, unknown>).pitch || 0);
+    const pauseScale = Number(form.controls.pause_length || 1);
+    const energyNormalization = Number(form.controls.energy || 1);
+
+    if (selectedProvider === 'xtts') {
+      const speedFactors = [0.92, 1.0, 1.08];
+      const temperatures = [0.55, 0.7, 0.85];
+      // XTTS calibration sweeps speed and temperature because those settings materially change character delivery.
+      const xttsCandidates = speedFactors.flatMap((speedFactor) =>
+        temperatures.map((temperature) => ({
+          provider: 'xtts',
+          rate: Number((baseRate * speedFactor).toFixed(2)),
+          temperature,
+          split_sentences: true,
+          pitch_shift: pitchShift,
+          pause_scale: pauseScale,
+          energy_normalization: energyNormalization,
+          model_checkpoint_path: checkpointPath,
+          openvoice_tone_color: false,
+        }))
+      );
+      return [
+        ...xttsCandidates,
+        { provider: 'openvoice', rate: 1, temperature: 0.7, split_sentences: true, openvoice_tone_color: true },
+      ];
+    }
+
+    return [
+      {
+        provider: selectedProvider,
+        rate: baseRate,
+        temperature: 0.7,
+        split_sentences: true,
+        pitch_shift: pitchShift,
+        pause_scale: pauseScale,
+        energy_normalization: energyNormalization,
+        model_checkpoint_path: checkpointPath,
+        openvoice_tone_color: selectedProvider === 'openvoice',
+      },
+      { provider: 'openvoice', rate: 1, temperature: 0.7, split_sentences: true, openvoice_tone_color: true },
+      { provider: 'rvc', rate: 1, rvc_index_rate: 0.75, model_checkpoint_path: checkpointPath },
+    ];
   };
 
   const runCharacterCalibrationBatch = async () => {
@@ -427,22 +521,29 @@ const VoiceLabPage: React.FC = () => {
         voice_profile_id: selectedVoiceProfile.id,
         reference_dataset_id: selectedVoiceProfile.reference_dataset_id,
         calibration_script: form.sample_text,
-        candidates: [
-          {
-            provider: form.provider === 'rvc' ? 'rvc' : form.provider === 'openvoice' ? 'openvoice' : 'xtts',
-            rate: Number(form.controls.speaking_rate || 1),
-            pitch_shift: Number((form.controls as Record<string, unknown>).pitch || 0),
-            pause_scale: Number(form.controls.pause_length || 1),
-            energy_normalization: Number(form.controls.energy || 1),
-            model_checkpoint_path: modelPath || selectedVoiceProfile.model_checkpoint_path,
-            openvoice_tone_color: form.provider === 'openvoice',
-          },
-          { provider: 'openvoice', rate: 1, openvoice_tone_color: true },
-          { provider: 'rvc', rate: 1, rvc_index_rate: 0.75, model_checkpoint_path: modelPath || selectedVoiceProfile.model_checkpoint_path },
-        ],
+        candidates: characterCalibrationCandidates(),
       });
       setCharacterBatch(response.data);
-      setInfo(`Character calibration batch ${response.data.id} completed with ${response.data.rankings.length} ranked matches.`);
+      setInfo(`Character calibration batch ${response.data.id} queued on the voice worker.`);
+      let current = response.data;
+      for (let attempt = 0; attempt < 105; attempt += 1) {
+        if (current.status === 'completed') {
+          setCharacterBatch(current);
+          setInfo(`Character calibration batch ${current.id} completed with ${current.rankings.length} ranked matches.`);
+          return;
+        }
+        if (current.status === 'failed') {
+          setCharacterBatch(current);
+          const message = typeof current.error?.message === 'string' ? current.error.message : 'Failed to generate character calibration batch.';
+          setError(message);
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        const statusResponse = await apiClient.get<VoiceCalibrationBatch>(`/voice-lab/calibration-batches/${current.id}`);
+        current = statusResponse.data;
+        setCharacterBatch(current);
+      }
+      setInfo('Character calibration is still running on the voice worker.');
     } catch (err: any) {
       const detail = err.response?.data?.detail;
       setError(typeof detail === 'string' ? detail : detail?.message || 'Failed to generate character calibration batch.');
@@ -489,7 +590,7 @@ const VoiceLabPage: React.FC = () => {
       if (response.data.status === 'queued' && response.data.job_id) {
         setPreview(response.data);
         setError(null);
-        setInfo('OpenVoice preview queued on the worker.');
+        setInfo('Voice preview queued on the worker.');
 
         for (let attempt = 0; attempt < 105; attempt += 1) {
           await new Promise((resolve) => window.setTimeout(resolve, 1000));
@@ -669,12 +770,16 @@ const VoiceLabPage: React.FC = () => {
                         {preset.voice} · {preset.reference_audio_count} reference clip{preset.reference_audio_count === 1 ? '' : 's'}
                       </div>
                     </div>
-                    {preset.portrait_url && (
+                    {preset.portrait_url ? (
                       <img
-                        src={`${apiBase}${preset.portrait_url}`}
+                        src={toApiHref(preset.portrait_url)}
                         alt={preset.display_name}
                         className="h-20 w-16 rounded-xl border border-white/10 bg-slate-950/50 object-cover"
                       />
+                    ) : (
+                      <div className="grid h-20 w-16 place-items-center rounded-xl border border-dashed border-white/10 bg-slate-950/50 px-2 text-center text-[10px] text-slate-500">
+                        No image
+                      </div>
                     )}
                   </div>
                 </button>
@@ -703,6 +808,27 @@ const VoiceLabPage: React.FC = () => {
 
           <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
             <div className="text-xs uppercase tracking-[0.25em] text-cyan-200/70">Voice Identity</div>
+            <div className="mt-4 flex items-center gap-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+              {selectedAssociatedImageUrl ? (
+                <img
+                  src={toApiHref(selectedAssociatedImageUrl)}
+                  alt={selectedVoiceProfile?.associated_character_display_name || selectedPreset?.display_name || 'Associated character'}
+                  className="h-24 w-20 rounded-xl border border-white/10 bg-black/30 object-cover"
+                />
+              ) : (
+                <div className="grid h-24 w-20 place-items-center rounded-xl border border-dashed border-white/10 bg-black/30 px-2 text-center text-xs text-slate-500">
+                  No image
+                </div>
+              )}
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-slate-100">
+                  {selectedVoiceProfile?.associated_character_display_name || selectedPreset?.display_name || 'No preset selected'}
+                </div>
+                <div className="mt-1 text-sm text-slate-400">
+                  {selectedVoiceProfile?.id || selectedPreset?.voice_profile_id || 'Save a preset to create a voice profile.'}
+                </div>
+              </div>
+            </div>
             <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
               <div className="grid gap-3 md:grid-cols-2">
                 <div>
@@ -1188,7 +1314,7 @@ const VoiceLabPage: React.FC = () => {
                             <div>
                               <div className="font-medium text-slate-100">#{index + 1} score {Number(ranking.score || 0).toFixed(3)}</div>
                               <div className="mt-1 text-xs text-slate-500">
-                                {String(ranking.provider || recipe.provider || 'provider')} · pitch {Number(ranking.pitch_score || 0).toFixed(3)} · rhythm {Number(ranking.rhythm_score || 0).toFixed(3)} · pause {Number(ranking.pause_score || 0).toFixed(3)}
+                                {String(ranking.provider || recipe.provider || 'provider')} · speed {String(recipe['speaking_rate'] || 1)} · temp {String(recipe['temperature'] ?? 'default')} · pitch {Number(ranking.pitch_score || 0).toFixed(3)} · rhythm {Number(ranking.rhythm_score || 0).toFixed(3)} · pause {Number(ranking.pause_score || 0).toFixed(3)}
                               </div>
                             </div>
                             <button

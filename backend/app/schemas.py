@@ -260,6 +260,9 @@ class VoiceProfileSummary(BaseModel):
     selected_recipe: dict = Field(default_factory=dict)
     calibration_score: float | None = None
     last_verified_render_job_id: int | None = None
+    associated_character_preset_id: str | None = None
+    associated_character_display_name: str | None = None
+    associated_character_image_url: str | None = None
     reference_audio_count: int = 0
     reference_audios: list[VoiceReferenceAudioSummary] = Field(default_factory=list)
     reference_datasets: list[VoiceReferenceDatasetSummary] = Field(default_factory=list)
@@ -377,6 +380,8 @@ class VoiceCalibrationCandidateRequest(BaseModel):
     provider: Literal["openvoice", "xtts", "rvc", "espeak"] = "xtts"
     base_speaker: str | None = Field(default=None, max_length=128)
     style_preset: str = Field(default="default", max_length=64)
+    temperature: float = Field(default=0.7, ge=0.1, le=1.5)
+    split_sentences: bool | None = True
     pitch_shift: float = 0.0
     rate: float = Field(default=1.0, ge=0.25, le=3.0)
     pause_scale: float = Field(default=1.0, ge=0.25, le=3.0)
@@ -412,6 +417,25 @@ class VoiceCalibrationBatchSummary(BaseModel):
     error: dict | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class VoiceOperationJobSummary(BaseModel):
+    id: int
+    user_id: int
+    voice_profile_id: str
+    reference_dataset_id: int | None = None
+    operation_type: str
+    status: Literal["queued", "processing", "completed", "failed"]
+    progress: int = 0
+    stage: str | None = None
+    request: dict = Field(default_factory=dict)
+    result: dict | None = None
+    error: dict | None = None
+    celery_task_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class VoiceProviderCapabilitySummary(BaseModel):
@@ -515,6 +539,8 @@ class SpeakerBindingSummary(BaseModel):
     character_display_name: str
     voice_profile_id: str
     provider: str
+    character_portrait_filename: str | None = None
+    character_portrait_url: str | None = None
 
 
 class SpeakerBindingItemRequest(BaseModel):
@@ -528,6 +554,42 @@ class SpeakerBindingListResponse(BaseModel):
 
 class SpeakerBindingRequest(BaseModel):
     items: list[SpeakerBindingItemRequest]
+
+
+class ProjectPreviewLayout(BaseModel):
+    character_scale: float = Field(default=1.0, ge=0.75, le=1.5)
+    chat_font_size_px: int = Field(default=18, ge=12, le=32)
+
+
+class ProjectPreviewSpeakerMapping(BaseModel):
+    speaker_name: str
+    voice_profile_id: str | None = None
+    character_preset_id: str | None = None
+    character_display_name: str | None = None
+    character_portrait_filename: str | None = None
+    character_portrait_url: str | None = None
+    display_label: str | None = None
+    sample_text: str | None = None
+
+
+class ProjectPreviewSettings(BaseModel):
+    background_asset_id: int | None = None
+    background_preset_id: str | None = None
+    background_source_type: str | None = None
+    background_url: str | None = None
+    background_metadata: dict = Field(default_factory=dict)
+    speaker_mappings: list[ProjectPreviewSpeakerMapping] = Field(default_factory=list)
+    layout: ProjectPreviewLayout = Field(default_factory=ProjectPreviewLayout)
+
+
+class ProjectPreviewSettingsUpdate(BaseModel):
+    background_asset_id: int | None = None
+    background_preset_id: str | None = None
+    background_source_type: str | None = None
+    background_url: str | None = None
+    background_metadata: dict | None = None
+    speaker_mappings: list[ProjectPreviewSpeakerMapping] | None = None
+    layout: ProjectPreviewLayout | None = None
 
 
 class ScriptLine(BaseModel):
@@ -593,6 +655,7 @@ class GenerationJobSummary(BaseModel):
     provider_name: str
     error_message: str | None = None
     voice_manifest: dict = Field(default_factory=dict)
+    preview_settings: ProjectPreviewSettings = Field(default_factory=ProjectPreviewSettings)
     tts_result: dict = Field(default_factory=dict)
     provider_state: dict = Field(default_factory=dict)
     output_video_id: int | None = None
@@ -778,6 +841,7 @@ class ProjectSummary(BaseModel):
     latest_review: ReviewQueueItemSummary | None = None
     latest_notifications: list[NotificationSummary] = Field(default_factory=list)
     speaker_bindings: list[SpeakerBindingSummary] = Field(default_factory=list)
+    preview_settings: ProjectPreviewSettings = Field(default_factory=ProjectPreviewSettings)
 
 
 class ProjectListResponse(BaseModel):

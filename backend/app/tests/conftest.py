@@ -28,7 +28,7 @@ from app.main import app
 TEST_DB_PATH = Path("test_omniposter.db")
 TEST_MEDIA_DIR = Path("test_storage")
 TEST_BUNDLED_MEDIA_DIR = TEST_MEDIA_DIR / "bundled"
-ALEMBIC_REVISION = "20260427_0008"
+ALEMBIC_REVISION = "20260511_0011"
 
 
 @pytest.fixture(autouse=True)

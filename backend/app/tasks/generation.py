@@ -117,6 +117,7 @@ def process_generation_job(job_id: int) -> dict:
                 output_kind=job.output_kind,
                 progress_callback=progress_callback,
                 voice_manifest=job.voice_manifest_json or {},
+                render_settings=job.render_settings_json or {},
                 job_id=job.id,
             )
         except TypeError:
@@ -130,12 +131,14 @@ def process_generation_job(job_id: int) -> dict:
         metadata = dict(result.get("metadata") or {})
         tts_result = dict(metadata.get("tts_result") or {})
         if tts_result:
+            # Persist provider diagnostics separately from the output asset so failed/refresh states remain explainable.
             job.tts_result_json = tts_result
             job.provider_state_json = dict(tts_result.get("provider_state") or {})
         _set_job_progress(db, job, project, 70)
         logger.info("Generation job %s render pipeline produced output %s", job.id, result.get("output_path"))
 
         generated_path = result["output_path"].replace("file://", "")
+        # Store the final MP4 as a project asset while segment WAVs stay under generated job artifacts.
         stored_path = store_generated_file(project.id, generated_path, f"preview_{job.id}.mp4")
         _set_job_progress(db, job, project, 82)
         output_asset = Asset(

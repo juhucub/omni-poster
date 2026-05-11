@@ -52,6 +52,7 @@ class ProjectRenderService:
         output_kind: str = "preview",
         progress_callback=None,
         voice_manifest: dict | None = None,
+        render_settings: dict | None = None,
         job_id: int | None = None,
     ) -> dict:
         try:
@@ -63,9 +64,11 @@ class ProjectRenderService:
                 output_kind=output_kind,
                 progress_callback=progress_callback,
                 voice_manifest=voice_manifest,
+                render_settings=render_settings,
                 job_id=job_id,
             )
         except TTSProviderError:
+            # Provider selection failures are product-visible and must not be hidden by the visual fallback.
             logger.warning("Speaker render failed during TTS for project %s", project_id, exc_info=True)
             raise
         except RuntimeError as exc:
@@ -89,6 +92,7 @@ class ProjectRenderService:
         output_kind: str,
         progress_callback,
         voice_manifest: dict | None,
+        render_settings: dict | None,
         job_id: int | None,
     ) -> dict:
         from moviepy import (
@@ -114,10 +118,16 @@ class ProjectRenderService:
         full_profile_stage.__enter__()
         full_profile_stage_closed = False
         try:
+            render_layout = self._render_layout(render_settings)
+            character_scale = render_layout["character_scale"]
+            base_height = int(round(self.BASE_HEIGHT * character_scale))
+            active_height = int(round(self.ACTIVE_HEIGHT * character_scale))
+            chat_font_size_px = render_layout["chat_font_size_px"]
             profiler.add_context(
                 background_video_path=clean_video_path,
                 style_preset=style_preset,
                 parsed_line_count=len(parsed_lines),
+                preview_layout=render_layout,
             )
             self.speech_service = LocalSpeechService(
                 db=self.db,
@@ -126,6 +136,7 @@ class ProjectRenderService:
                 profiler=profiler,
                 output_kind=output_kind,
             )
+            # Job-backed renders persist segment WAVs so the final MP4 audio can be audited later.
             speech_dir = self._speech_output_dir(job_id, work_dir)
             with profiler.stage("tts.dialogue_synthesis", segment_count=len(parsed_lines), speech_dir=speech_dir):
                 segments = self.speech_service.synthesize_dialogue(parsed_lines, speech_dir)
@@ -165,7 +176,7 @@ class ProjectRenderService:
                     portrait_path = self._resolve_character_portrait(cast_member.speaker, cast_member.slot_index, work_dir)
                     base_clip = (
                         ImageClip(str(portrait_path))
-                        .resized(height=self.BASE_HEIGHT)
+                        .resized(height=base_height)
                         .with_opacity(0.26)
                         .with_position(self.BASE_POSITIONS[min(cast_member.slot_index, 1)])
                         .with_duration(total_duration)
@@ -176,17 +187,25 @@ class ProjectRenderService:
             with profiler.stage("moviepy.caption_active_layers_build", segment_count=len(timed_segments)):
                 cursor = 0.0
                 for item in timed_segments:
+                    # Segment order is the canonical timeline for active portraits, captions, and audio.
                     segment = item["segment"]
                     portrait_path = self._resolve_character_portrait(segment.speaker, segment.slot_index, work_dir)
                     speaker_slot = min(segment.slot_index, 1)
                     active_clip = (
                         ImageClip(str(portrait_path))
-                        .resized(height=self.ACTIVE_HEIGHT)
+                        .resized(height=active_height)
                         .with_position(self.ACTIVE_POSITIONS[speaker_slot])
                         .with_start(cursor)
                         .with_duration(item["duration_seconds"])
                     )
-                    caption_path = self._build_dialogue_card(segment, work_dir)
+                    try:
+                        caption_path = self._build_dialogue_card(
+                            segment,
+                            work_dir,
+                            chat_font_size_px=chat_font_size_px,
+                        )
+                    except TypeError:
+                        caption_path = self._build_dialogue_card(segment, work_dir)
                     caption_clip = (
                         ImageClip(str(caption_path))
                         .with_position((90, 1320))
@@ -305,6 +324,7 @@ class ProjectRenderService:
                 "provider_state": (segments[-1].provider_state or {}) if segments else {},
                 "segments": segment_metadata,
                 "assembly": assembly_metadata,
+                "render_settings": {"layout": render_layout},
             }
             selected_profiles = {
                 segment.speaker: {
@@ -324,6 +344,7 @@ class ProjectRenderService:
                 ffmpeg_threads=render_config["threads"],
                 encode_preset=render_config["preset"],
                 crf=render_config["crf"],
+                preview_layout=render_layout,
                 tts_provider_state=tts_result["provider_state"],
                 selected_profiles=selected_profiles,
             )
@@ -373,6 +394,8 @@ class ProjectRenderService:
                         for segment in segments
                     },
                     "tts_result": tts_result,
+                    "render_settings": {"layout": render_layout},
+                    "preview_layout": render_layout,
                     "render_profile": render_profile_metadata,
                     "render_profile_artifact_url": profile_artifact_url,
                     "render_assembly": assembly_metadata,
@@ -392,6 +415,8 @@ class ProjectRenderService:
                     ],
                     "render_fps": render_config["fps"],
                     "render_resolution": {"width": canvas_width, "height": canvas_height},
+                    "character_scale": character_scale,
+                    "chat_font_size_px": chat_font_size_px,
                     "ffmpeg_threads": render_config["threads"],
                     "encode_preset": render_config["preset"],
                     "portrait_resolution": "backend/storage/characters/<speaker>.png or speaker_<slot>.png",
@@ -552,6 +577,7 @@ class ProjectRenderService:
         audio_dir.mkdir(parents=True, exist_ok=True)
         composite_audio_path = audio_dir / "dialogue_composite.wav"
         concat_list_path = audio_dir / "dialogue_segments.txt"
+        # Build the MP4 audio from persisted segment WAVs, never from a hidden temp copy.
         concat_lines: list[str] = []
         audio_paths: list[Path] = []
         for item in timed_segments:
@@ -728,6 +754,7 @@ class ProjectRenderService:
 
     def _render_config(self, background_clip, output_kind: str) -> dict[str, int | str]:
         source_fps = float(getattr(background_clip, "fps", 24) or 24)
+        # Preview and export knobs are separate so faster previews do not redefine final-render quality.
         fps_cap = settings.RENDER_PREVIEW_FPS_CAP if output_kind == "preview" else settings.RENDER_EXPORT_FPS_CAP
         target_fps = max(1, min(int(round(source_fps)), max(1, fps_cap)))
         canvas_width, canvas_height = self._canvas_size(output_kind)
@@ -739,6 +766,22 @@ class ProjectRenderService:
             "preset": settings.RENDER_PREVIEW_ENCODE_PRESET if output_kind == "preview" else settings.RENDER_EXPORT_ENCODE_PRESET,
             "crf": settings.RENDER_PREVIEW_CRF if output_kind == "preview" else settings.RENDER_EXPORT_CRF,
             "threads": max(1, min(os.cpu_count() or 4, thread_cap)),
+        }
+
+    def _render_layout(self, render_settings: dict | None) -> dict[str, float | int]:
+        payload = dict(render_settings or {})
+        layout = dict(payload.get("layout") or payload)
+        try:
+            character_scale = float(layout.get("character_scale", 1.0))
+        except (TypeError, ValueError):
+            character_scale = 1.0
+        try:
+            chat_font_size_px = int(layout.get("chat_font_size_px", 18))
+        except (TypeError, ValueError):
+            chat_font_size_px = 18
+        return {
+            "character_scale": min(max(character_scale, 0.75), 1.5),
+            "chat_font_size_px": min(max(chat_font_size_px, 12), 32),
         }
 
     def _emit_progress(self, progress_callback, stage: str, progress: int) -> None:
@@ -833,7 +876,7 @@ class ProjectRenderService:
         image.save(portrait_path)
         return portrait_path
 
-    def _build_dialogue_card(self, segment: SpeechSegment, work_dir: Path) -> Path:
+    def _build_dialogue_card(self, segment: SpeechSegment, work_dir: Path, *, chat_font_size_px: int = 18) -> Path:
         palette = self._speaker_palette(segment.slot_index)
         caption_path = work_dir / f"caption_{uuid.uuid4().hex}.png"
         image = Image.new("RGBA", (900, 380), (0, 0, 0, 0))
@@ -841,8 +884,8 @@ class ProjectRenderService:
         draw.rounded_rectangle((0, 0, 900, 380), radius=48, fill=(6, 10, 18, 228))
         draw.rounded_rectangle((0, 0, 900, 22), radius=22, fill=palette["accent"])
 
-        label_font = self._load_font(40)
-        body_font = self._load_font(56)
+        label_font = self._load_font(max(24, int(chat_font_size_px * 1.45)))
+        body_font = self._load_font(max(28, int(chat_font_size_px * 2)))
         draw.text((70, 74), segment.speaker.upper(), fill=palette["accent"], font=label_font)
 
         wrapped_lines = textwrap.wrap(segment.text, width=24)[:4]

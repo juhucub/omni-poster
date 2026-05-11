@@ -20,6 +20,7 @@ from app.services.voice_profiles import (
     ensure_voice_profile_editable,
     get_voice_profile,
     get_voice_profile_model,
+    save_reference_audio_content,
     save_reference_audio_upload,
     update_voice_profile_calibration_recipe,
     voice_lab_preview_dir,
@@ -45,6 +46,7 @@ def character_voice_model_dir(character_slug: str) -> Path:
     for child in ("dataset", "processed", "xtts", "rvc"):
         path = root / child
         path.mkdir(parents=True, exist_ok=True)
+        # Keep expected provider workspaces visible without committing generated model artifacts.
         keep = path / ".gitkeep"
         if not keep.exists():
             keep.touch()
@@ -476,28 +478,62 @@ def create_calibration_batch(
     dataset = _get_dataset(reference_dataset_id, voice_profile_id, db) if reference_dataset_id else (
         _get_dataset(profile.reference_dataset_id, voice_profile_id, db) if profile.reference_dataset_id else None
     )
-    target_metrics = dict(dataset.prosody_metrics_json or {}) if dataset else dict((profile.provider_metadata_json or {}).get("target_prosody_metrics") or {})
-    if not target_metrics and dataset:
-        _, dataset_payload = analyze_voice_reference_dataset(
-            voice_profile_id=voice_profile_id,
-            reference_dataset_id=dataset.id,
-            current_user_id=current_user_id,
-            db=db,
-        )
-        dataset = _get_dataset(dataset_payload["id"], voice_profile_id, db)
-        target_metrics = dict(dataset.prosody_metrics_json or {})
-    orchestrator = TTSOrchestrator()
-    provider_state = orchestrator.provider_state()
+    candidate_payloads = [item.model_dump() for item in candidates] or [dict(item) for item in DEFAULT_CALIBRATION_CANDIDATES]
     batch = VoiceCalibrationBatch(
         voice_profile_id=voice_profile_id,
         reference_dataset_id=dataset.id if dataset else None,
-        status="processing",
-        provider_state_json=provider_state,
+        status="queued",
+        provider_state_json={},
+        candidates_json=candidate_payloads[:12],
+        rankings_json=[],
+        calibration_script=calibration_script,
         created_by_user_id=current_user_id,
     )
     db.add(batch)
-    db.flush()
-    candidate_payloads = [item.model_dump() for item in candidates] or [dict(item) for item in DEFAULT_CALIBRATION_CANDIDATES]
+    db.commit()
+    db.refresh(batch)
+    return serialize_calibration_batch(batch)
+
+
+def process_calibration_batch(
+    *,
+    batch_id: int,
+    db: Session,
+) -> dict[str, Any]:
+    batch = (
+        db.query(VoiceCalibrationBatch)
+        .options(
+            joinedload(VoiceCalibrationBatch.voice_profile).joinedload(VoiceProfile.reference_audios),
+            joinedload(VoiceCalibrationBatch.reference_dataset),
+        )
+        .filter(VoiceCalibrationBatch.id == batch_id)
+        .one_or_none()
+    )
+    if not batch:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice calibration batch not found")
+    profile = batch.voice_profile
+    dataset = batch.reference_dataset or (
+        _get_dataset(profile.reference_dataset_id, profile.id, db) if profile.reference_dataset_id else None
+    )
+    batch.status = "processing"
+    batch.error_json = None
+    db.commit()
+    target_metrics = dict(dataset.prosody_metrics_json or {}) if dataset else dict((profile.provider_metadata_json or {}).get("target_prosody_metrics") or {})
+    if not target_metrics and dataset:
+        _, dataset_payload = analyze_voice_reference_dataset(
+            voice_profile_id=profile.id,
+            reference_dataset_id=dataset.id,
+            current_user_id=batch.created_by_user_id or 0,
+            db=db,
+        )
+        dataset = _get_dataset(dataset_payload["id"], profile.id, db)
+        target_metrics = dict(dataset.prosody_metrics_json or {})
+    orchestrator = TTSOrchestrator()
+    provider_state = orchestrator.provider_state()
+    batch.provider_state_json = provider_state
+    db.commit()
+    candidate_payloads = list(batch.candidates_json or []) or [dict(item) for item in DEFAULT_CALIBRATION_CANDIDATES]
+    calibration_script = batch.calibration_script or "This is the calibration line. The rhythm, pitch, and pauses should match the target character."
     results: list[dict[str, Any]] = []
     rankings: list[dict[str, Any]] = []
     for index, candidate in enumerate(candidate_payloads[:12]):
@@ -522,6 +558,36 @@ def create_calibration_batch(
     db.commit()
     db.refresh(batch)
     return serialize_calibration_batch(batch)
+
+
+def save_reference_audio_content_for_dataset(
+    *,
+    content: bytes,
+    filename: str,
+    content_type: str | None,
+    voice_profile_id: str,
+    reference_dataset_id: int,
+    current_user_id: int,
+    authorization_confirmed: bool,
+    authorization_note: str | None,
+    db: Session,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    dataset = _get_dataset(reference_dataset_id, voice_profile_id, db)
+    profile_payload, reference_audio = save_reference_audio_content(
+        content=content,
+        filename=filename,
+        content_type=content_type,
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user_id,
+        authorization_confirmed=authorization_confirmed,
+        authorization_note=authorization_note,
+        db=db,
+        reference_dataset_id=dataset.id,
+    )
+    dataset = _get_dataset(reference_dataset_id, voice_profile_id, db)
+    update_reference_dataset_metrics(dataset, db=db)
+    profile_payload = get_voice_profile(voice_profile_id, db)
+    return profile_payload, serialize_reference_dataset(dataset), reference_audio
 
 
 def _run_calibration_candidate(
@@ -614,6 +680,8 @@ def _candidate_to_recipe(candidate: dict[str, Any], profile: VoiceProfile) -> di
         "provider": str(candidate.get("provider") or profile.provider or "espeak").lower(),
         "base_speaker": candidate.get("base_speaker"),
         "style_preset": candidate.get("style_preset") or "default",
+        "temperature": float(candidate.get("temperature") or 0.7),
+        "split_sentences": candidate.get("split_sentences", True),
         "speaking_rate": float(candidate.get("rate") or 1.0),
         "pitch_shift": float(candidate.get("pitch_shift") or 0.0),
         "pause_scale": float(candidate.get("pause_scale") or 1.0),
@@ -724,6 +792,7 @@ def verify_character_voice_render(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Render job does not contain this voice profile")
     failures: list[dict[str, Any]] = []
     for segment in segments:
+        # Render verification fails closed when provider, model path, or persisted WAV evidence drifts from the recipe.
         if segment.get("fallback_used"):
             failures.append({"code": "fallback_used", "message": "Fallback TTS was used for a render-verified character profile."})
         if segment.get("provider_used") != profile.provider:

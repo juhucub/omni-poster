@@ -68,6 +68,9 @@ class User(Base):
     voice_preview_jobs: Mapped[list["VoicePreviewJob"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    voice_operation_jobs: Mapped[list["VoiceOperationJob"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
     voice_reference_datasets: Mapped[list["VoiceReferenceDataset"]] = relationship(
         back_populates="created_by", cascade="all, delete-orphan"
     )
@@ -158,6 +161,7 @@ class Project(Base):
     preferred_account_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     allowed_platforms_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     publish_windows_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    preview_settings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -267,6 +271,9 @@ class VoiceProfile(Base):
     voice_calibration_batches: Mapped[list["VoiceCalibrationBatch"]] = relationship(
         back_populates="voice_profile", cascade="all, delete-orphan", order_by="VoiceCalibrationBatch.created_at.desc()"
     )
+    voice_operation_jobs: Mapped[list["VoiceOperationJob"]] = relationship(
+        back_populates="voice_profile", cascade="all, delete-orphan", order_by="VoiceOperationJob.created_at.desc()"
+    )
 
 
 class CharacterPreset(Base):
@@ -367,6 +374,9 @@ class VoiceReferenceDataset(Base):
     calibration_batches: Mapped[list["VoiceCalibrationBatch"]] = relationship(
         back_populates="reference_dataset", cascade="all, delete-orphan"
     )
+    voice_operation_jobs: Mapped[list["VoiceOperationJob"]] = relationship(
+        back_populates="reference_dataset", order_by="VoiceOperationJob.created_at.desc()"
+    )
 
 
 class VoiceCalibrationBatch(Base):
@@ -384,6 +394,7 @@ class VoiceCalibrationBatch(Base):
     candidates_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     rankings_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     error_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    calibration_script: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -395,6 +406,33 @@ class VoiceCalibrationBatch(Base):
     voice_profile: Mapped["VoiceProfile"] = relationship(back_populates="voice_calibration_batches")
     reference_dataset: Mapped["VoiceReferenceDataset | None"] = relationship(back_populates="calibration_batches")
     created_by: Mapped["User | None"] = relationship(back_populates="voice_calibration_batches")
+
+
+class VoiceOperationJob(Base):
+    __tablename__ = "voice_operation_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    voice_profile_id: Mapped[str] = mapped_column(ForeignKey("voice_profiles.id", ondelete="CASCADE"), index=True)
+    reference_dataset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("voice_reference_datasets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    operation_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    request_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    celery_task_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="voice_operation_jobs")
+    voice_profile: Mapped["VoiceProfile"] = relationship(back_populates="voice_operation_jobs")
+    reference_dataset: Mapped["VoiceReferenceDataset | None"] = relationship(back_populates="voice_operation_jobs")
 
 
 class ProjectSpeakerBinding(Base):
@@ -499,7 +537,9 @@ class GenerationJob(Base):
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # These JSON snapshots make completed/failed jobs debuggable even after project bindings change.
     voice_manifest_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    render_settings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     tts_result_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     provider_state_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

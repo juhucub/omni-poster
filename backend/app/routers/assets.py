@@ -8,7 +8,7 @@ from app.dependencies import get_current_user, get_db
 from app.models import Asset, User
 from app.routers.projects import get_owned_project
 from app.schemas import AssetSummary, BackgroundPresetSummary, OkResponse
-from app.services.project_state import to_asset_summary, sync_project_state
+from app.services.project_state import sync_project_preview_background, sync_project_state, to_asset_summary
 from app.services.storage import (
     copy_preset_to_project,
     delete_storage_key,
@@ -79,6 +79,7 @@ async def upload_background_asset(
 
     project.background_asset_id = asset.id
     project.background_source_type = "upload"
+    sync_project_preview_background(project, asset)
     sync_project_state(project)
     db.commit()
     db.refresh(asset)
@@ -111,6 +112,7 @@ def select_background_preset(
 
     project.background_asset_id = asset.id
     project.background_source_type = "preset"
+    sync_project_preview_background(project, asset)
     sync_project_state(project)
     db.commit()
     db.refresh(asset)

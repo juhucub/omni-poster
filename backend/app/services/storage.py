@@ -56,12 +56,14 @@ def generated_job_segment_dir(job_id: int) -> Path:
 def generated_job_artifact_url(job_id: int, artifact_path: Path) -> str:
     root = generated_job_artifact_dir(job_id).resolve()
     resolved = artifact_path.resolve()
+    # Keep debug artifact links job-scoped so metadata never exposes arbitrary filesystem paths.
     relative = resolved.relative_to(root)
     return f"/generation-jobs/{job_id}/artifacts/{quote(relative.as_posix())}"
 
 
 def resolve_generated_job_artifact(job_id: int, artifact_path: str) -> Path:
     relative = Path(artifact_path)
+    # Reject traversal before resolving against generated storage; callers only get job-local artifacts.
     if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
     root = generated_job_artifact_dir(job_id).resolve()
@@ -137,6 +139,7 @@ async def save_background_asset(project_id: int, file: UploadFile) -> tuple[Path
 def copy_preset_to_project(project_id: int, preset_key: str) -> tuple[Path, int, str]:
     preset = resolve_background_preset(preset_key)
     source_path: Path = preset["path"]
+    # Persist the selected preset into project storage so later renders do not depend on mutable bundled files.
     destination = project_media_dir(project_id) / f"{uuid.uuid4().hex}_{source_path.name}"
     shutil.copy2(source_path, destination)
     return destination, destination.stat().st_size, guess_mime_type(str(destination))

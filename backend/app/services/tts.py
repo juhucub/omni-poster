@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 def _slugify(value: str) -> str:
+    # Segment filenames include speakers, so normalize names before they touch the filesystem.
     slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
     return slug or "speaker"
 
@@ -687,6 +688,7 @@ class OpenVoiceProvider(BaseTTSProvider):
         if artifact_path:
             target_embedding = self._load_cached_target_embedding(artifact_path, device, torch_module)
             if target_embedding is not None:
+                # Reuse durable OpenVoice embeddings, but still synthesize fresh segment audio per render line.
                 with self._cache_lock:
                     self._target_embedding_cache[cache_key] = target_embedding
                 self._log_memory_stage(
@@ -972,6 +974,19 @@ class _XTTSSelectedRecipeRuntime:
     cache_enabled: bool
 
 
+@dataclass
+class _XTTSCheckpointDirectoryRecipe:
+    character: str
+    provider: str
+    checkpoint_dir: Path
+    checkpoint_file: Path
+    config_path: Path
+    vocab_path: Path
+    reference_wavs: list[Path]
+    language: str
+    settings: dict[str, Any]
+
+
 class XTTSProvider(BaseTTSProvider):
     provider_name = "xtts"
     clone_capable = True
@@ -1018,6 +1033,55 @@ class XTTSProvider(BaseTTSProvider):
             "reference_wavs": [self._recipe_file_identity(path) for path in selected_recipe.reference_wavs],
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+    def _checkpoint_directory_recipe(
+        self,
+        *,
+        voice_profile: dict[str, Any],
+        checkpoint_dir: Path,
+        reference_paths: list[str],
+    ) -> _XTTSCheckpointDirectoryRecipe:
+        config_path = checkpoint_dir / "config.json"
+        vocab_path = checkpoint_dir / "vocab.json"
+        checkpoint_file = checkpoint_dir / "model.pth"
+        missing = [str(path) for path in (config_path, vocab_path, checkpoint_file) if not path.exists()]
+        if missing:
+            raise TTSProviderError(
+                code="xtts_checkpoint_files_missing",
+                message="XTTS checkpoint directory is missing required files.",
+                provider_state={self.provider_name: self.healthcheck()},
+                suggested_action="Use a checkpoint directory containing config.json, vocab.json, and model.pth.",
+            )
+
+        recipe = dict(voice_profile.get("selected_recipe") or {})
+        controls = dict(voice_profile.get("controls") or {})
+        speed = recipe.get("speed")
+        if speed is None:
+            speed = recipe.get("speaking_rate")
+        if speed is None:
+            speed = controls.get("speaking_rate")
+        settings_payload = {
+            "temperature": float(recipe.get("temperature") or 0.7),
+            "speed": float(speed) if speed is not None else 1.0,
+            "split_sentences": recipe.get("split_sentences", True),
+        }
+        character = str(
+            voice_profile.get("character_slug")
+            or voice_profile.get("display_name")
+            or voice_profile.get("id")
+            or "xtts"
+        )
+        return _XTTSCheckpointDirectoryRecipe(
+            character=character,
+            provider="xtts",
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_file=checkpoint_file,
+            config_path=config_path,
+            vocab_path=vocab_path,
+            reference_wavs=[Path(path) for path in reference_paths],
+            language=str(voice_profile.get("language") or "en"),
+            settings=settings_payload,
+        )
 
     def _record_xtts_stage(self, profiler: Any | None, name: str, **metadata: Any) -> None:
         stage = self._profile_stage(profiler, name, **metadata)
@@ -1113,6 +1177,7 @@ class XTTSProvider(BaseTTSProvider):
         profiler: Any | None,
     ) -> _XTTSSelectedRecipeRuntime:
         cache_key = self._selected_recipe_cache_key(selected_recipe, device)
+        # The worker cache holds XTTS model/conditioning state only; rendered WAVs remain per-segment artifacts.
         cache_enabled = bool(settings.XTTS_WORKER_CACHE_ENABLED and int(settings.XTTS_WORKER_CACHE_MAX_ENTRIES or 0) > 0)
         if cache_enabled:
             with self._runtime_cache_lock:
@@ -1257,6 +1322,21 @@ class XTTSProvider(BaseTTSProvider):
                 provider_state={self.provider_name: health},
                 suggested_action="Upload and analyze a character reference dataset first.",
             )
+        if model_checkpoint.is_dir():
+            directory_recipe = self._checkpoint_directory_recipe(
+                voice_profile=voice_profile,
+                checkpoint_dir=model_checkpoint,
+                reference_paths=references,
+            )
+            return self._synthesize_checkpoint_directory_recipe(
+                text=text,
+                voice_profile=voice_profile,
+                output_path=output_path,
+                health=health,
+                selected_recipe=directory_recipe,
+                profiler=profiler,
+                output_kind=str(options.get("output_kind") or ""),
+            )
         try:
             from TTS.api import TTS as CoquiTTS  # type: ignore
         except Exception as exc:
@@ -1301,6 +1381,125 @@ class XTTSProvider(BaseTTSProvider):
             "provider_used": self.provider_name,
             "controls_applied": {"speaking_rate": (voice_profile.get("controls") or {}).get("speaking_rate")},
             "reference_audio_count": len(references),
+        }
+
+    def _synthesize_checkpoint_directory_recipe(
+        self,
+        *,
+        text: str,
+        voice_profile: dict[str, Any],
+        output_path: Path,
+        health: dict[str, Any],
+        selected_recipe: _XTTSCheckpointDirectoryRecipe,
+        profiler: Any | None = None,
+        output_kind: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            from TTS.tts.configs.xtts_config import XttsConfig  # type: ignore
+            from TTS.tts.models.xtts import Xtts  # type: ignore
+            import torch  # type: ignore
+            import torchaudio  # type: ignore
+        except Exception as exc:
+            raise TTSProviderError(
+                code="xtts_package_missing",
+                message="Coqui XTTS runtime is not importable.",
+                provider_state={self.provider_name: health},
+                suggested_action="Install Coqui TTS, torch, and torchaudio in the runtime image.",
+            ) from exc
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        device = "cpu" if settings.XTTS_DEVICE in {"", "auto"} else settings.XTTS_DEVICE
+        recipe_settings = dict(selected_recipe.settings)
+        try:
+            torch_runtime_metadata = self._configure_torch_runtime(torch, profiler)
+            if profiler is not None and hasattr(profiler, "add_context"):
+                profiler.add_context(xtts_torch_runtime=torch_runtime_metadata)
+            runtime = self._load_selected_recipe_runtime(
+                selected_recipe=selected_recipe,
+                device=device,
+                XttsConfig=XttsConfig,
+                Xtts=Xtts,
+                profiler=profiler,
+            )
+            inference_kwargs = {
+                "temperature": float(recipe_settings.get("temperature", 0.7)),
+            }
+            if recipe_settings.get("speed") is not None:
+                inference_kwargs["speed"] = float(recipe_settings["speed"])
+            split_sentences = recipe_settings.get("split_sentences")
+            split_override = self._split_sentences_override(output_kind)
+            if split_override is not None:
+                split_sentences = split_override
+            inference_parameter_names = set(runtime.inference_parameter_names)
+            if "split_sentences" in inference_parameter_names and split_sentences is not None:
+                inference_kwargs["split_sentences"] = bool(split_sentences)
+            if "enable_text_splitting" in inference_parameter_names and split_sentences is not None:
+                inference_kwargs["enable_text_splitting"] = bool(split_sentences)
+            with runtime.lock:
+                inference_metadata = {
+                    "language": selected_recipe.language,
+                    "runtime_cache_key": runtime.cache_key,
+                    "inference_mode_enabled": bool(settings.XTTS_TORCH_INFERENCE_MODE_ENABLED),
+                    "effective_inference_kwargs": dict(inference_kwargs),
+                    "split_sentences_source": "preview_override" if split_override is not None else "recipe",
+                    **torch_runtime_metadata,
+                }
+                if profiler is not None and hasattr(profiler, "stage"):
+                    with profiler.stage("xtts.inference", **inference_metadata):
+                        with self._inference_mode_context(torch):
+                            wav = runtime.model.inference(
+                                text,
+                                selected_recipe.language,
+                                runtime.gpt_cond_latent,
+                                runtime.speaker_embedding,
+                                **inference_kwargs,
+                            )["wav"]
+                    with profiler.stage("xtts.wav_save", output_path=output_path, sample_rate=24000):
+                        wav_tensor = torch.tensor(wav).unsqueeze(0)
+                        torchaudio.save(str(output_path), wav_tensor, 24000)
+                else:
+                    with self._inference_mode_context(torch):
+                        wav = runtime.model.inference(
+                            text,
+                            selected_recipe.language,
+                            runtime.gpt_cond_latent,
+                            runtime.speaker_embedding,
+                            **inference_kwargs,
+                        )["wav"]
+                    wav_tensor = torch.tensor(wav).unsqueeze(0)
+                    torchaudio.save(str(output_path), wav_tensor, 24000)
+        except TTSProviderError:
+            raise
+        except Exception as exc:
+            raise TTSProviderError(
+                code="xtts_synthesis_failed",
+                message=f"XTTS synthesis failed from checkpoint directory: {exc}",
+                provider_state={self.provider_name: health},
+                suggested_action="Check the XTTS checkpoint directory, references, and runtime logs.",
+            ) from exc
+
+        duration_seconds = _audio_stats(output_path)["duration_seconds"]
+        return {
+            "audio_path": str(output_path),
+            "voice": str(voice_profile.get("display_name") or selected_recipe.character),
+            "duration_seconds": max(duration_seconds, 0.6),
+            "provider_used": self.provider_name,
+            "controls_applied": {
+                "temperature": recipe_settings.get("temperature"),
+                "speed": recipe_settings.get("speed"),
+                "split_sentences": recipe_settings.get("split_sentences"),
+                "language": selected_recipe.language,
+            },
+            "reference_audio_count": len(selected_recipe.reference_wavs),
+            "recipe_used": {
+                "provider": "xtts",
+                "character": selected_recipe.character,
+                "checkpoint_dir": str(selected_recipe.checkpoint_dir),
+                "config_path": str(selected_recipe.config_path),
+                "reference_wavs": [str(path) for path in selected_recipe.reference_wavs],
+                "language": selected_recipe.language,
+                "settings": recipe_settings,
+            },
         }
 
     def _selected_character_recipe(self, voice_profile: dict[str, Any]):
@@ -1772,6 +1971,7 @@ class TTSOrchestrator:
                 )
                 continue
             recipe_requires_validation = provider_name == "xtts" and str(voice_profile.get("character_slug") or "").strip().lower() == "stewie_griffin"
+            # XTTS render segments must not be satisfied from the shared preview/audio cache.
             cache_enabled = provider_name != "xtts" and not recipe_requires_validation
             cache_key = self._voice_cache_key(provider_name, text, voice_profile, provider) if cache_enabled else None
             cache_hit = self._copy_cache_if_present(cache_key, output_path) if cache_key else False
@@ -1938,6 +2138,7 @@ class TTSOrchestrator:
             effective_fallback_allowed = fallback_allowed
             if "fallback_allowed" in voice_profile:
                 effective_fallback_allowed = bool(voice_profile.get("fallback_allowed"))
+            # Unique filenames keep each script segment inspectable even when text and speaker repeat.
             output_path = output_dir / f"{index:03d}_{_slugify(speaker)}_{uuid.uuid4().hex}.wav"
             result = self.synthesize_line(
                 text=text,
@@ -1996,6 +2197,7 @@ class LocalSpeechService:
             _slugify(speaker): dict(config) for speaker, config in (speaker_voice_overrides or {}).items()
         }
         manifest_speakers = dict((voice_manifest or {}).get("speakers") or {})
+        # The manifest is the render-time contract from Video Lab; database changes after queueing should not drift it.
         self.voice_manifest = {
             str(speaker): dict(config) for speaker, config in manifest_speakers.items()
         }

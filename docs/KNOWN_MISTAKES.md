@@ -18,10 +18,12 @@
 - Do not raise Celery generation concurrency blindly for CPU-only XTTS; profile first and prefer one generation worker process when CPU/RAM pressure is high.
 - Do not assume the XTTS worker runtime cache is shared across Celery prefork processes; each process can load its own model and consume several GB of RSS.
 - Do not rewrite the renderer or provider path for performance before checking `generation_profile.json` and preserving persisted segment WAV assembly.
+- Do not run heavy Voice Lab reference processing, dataset analysis, model attach, profile preparation, or calibration candidate synthesis inside FastAPI request handlers; queue it to `voice_worker`.
 
 ## Assets
 - Character assets must not come from background preset directories.
 - Background presets must be discovered from the configured preset path.
+- Regression coverage now includes `backend/app/tests/test_vertical_slice.py::test_character_images_are_not_loaded_from_background_preset_directories` and `test_background_presets_are_loaded_from_bundled_media_dir`.
 
 ## When More Detail Is Needed
 Read docs/archive/KNOWN_MISTAKES_ARCHIVE.md.
