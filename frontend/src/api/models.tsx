@@ -100,9 +100,29 @@ export interface GeneratedScript {
 
 export interface ScriptGenerationResponse {
   generated_script: GeneratedScript;
-  provider_metadata: Record<string, unknown>;
+  provider_metadata: ScriptGenerationProviderMetadata;
   validation_warnings: string[];
   fallback_used: boolean;
+}
+
+export interface ScriptGenerationProviderMetadata {
+  provider_name: string;
+  model: string | null;
+  fallback_used: boolean;
+  fallback_reason: string | null;
+  generation_duration_ms: number | null;
+  repair_attempted: boolean;
+  prompt_char_count: number | null;
+  response_char_count: number | null;
+  timeout_seconds: number | null;
+  num_predict: number | null;
+  num_ctx: number | null;
+  ollama_total_duration: number | null;
+  ollama_load_duration: number | null;
+  ollama_prompt_eval_count: number | null;
+  ollama_eval_count: number | null;
+  failure_type: string | null;
+  diagnostics: Record<string, unknown>;
 }
 
 export interface ScriptRevision {

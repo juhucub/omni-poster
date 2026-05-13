@@ -31,6 +31,7 @@ import type {
   ScriptRevision,
   SocialAccount,
   ProjectPreviewSettings,
+  ScriptGenerationProviderMetadata,
   ScriptGenerationResponse,
 } from '../api/models';
 import Sidebar from '../components/Sidebar';
@@ -74,6 +75,7 @@ const linesToDraft = (lines: ScriptLine[]) =>
   lines.map((line) => `<${line.speaker}> ${line.text}`).join('\n');
 
 const normalizeDraft = (value: string) => value.trim().replace(/\r\n/g, '\n');
+const hardScriptWarnings = ['has no spoken lines', 'references missing speaker', 'has no caption text', 'Speaker count'];
 
 const defaultPreviewSettings: ProjectPreviewSettings = {
   background_asset_id: null,
@@ -147,9 +149,11 @@ const ProjectEditorPage: React.FC = () => {
   const [scriptTargetDuration, setScriptTargetDuration] = useState(45);
   const [scriptTone, setScriptTone] = useState('explanatory');
   const [scriptAudience, setScriptAudience] = useState('general short-form viewers');
+  const [scriptSpeakerNames, setScriptSpeakerNames] = useState('');
   const [generatedScript, setGeneratedScript] = useState<GeneratedScript | null>(null);
-  const [scriptProviderStatus, setScriptProviderStatus] = useState<Record<string, unknown> | null>(null);
+  const [scriptProviderStatus, setScriptProviderStatus] = useState<ScriptGenerationProviderMetadata | null>(null);
   const [scriptGenerationWarnings, setScriptGenerationWarnings] = useState<string[]>([]);
+  const [showScriptDebug, setShowScriptDebug] = useState(false);
   const [metadata, setMetadata] = useState<PlatformMetadata | null>(null);
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [outputs, setOutputs] = useState<OutputVideo[]>([]);
@@ -204,6 +208,25 @@ const ProjectEditorPage: React.FC = () => {
     const names = (scriptLines.length ? scriptLines : script?.parsed_lines || []).map((line) => line.speaker.trim()).filter(Boolean);
     return Array.from(new Set(names));
   }, [script?.parsed_lines, scriptLines]);
+  const generatedScriptHasHardWarnings = useMemo(
+    () => scriptGenerationWarnings.some((warning) => hardScriptWarnings.some((marker) => warning.includes(marker))),
+    [scriptGenerationWarnings]
+  );
+  const scriptProviderLabel = useMemo(() => {
+    if (!scriptProviderStatus) {
+      return null;
+    }
+    if (scriptProviderStatus.fallback_used) {
+      if (scriptProviderStatus.failure_type === 'ollama_timeout') {
+        return 'Timed out · fallback';
+      }
+      if (scriptProviderStatus.failure_type === 'invalid_json') {
+        return 'Invalid JSON · fallback';
+      }
+      return 'Fallback';
+    }
+    return scriptProviderStatus.provider_name === 'ollama' ? 'Ollama' : scriptProviderStatus.provider_name;
+  }, [scriptProviderStatus]);
   const selectedBackgroundUrl = useMemo(
     () => backgroundAsset?.content_url || previewSettings.background_url || null,
     [backgroundAsset?.content_url, previewSettings.background_url]
@@ -508,6 +531,10 @@ const ProjectEditorPage: React.FC = () => {
   const generateScript = async () => {
     try {
       setBusy('script-generate');
+      const requestedSpeakerNames = scriptSpeakerNames
+        .split(',')
+        .map((name) => name.trim())
+        .filter(Boolean);
       const response = await apiClient.post<ScriptGenerationResponse>('/script-generation/generate', {
         idea: scriptPrompt,
         content_format_id: scriptFormatId,
@@ -515,7 +542,8 @@ const ProjectEditorPage: React.FC = () => {
         target_duration_sec: scriptTargetDuration,
         tone: scriptTone,
         audience: scriptAudience,
-        speaker_names: detectedSpeakers,
+        speaker_names: requestedSpeakerNames.length ? requestedSpeakerNames : detectedSpeakers,
+        debug: showScriptDebug,
       });
       setGeneratedScript(response.data.generated_script);
       setScriptProviderStatus(response.data.provider_metadata);
@@ -535,7 +563,7 @@ const ProjectEditorPage: React.FC = () => {
   };
 
   const acceptGeneratedScript = async () => {
-    if (!generatedScript) {
+    if (!generatedScript || generatedScriptHasHardWarnings) {
       return;
     }
     try {
@@ -1043,15 +1071,15 @@ const ProjectEditorPage: React.FC = () => {
                   <div className="flex items-center justify-between gap-4">
                     <div>
                       <h2 className="text-xl font-semibold">Dialogue Script</h2>
-                      <p className="mt-2 text-sm text-slate-400">Keep the canonical format <code>&lt;Character&gt; dialogue</code>, with line-level edits and revision history.</p>
+                      <p className="mt-2 text-sm text-slate-400">Generate a structured, speaker-separated script, then accept it into the render-ready project script.</p>
                     </div>
                     <button
                       onClick={generateScript}
                       disabled={busy === 'script-generate'}
-                      className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10"
+                      className="inline-flex items-center gap-2 rounded-2xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-cyan-200 disabled:opacity-60"
                     >
                       <Sparkles size={16} />
-                      {busy === 'script-generate' ? 'Generating...' : 'Generate Draft'}
+                      {busy === 'script-generate' ? 'Generating...' : generatedScript ? 'Regenerate' : 'Generate Script'}
                     </button>
                   </div>
 
@@ -1061,13 +1089,15 @@ const ProjectEditorPage: React.FC = () => {
                     </div>
                   )}
 
-                  <div className="mt-4 grid gap-3 lg:grid-cols-[1.4fr_0.8fr_0.8fr_0.5fr]">
-                    <input
+                  <div className="mt-4 space-y-3 rounded-2xl border border-white/10 bg-slate-950/30 p-4">
+                    <textarea
                       value={scriptPrompt}
                       onChange={(event) => setScriptPrompt(event.target.value)}
                       placeholder="Idea for structured script generation"
-                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                      rows={3}
+                      className="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
                     />
+                    <div className="grid gap-3 lg:grid-cols-[0.9fr_0.8fr_1fr]">
                     <select
                       value={scriptFormatId}
                       onChange={(event) => setScriptFormatId(event.target.value)}
@@ -1086,53 +1116,110 @@ const ProjectEditorPage: React.FC = () => {
                         <option key={platform.id} value={platform.id}>{platform.label}</option>
                       ))}
                     </select>
-                    <input
-                      type="number"
-                      min={10}
-                      max={180}
-                      value={scriptTargetDuration}
-                      onChange={(event) => setScriptTargetDuration(Number(event.target.value) || 45)}
-                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                    />
-                  </div>
-
-                  <div className="mt-3 grid gap-3 md:grid-cols-2">
-                    <input
-                      value={scriptTone}
-                      onChange={(event) => setScriptTone(event.target.value)}
-                      placeholder="Tone"
-                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                    />
-                    <input
-                      value={scriptAudience}
-                      onChange={(event) => setScriptAudience(event.target.value)}
-                      placeholder="Audience"
-                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                    />
+                      <div className="grid grid-cols-4 gap-2">
+                        {[15, 30, 45, 60].map((duration) => (
+                          <button
+                            key={duration}
+                            onClick={() => setScriptTargetDuration(duration)}
+                            className={`rounded-2xl border px-3 py-3 text-sm ${
+                              scriptTargetDuration === duration
+                                ? 'border-cyan-300 bg-cyan-300/15 text-cyan-100'
+                                : 'border-white/10 bg-slate-950/60 text-slate-300 hover:bg-white/10'
+                            }`}
+                          >
+                            {duration}s
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <input
+                        value={scriptTone}
+                        onChange={(event) => setScriptTone(event.target.value)}
+                        placeholder="Tone"
+                        className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                      />
+                      <input
+                        value={scriptAudience}
+                        onChange={(event) => setScriptAudience(event.target.value)}
+                        placeholder="Audience"
+                        className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                      />
+                      <input
+                        value={scriptSpeakerNames}
+                        onChange={(event) => setScriptSpeakerNames(event.target.value)}
+                        placeholder="Optional speakers, comma-separated"
+                        className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        onClick={generateScript}
+                        disabled={busy === 'script-generate' || !scriptPrompt.trim()}
+                        className="inline-flex items-center gap-2 rounded-2xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-cyan-200 disabled:opacity-60"
+                      >
+                        <Sparkles size={16} />
+                        {busy === 'script-generate' ? 'Generating...' : generatedScript ? 'Regenerate Script' : 'Generate Script'}
+                      </button>
+                      <label className="inline-flex items-center gap-2 text-sm text-slate-300">
+                        <input
+                          type="checkbox"
+                          checked={showScriptDebug}
+                          onChange={(event) => setShowScriptDebug(event.target.checked)}
+                        />
+                        Debug details
+                      </label>
+                    </div>
                   </div>
 
                   {(generatedScript || scriptProviderStatus) && (
                     <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-4 text-sm text-cyan-50">
                       <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          Script provider: {String(scriptProviderStatus?.provider_name || generatedScript?.provider_metadata?.provider_name || 'unknown')}
-                          {scriptProviderStatus?.fallback_used ? ' · fallback used' : ''}
-                          {generatedScript ? ` · ${generatedScript.total_estimated_duration_sec.toFixed(1)}s estimated` : ''}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-full px-3 py-1 text-xs font-medium ${
+                            scriptProviderStatus?.fallback_used
+                              ? 'bg-amber-300 text-slate-950'
+                              : 'bg-emerald-300 text-slate-950'
+                          }`}>
+                            {scriptProviderLabel || 'Unknown'}
+                          </span>
+                          <span>
+                            {scriptProviderStatus?.fallback_used
+                              ? 'Fallback script generated — Ollama failed or timed out'
+                              : 'Generated with Ollama'}
+                          </span>
+                          {generatedScript ? <span>· {generatedScript.total_estimated_duration_sec.toFixed(1)}s estimated</span> : null}
+                          {scriptGenerationWarnings.length > 0 ? <span>· Cleaned generated script for render compatibility</span> : null}
                         </div>
-                        {generatedScript && (
+                        <div className="flex flex-wrap gap-2">
+                          {generatedScript && (
+                            <button
+                              onClick={() => navigator.clipboard?.writeText(JSON.stringify(generatedScript, null, 2))}
+                              className="rounded-2xl border border-white/10 px-4 py-2 font-medium text-cyan-50 hover:bg-white/10"
+                            >
+                              Copy JSON
+                            </button>
+                          )}
+                          {generatedScript && (
                           <button
                             onClick={acceptGeneratedScript}
-                            disabled={busy === 'script'}
+                            disabled={busy === 'script' || generatedScriptHasHardWarnings}
                             className="rounded-2xl bg-cyan-100 px-4 py-2 font-medium text-slate-950 disabled:opacity-60"
                           >
-                            Accept Structured Script
+                            Accept Script
                           </button>
-                        )}
+                          )}
+                        </div>
                       </div>
                       {scriptGenerationWarnings.length > 0 && (
                         <div className="mt-2 text-xs text-amber-100">
-                          {scriptGenerationWarnings.slice(0, 3).join(' · ')}
+                          {scriptGenerationWarnings.slice(0, 6).join(' · ')}
                         </div>
+                      )}
+                      {showScriptDebug && scriptProviderStatus && (
+                        <pre className="mt-3 max-h-56 overflow-auto rounded-xl bg-slate-950/80 p-3 text-xs text-slate-300">
+                          {JSON.stringify(scriptProviderStatus, null, 2)}
+                        </pre>
                       )}
                     </div>
                   )}
@@ -1173,7 +1260,13 @@ const ProjectEditorPage: React.FC = () => {
                           <div className="text-sm font-medium text-slate-200">Structured Lines</div>
                           {generatedScript.lines.slice(0, 8).map((line) => (
                             <div key={line.id} className="rounded-xl border border-white/10 bg-black/20 p-3 text-sm">
-                              <div className="text-xs uppercase tracking-wide text-cyan-200">{line.section} · {line.speaker_label}</div>
+                              <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-wide text-cyan-200">
+                                <span>{line.section}</span>
+                                <span>·</span>
+                                <span>{line.speaker_label}</span>
+                                <span>·</span>
+                                <span>{line.estimated_duration_sec.toFixed(1)}s</span>
+                              </div>
                               <div className="mt-1 text-slate-100">{line.text}</div>
                               <div className="mt-1 text-xs text-slate-400">{line.caption_text}</div>
                             </div>

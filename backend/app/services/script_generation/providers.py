@@ -26,6 +26,14 @@ class ProviderResult:
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
+class ScriptGenerationProviderError(RuntimeError):
+    def __init__(self, failure_type: str, message: str, diagnostics: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.failure_type = failure_type
+        self.diagnostics = dict(diagnostics or {})
+        self.diagnostics["failure_type"] = failure_type
+
+
 class ScriptGenerationProvider(ABC):
     provider_name: str
 
@@ -92,8 +100,10 @@ class OllamaScriptGenerationProvider(ScriptGenerationProvider):
 
         try:
             raw_text, diagnostics = self._call(prompt, repair=False)
+        except ScriptGenerationProviderError:
+            raise
         except Exception as exc:
-            raise RuntimeError(f"ollama_request_failed: {exc}") from exc
+            raise ScriptGenerationProviderError("ollama_network_error", f"ollama_request_failed: {exc}") from exc
 
         try:
             payload = _json_from_text(raw_text)
@@ -104,9 +114,8 @@ class OllamaScriptGenerationProvider(ScriptGenerationProvider):
                 diagnostics=diagnostics,
             )
         except Exception as first_error:
-            # Avoid an expensive second 120s generation by default.
-            # JSON mode + cleanup should handle normal formatting mistakes.
-            raise RuntimeError(f"ollama_invalid_json: {first_error}") from first_error
+            diagnostics["failure_type"] = "invalid_json"
+            raise ScriptGenerationProviderError("invalid_json", f"ollama_invalid_json: {first_error}", diagnostics) from first_error
     
     def _call(self, prompt: str, *, repair: bool) -> tuple[str, dict[str, Any]]:
         request_body = {
@@ -115,9 +124,9 @@ class OllamaScriptGenerationProvider(ScriptGenerationProvider):
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": min(float(self.temperature), 0.2),
-                "num_predict": 900 if not repair else 500,
-                "num_ctx": 4096,
+                "temperature": min(float(settings.OLLAMA_SCRIPT_TEMPERATURE), 0.2),
+                "num_predict": max(128, min(int(settings.OLLAMA_NUM_PREDICT), 1200)),
+                "num_ctx": max(1024, min(int(settings.OLLAMA_NUM_CTX), 8192)),
             },
         }
 
@@ -129,7 +138,9 @@ class OllamaScriptGenerationProvider(ScriptGenerationProvider):
             "repair": repair,
             "num_predict": request_body["options"]["num_predict"],
             "num_ctx": request_body["options"]["num_ctx"],
+            "temperature": request_body["options"]["temperature"],
             "format": request_body["format"],
+            "stream": request_body["stream"],
         }
 
         try:
@@ -148,14 +159,14 @@ class OllamaScriptGenerationProvider(ScriptGenerationProvider):
             response.raise_for_status()
         except httpx.TimeoutException as exc:
             diagnostics["failure_type"] = "ollama_timeout"
-            raise RuntimeError(json.dumps(diagnostics)) from exc
+            raise ScriptGenerationProviderError("ollama_timeout", json.dumps(diagnostics), diagnostics) from exc
         except httpx.HTTPStatusError as exc:
             diagnostics["failure_type"] = "ollama_http_error"
             diagnostics["response_text"] = exc.response.text[:1000] if exc.response is not None else ""
-            raise RuntimeError(json.dumps(diagnostics)) from exc
+            raise ScriptGenerationProviderError("ollama_http_error", json.dumps(diagnostics), diagnostics) from exc
         except httpx.HTTPError as exc:
             diagnostics["failure_type"] = "ollama_network_error"
-            raise RuntimeError(json.dumps(diagnostics)) from exc
+            raise ScriptGenerationProviderError("ollama_network_error", json.dumps(diagnostics), diagnostics) from exc
 
         data = response.json()
         raw_response = str(data.get("response") or "")
@@ -234,6 +245,25 @@ class DeterministicFallbackScriptGenerationProvider(ScriptGenerationProvider):
             inferred = self._infer_character_names_from_idea(request.idea)
             if len(inferred) >= 2:
                 names = inferred
+        if template.id == "debate_format":
+            names = names[:3] or ["Moderator", "Speaker A", "Speaker B"]
+        elif template.id in {"character_dialogue", "podcast_clip"} and len(names) < 2:
+            names = names + template.default_speaker_roles[len(names) :]
+        elif template.id == "multi_speaker_skit" and len(names) < 3:
+            names = names + template.default_speaker_roles[len(names) :]
+        elif not names:
+            names = template.default_speaker_roles[:required]
+        names = names[: template.max_speakers]
+        while len(names) < template.min_speakers:
+            names.append(template.default_speaker_roles[min(len(names), len(template.default_speaker_roles) - 1)])
+        return [
+            {
+                "id": stable_slug(name, f"speaker_{index + 1}"),
+                "label": name,
+                "role": template.default_speaker_roles[min(index, len(template.default_speaker_roles) - 1)],
+            }
+            for index, name in enumerate(names)
+        ]
 
     def _line(self, speakers: list[dict[str, Any]], index: int, section: str, text: str, visual: str | None = None) -> dict[str, Any]:
         speaker = speakers[index % len(speakers)]
@@ -296,12 +326,12 @@ class DeterministicFallbackScriptGenerationProvider(ScriptGenerationProvider):
             b = speakers[1]["label"] if len(speakers) > 1 else "Speaker B"
 
             return [
-                self._line(speakers, 0, "hook", f"{b}, have you noticed {idea} is getting weirdly believable?"),
+                self._line(speakers, 0, "hook", f"{b}, does this AI video feel too real?"),
                 self._line(speakers, 1, "hook", "Yes, and somehow that is both impressive and deeply annoying."),
-                self._line(speakers, 0, "body", "I saw one today and had to check if it was real twice."),
-                self._line(speakers, 1, "body", "That is the problem. The fake ones are learning confidence faster than people are learning skepticism."),
+                self._line(speakers, 0, "body", "I checked one twice because it looked real."),
+                self._line(speakers, 1, "body", "That is the problem. Fake clips learned confidence first."),
                 self._line(speakers, 0, "body", "So now we need subtitles, watermarks, and trust issues?"),
-                self._line(speakers, 1, "payoff", "Exactly. The future is vertical, synthetic, and wearing a suspiciously smooth face."),
+                self._line(speakers, 1, "payoff", "Exactly. The future is vertical and suspiciously smooth."),
                 self._line(speakers, 0, "cta", "Follow before this clip becomes evidence in a robot trial."),
             ]
         return [

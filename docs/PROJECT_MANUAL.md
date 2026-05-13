@@ -182,7 +182,7 @@ Runtime performance controls may cap preview/export resolution and FPS separatel
 
 ### Local Ollama Script Generation
 
-Local script generation is configured with `OLLAMA_ENABLED`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, and `OLLAMA_TEMPERATURE`.
+Local script generation is configured with `OLLAMA_ENABLED`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_SCRIPT_TEMPERATURE`, `OLLAMA_NUM_PREDICT`, and `OLLAMA_NUM_CTX`.
 
 Docker development can start Ollama with:
 
@@ -193,7 +193,7 @@ docker compose -f deploy/compose/docker-compose.yml exec ollama ollama pull llam
 
 When running the backend outside Docker, use a host Ollama service such as `OLLAMA_BASE_URL=http://localhost:11434` and pull the same model with `ollama pull llama3.1`.
 
-If Ollama is not reachable, disabled, times out, or returns invalid output after repair, script generation must return deterministic structured fallback output instead of failing app startup or blocking the script workflow.
+If Ollama is not reachable, disabled, times out, or returns invalid output, script generation must return deterministic structured fallback output instead of failing app startup or blocking the script workflow. Provider metadata should expose whether Ollama or fallback produced the script, the failure type when applicable, and bounded generation diagnostics.
 
 ## Non-Goals for MVP
 

@@ -74,6 +74,9 @@ class ScriptNormalizer:
     ) -> tuple[GeneratedScript, list[str]]:
         warnings: list[str] = []
         data = payload.model_dump() if isinstance(payload, GeneratedScript) else dict(payload or {})
+        returned_format = str(data.get("content_format_id") or "").strip()
+        if returned_format and returned_format != content_format_id:
+            warnings.append(f"Model returned content_format_id={returned_format}; normalized to requested {content_format_id}.")
         script_id = str(data.get("id") or stable_script_id(idea, content_format_id, platform))
 
         speakers = self._normalize_speakers(data.get("speakers"), template)
@@ -86,9 +89,11 @@ class ScriptNormalizer:
             warnings.append("Provider returned no lines.")
 
         for index, raw_line in enumerate(source_lines):
-            raw_label = str(raw_line.get("speaker_label") or raw_line.get("speaker") or "").strip()
+            raw_label = str(raw_line.get("speaker_label") or raw_line.get("label") or raw_line.get("speaker") or "").strip()
             raw_id = str(raw_line.get("speaker_id") or "").strip()
             speaker = speaker_by_id.get(raw_id) or speaker_by_label.get(raw_label.lower()) or speakers[min(index, len(speakers) - 1)]
+            if raw_id and raw_id not in speaker_by_id:
+                warnings.append(f"Line {index + 1} referenced unknown speaker_id={raw_id}; remapped to {speaker.id}.")
             text, cleanup_warnings = clean_spoken_text(str(raw_line.get("text") or ""))
             warnings.extend(cleanup_warnings)
             if not text:
@@ -98,7 +103,7 @@ class ScriptNormalizer:
             cue = ScriptVisualCue(**visual_cue) if isinstance(visual_cue, dict) else None
             for chunk in _split_line_text(text, platform_rules.max_words_per_spoken_line):
                 line_id = f"line_{len(normalized_lines) + 1:03d}"
-                caption_text = str(raw_line.get("caption_text") or chunk).strip()
+                caption_text = str(raw_line.get("caption_text") or "").strip() or chunk
                 if caption_text == text and chunk != text:
                     caption_text = chunk
                 normalized_lines.append(
@@ -115,6 +120,8 @@ class ScriptNormalizer:
                         visual_cue=cue,
                     )
                 )
+
+        self._distribute_sections(normalized_lines)
 
         if not normalized_lines:
             fallback_text = f"Here's the key thing to know about {idea}."
@@ -153,6 +160,19 @@ class ScriptNormalizer:
         )
         script.caption_blocks = CaptionBlockBuilder().build(script.lines, platform_rules)
         return script, warnings
+
+    def _distribute_sections(self, lines: list[ScriptLine]) -> None:
+        if not lines:
+            return
+        lines[0].section = "hook"
+        if len(lines) == 1:
+            return
+        lines[-1].section = "cta"
+        if len(lines) >= 3:
+            lines[-2].section = "payoff"
+        for index, line in enumerate(lines[1:-2], start=1):
+            if line.section not in CANONICAL_SECTIONS:
+                line.section = "body"
 
     def _normalize_speakers(self, raw_speakers: Any, template: ScriptFormatTemplate) -> list[ScriptSpeaker]:
         speakers: list[ScriptSpeaker] = []

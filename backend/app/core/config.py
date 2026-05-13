@@ -79,8 +79,11 @@ class Settings(BaseSettings):
     OLLAMA_ENABLED: bool = True
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.1"
-    OLLAMA_TIMEOUT_SECONDS: float = 240.0
+    OLLAMA_TIMEOUT_SECONDS: float = 120.0
     OLLAMA_TEMPERATURE: float = 0.7
+    OLLAMA_SCRIPT_TEMPERATURE: float = 0.2
+    OLLAMA_NUM_PREDICT: int = 800
+    OLLAMA_NUM_CTX: int = 4096
 
     YOUTUBE_CLIENT_ID: str | None = None
     YOUTUBE_CLIENT_SECRET: str | None = None

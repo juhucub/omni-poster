@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.schemas import ScriptGenerationRequest
 from app.services.script_generation import ScriptGenerationService
 from app.services.script_generation.platforms import get_platform_rules
+from app.services.script_generation.service import generated_script_to_dialogue_lines
 
 
 FORMATS = [
@@ -94,39 +95,146 @@ def test_ollama_unavailable_falls_back(monkeypatch):
     )
     assert response.fallback_used is True
     assert response.provider_metadata.provider_name == "deterministic_fallback"
+    assert response.provider_metadata.failure_type == "ollama_network_error"
     assert response.generated_script.lines
 
 
-def test_malformed_ollama_output_repairs_once(monkeypatch):
+def test_ollama_http_error_reports_failure_type_and_fallback(monkeypatch):
     monkeypatch.setattr(settings, "OLLAMA_ENABLED", True)
-    calls = []
 
     def fake_post(*_args, **_kwargs):
-        calls.append(True)
         request = httpx.Request("POST", "http://ollama.test/api/generate")
-        if len(calls) == 1:
-            return httpx.Response(200, json={"response": "not json"}, request=request)
+        return httpx.Response(500, text="model failed", request=request)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    response = ScriptGenerationService().generate(
+        ScriptGenerationRequest(idea="http error", content_format_id="reddit_story", provider="ollama")
+    )
+    assert response.fallback_used is True
+    assert response.provider_metadata.failure_type == "ollama_http_error"
+
+
+def test_ollama_request_includes_json_bounds(monkeypatch):
+    monkeypatch.setattr(settings, "OLLAMA_ENABLED", True)
+    monkeypatch.setattr(settings, "OLLAMA_SCRIPT_TEMPERATURE", 0.2)
+    monkeypatch.setattr(settings, "OLLAMA_NUM_PREDICT", 777)
+    monkeypatch.setattr(settings, "OLLAMA_NUM_CTX", 4096)
+    captured = {}
+
+    def fake_post(*_args, **kwargs):
+        captured.update(kwargs["json"])
+        request = httpx.Request("POST", "http://ollama.test/api/generate")
         payload = {
             "speakers": [{"id": "host", "label": "Host", "role": "Teacher"}],
-            "lines": [{"section": "hook", "speaker_id": "host", "speaker_label": "Host", "text": "Clean repaired line.", "caption_text": "Clean repaired line."}],
+            "lines": [{"section": "hook", "speaker_id": "host", "speaker_label": "Host", "text": "Clean generated line.", "caption_text": "Clean generated line."}],
         }
         return httpx.Response(200, json={"response": json.dumps(payload)}, request=request)
 
     monkeypatch.setattr(httpx, "post", fake_post)
     response = ScriptGenerationService().generate(
-        ScriptGenerationRequest(idea="repair test", content_format_id="educational_short", provider="ollama")
+        ScriptGenerationRequest(idea="request body test", content_format_id="educational_short", provider="ollama")
     )
     assert response.fallback_used is False
-    assert response.provider_metadata.repair_attempted is True
-    assert len(calls) == 2
+    assert captured["stream"] is False
+    assert captured["format"] == "json"
+    assert captured["options"]["temperature"] == 0.2
+    assert captured["options"]["num_predict"] == 777
+    assert captured["options"]["num_ctx"] == 4096
+
+
+def test_valid_ollama_json_parses_successfully(monkeypatch):
+    monkeypatch.setattr(settings, "OLLAMA_ENABLED", True)
+
+    def fake_post(*_args, **_kwargs):
+        request = httpx.Request("POST", "http://ollama.test/api/generate")
+        payload = {
+            "content_format_id": "educational_short",
+            "speakers": [{"id": "teacher", "label": "Teacher", "role": "Teacher"}],
+            "lines": [{"section": "hook", "speaker_id": "teacher", "speaker_label": "Teacher", "text": "This is clean JSON.", "caption_text": "This is clean JSON."}],
+        }
+        return httpx.Response(
+            200,
+            json={"response": json.dumps(payload), "total_duration": 10, "load_duration": 2, "prompt_eval_count": 15, "eval_count": 20},
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    response = ScriptGenerationService().generate(
+        ScriptGenerationRequest(idea="valid json test", content_format_id="educational_short", provider="ollama")
+    )
+    assert response.provider_metadata.provider_name == "ollama"
+    assert response.fallback_used is False
+    assert response.provider_metadata.ollama_total_duration == 10
+    assert response.provider_metadata.ollama_eval_count == 20
+
+
+def test_markdown_wrapped_ollama_json_parses(monkeypatch):
+    monkeypatch.setattr(settings, "OLLAMA_ENABLED", True)
+
+    def fake_post(*_args, **_kwargs):
+        request = httpx.Request("POST", "http://ollama.test/api/generate")
+        payload = {
+            "speakers": [{"id": "host", "label": "Host", "role": "Host"}],
+            "lines": [{"section": "hook", "speaker_id": "host", "speaker_label": "Host", "text": "Wrapped JSON works.", "caption_text": "Wrapped JSON works."}],
+        }
+        return httpx.Response(200, json={"response": f"```json\n{json.dumps(payload)}\n```"}, request=request)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    response = ScriptGenerationService().generate(
+        ScriptGenerationRequest(idea="wrapped json test", content_format_id="educational_short", provider="ollama")
+    )
+    assert response.fallback_used is False
+    assert response.generated_script.lines[0].text == "Wrapped JSON works."
+
+
+def test_label_and_empty_caption_normalize(monkeypatch):
+    monkeypatch.setattr(settings, "OLLAMA_ENABLED", True)
+
+    def fake_post(*_args, **_kwargs):
+        request = httpx.Request("POST", "http://ollama.test/api/generate")
+        payload = {
+            "speakers": [{"id": "peter", "label": "Peter", "role": "Character A"}],
+            "lines": [{"section": "intro", "speaker_id": "peter", "label": "Peter", "text": "Caption should be copied.", "caption_text": ""}],
+        }
+        return httpx.Response(200, json={"response": json.dumps(payload)}, request=request)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    response = ScriptGenerationService().generate(
+        ScriptGenerationRequest(idea="label caption test", content_format_id="educational_short", provider="ollama")
+    )
+    line = response.generated_script.lines[0]
+    assert line.speaker_label == "Peter"
+    assert line.caption_text == line.text
+    assert line.section == "hook"
+
+
+def test_wrong_returned_format_is_corrected_with_warning(monkeypatch):
+    monkeypatch.setattr(settings, "OLLAMA_ENABLED", True)
+
+    def fake_post(*_args, **_kwargs):
+        request = httpx.Request("POST", "http://ollama.test/api/generate")
+        payload = {
+            "content_format_id": "educational_short",
+            "speakers": [{"id": "a", "label": "A", "role": "Character A"}, {"id": "b", "label": "B", "role": "Character B"}],
+            "lines": [
+                {"section": "hook", "speaker_id": "a", "speaker_label": "A", "text": "First line.", "caption_text": "First line."},
+                {"section": "body", "speaker_id": "b", "speaker_label": "B", "text": "Second line.", "caption_text": "Second line."},
+                {"section": "payoff", "speaker_id": "a", "speaker_label": "A", "text": "Third line.", "caption_text": "Third line."},
+            ],
+        }
+        return httpx.Response(200, json={"response": json.dumps(payload)}, request=request)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    response = ScriptGenerationService().generate(
+        ScriptGenerationRequest(idea="format correction", content_format_id="character_dialogue", provider="ollama")
+    )
+    assert response.generated_script.content_format_id == "character_dialogue"
+    assert any("content_format_id" in warning for warning in response.validation_warnings)
 
 
 def test_invalid_ollama_after_retry_falls_back(monkeypatch):
     monkeypatch.setattr(settings, "OLLAMA_ENABLED", True)
-    calls = []
-
     def fake_post(*_args, **_kwargs):
-        calls.append(True)
         request = httpx.Request("POST", "http://ollama.test/api/generate")
         return httpx.Response(200, json={"response": "still not json"}, request=request)
 
@@ -136,7 +244,50 @@ def test_invalid_ollama_after_retry_falls_back(monkeypatch):
     )
     assert response.fallback_used is True
     assert response.provider_metadata.provider_name == "deterministic_fallback"
-    assert len(calls) == 2
+    assert response.provider_metadata.failure_type == "invalid_json"
+
+
+def test_ollama_timeout_reports_failure_type_and_valid_fallback(monkeypatch):
+    monkeypatch.setattr(settings, "OLLAMA_ENABLED", True)
+
+    def fake_post(*_args, **_kwargs):
+        raise httpx.ReadTimeout("too slow")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    response = ScriptGenerationService().generate(
+        ScriptGenerationRequest(idea="timeout fallback", content_format_id="character_dialogue", provider="ollama")
+    )
+    assert response.fallback_used is True
+    assert response.provider_metadata.failure_type == "ollama_timeout"
+    assert response.generated_script.content_format_id == "character_dialogue"
+
+
+def test_character_dialogue_fallback_preserves_format_infers_names_and_alternates(monkeypatch):
+    monkeypatch.setattr(settings, "OLLAMA_ENABLED", False)
+    response = ScriptGenerationService().generate(
+        ScriptGenerationRequest(
+            idea="Peter and Stewie argue about AI videos",
+            content_format_id="character_dialogue",
+            platform="tiktok",
+            provider="deterministic_fallback",
+        )
+    )
+    script = response.generated_script
+    assert script.content_format_id == "character_dialogue"
+    assert [speaker.label for speaker in script.speakers[:2]] == ["Peter", "Stewie"]
+    assert all(line.caption_text for line in script.lines)
+    assert all(script.lines[index].speaker_id != script.lines[index + 1].speaker_id for index in range(len(script.lines) - 1))
+
+
+def test_generated_script_converts_to_render_compatible_segments(monkeypatch):
+    monkeypatch.setattr(settings, "OLLAMA_ENABLED", False)
+    script = ScriptGenerationService().generate(
+        ScriptGenerationRequest(idea="Peter and Stewie test render flow", content_format_id="character_dialogue", provider="deterministic_fallback")
+    ).generated_script
+    segments = generated_script_to_dialogue_lines(script)
+    assert segments
+    assert {"speaker", "text", "order", "caption_text", "section", "line_id"}.issubset(segments[0])
+    assert segments[0]["caption_text"]
 
 
 def test_script_generation_endpoint_and_project_revision_persist_generated_script(auth_client: TestClient, monkeypatch):

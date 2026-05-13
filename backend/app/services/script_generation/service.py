@@ -18,6 +18,7 @@ from app.services.script_generation.providers import (
     DeterministicFallbackScriptGenerationProvider,
     OllamaScriptGenerationProvider,
     ProviderResult,
+    ScriptGenerationProviderError,
 )
 from app.services.script_generation.validator import ScriptValidator
 
@@ -47,6 +48,7 @@ class ScriptGenerationService:
         )
         provider_result: ProviderResult
         fallback_reason: str | None = None
+        failure_diagnostics: dict = {}
 
         try:
             if (request.provider or "auto") in {"auto", "ollama"} and settings.OLLAMA_ENABLED:
@@ -61,22 +63,45 @@ class ScriptGenerationService:
             else:
                 fallback_reason = "provider_disabled_or_not_selected"
                 provider_result = self._fallback(request, prompt, template, platform_rules, target_duration_sec, fallback_reason)
+        except ScriptGenerationProviderError as exc:
+            fallback_reason = f"{exc.failure_type}: {exc}"
+            failure_diagnostics = dict(exc.diagnostics)
+            logger.warning("script_generation.fallback_used reason=%s", fallback_reason)
+            provider_result = self._fallback(request, prompt, template, platform_rules, target_duration_sec, fallback_reason)
         except Exception as exc:
             fallback_reason = f"ollama_unavailable_or_invalid: {exc}"
+            failure_diagnostics = {"failure_type": "ollama_network_error"}
             logger.warning("script_generation.fallback_used reason=%s", fallback_reason)
             provider_result = self._fallback(request, prompt, template, platform_rules, target_duration_sec, fallback_reason)
 
-        script, normalization_warnings = self.normalizer.normalize(
-            provider_result.payload,
-            idea=request.idea,
-            content_format_id=template.id,
-            platform=platform_rules.id,
-            target_duration_sec=target_duration_sec,
-            tone=request.tone,
-            audience=request.audience,
-            template=template,
-            platform_rules=platform_rules,
-        )
+        try:
+            script, normalization_warnings = self.normalizer.normalize(
+                provider_result.payload,
+                idea=request.idea,
+                content_format_id=template.id,
+                platform=platform_rules.id,
+                target_duration_sec=target_duration_sec,
+                tone=request.tone,
+                audience=request.audience,
+                template=template,
+                platform_rules=platform_rules,
+            )
+        except Exception as exc:
+            if provider_result.provider_name == self.fallback_provider.provider_name:
+                raise
+            failure_diagnostics = {**provider_result.diagnostics, "failure_type": "schema_validation_failed", "error": str(exc)}
+            provider_result = self._fallback(request, prompt, template, platform_rules, target_duration_sec, "schema_validation_failed")
+            script, normalization_warnings = self.normalizer.normalize(
+                provider_result.payload,
+                idea=request.idea,
+                content_format_id=template.id,
+                platform=platform_rules.id,
+                target_duration_sec=target_duration_sec,
+                tone=request.tone,
+                audience=request.audience,
+                template=template,
+                platform_rules=platform_rules,
+            )
         validation_warnings = normalization_warnings + self.validator.validate(
             script,
             template=template,
@@ -84,6 +109,7 @@ class ScriptGenerationService:
         )
         if provider_result.provider_name != self.fallback_provider.provider_name and self._has_hard_failure(validation_warnings):
             logger.warning("script_generation.validation_fallback warnings=%s", validation_warnings)
+            failure_diagnostics = {**provider_result.diagnostics, "failure_type": "schema_validation_failed"}
             provider_result = self._fallback(request, prompt, template, platform_rules, target_duration_sec, "validation_failed")
             script, normalization_warnings = self.normalizer.normalize(
                 provider_result.payload,
@@ -103,6 +129,11 @@ class ScriptGenerationService:
             )
 
         duration_ms = int((time.monotonic() - started) * 1000)
+        diagnostics = {
+            **failure_diagnostics,
+            **provider_result.diagnostics,
+            **({"prompt": prompt} if request.debug else {}),
+        }
         provider_metadata = ScriptGenerationProviderMetadata(
             provider_name=provider_result.provider_name,
             model=provider_result.model,
@@ -110,10 +141,17 @@ class ScriptGenerationService:
             fallback_reason=provider_result.fallback_reason or fallback_reason,
             generation_duration_ms=duration_ms,
             repair_attempted=provider_result.repair_attempted,
-            diagnostics={
-                **provider_result.diagnostics,
-                **({"prompt": prompt} if request.debug else {}),
-            },
+            prompt_char_count=diagnostics.get("prompt_char_count") or len(prompt),
+            response_char_count=diagnostics.get("response_char_count"),
+            timeout_seconds=diagnostics.get("timeout_seconds"),
+            num_predict=diagnostics.get("num_predict"),
+            num_ctx=diagnostics.get("num_ctx"),
+            ollama_total_duration=diagnostics.get("ollama_total_duration"),
+            ollama_load_duration=diagnostics.get("ollama_load_duration"),
+            ollama_prompt_eval_count=diagnostics.get("ollama_prompt_eval_count"),
+            ollama_eval_count=diagnostics.get("ollama_eval_count"),
+            failure_type=diagnostics.get("failure_type"),
+            diagnostics=diagnostics,
         )
         script.provider_metadata = provider_metadata.model_dump()
         script.validation_warnings = validation_warnings
@@ -152,7 +190,7 @@ class ScriptGenerationService:
         return result
 
     def _has_hard_failure(self, warnings: list[str]) -> bool:
-        hard_markers = ("has no spoken lines", "references missing speaker", "has no caption text")
+        hard_markers = ("has no spoken lines", "references missing speaker", "has no caption text", "Speaker count")
         return any(any(marker in warning for marker in hard_markers) for warning in warnings)
 
 

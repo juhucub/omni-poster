@@ -692,6 +692,16 @@ class ScriptGenerationProviderMetadata(BaseModel):
     fallback_reason: str | None = None
     generation_duration_ms: int | None = None
     repair_attempted: bool = False
+    prompt_char_count: int | None = None
+    response_char_count: int | None = None
+    timeout_seconds: float | None = None
+    num_predict: int | None = None
+    num_ctx: int | None = None
+    ollama_total_duration: int | None = None
+    ollama_load_duration: int | None = None
+    ollama_prompt_eval_count: int | None = None
+    ollama_eval_count: int | None = None
+    failure_type: str | None = None
     diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
