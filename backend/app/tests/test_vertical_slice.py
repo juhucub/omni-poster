@@ -1400,7 +1400,16 @@ def test_xtts_provider_reuses_selected_recipe_runtime_without_audio_cache(monkey
     assert stage_names.count("xtts.inference") == 2
     assert stage_names.count("xtts.wav_save") == 2
     assert stage_names.count("xtts.torch_runtime_config") == 1
+    assert stage_names.count("xtts.runtime_cache_store") == 1
     profile_payload = profiler.to_dict()
+    cache_store_stage = next(stage for stage in profile_payload["stages"] if stage["name"] == "xtts.runtime_cache_store")
+    cache_hit_stage = next(stage for stage in profile_payload["stages"] if stage["name"] == "xtts.runtime_cache_hit")
+    assert cache_store_stage["metadata"]["cache_size_before"] == 0
+    assert cache_store_stage["metadata"]["cache_size_after"] == 1
+    assert cache_store_stage["metadata"]["max_entries"] == 2
+    assert cache_store_stage["metadata"]["evicted_cache_key_prefixes"] == []
+    assert cache_hit_stage["metadata"]["cache_size_before"] == 1
+    assert cache_hit_stage["metadata"]["cache_size_after"] == 1
     assert profile_payload["context"]["xtts_torch_runtime"]["actual_num_threads"] == 3
     assert profile_payload["context"]["xtts_torch_runtime"]["actual_interop_threads"] == 2
     inference_stages = [stage for stage in profile_payload["stages"] if stage["name"] == "xtts.inference"]
@@ -1414,7 +1423,7 @@ def test_xtts_provider_worker_cache_misses_when_reference_identity_changes(monke
     monkeypatch.setattr(settings, "VOICE_MODELS_DIR", str(tree["root"]))
     monkeypatch.setattr(settings, "XTTS_DEVICE", "cpu")
     monkeypatch.setattr(settings, "XTTS_WORKER_CACHE_ENABLED", True)
-    monkeypatch.setattr(settings, "XTTS_WORKER_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(settings, "XTTS_WORKER_CACHE_MAX_ENTRIES", 1)
     counters = {"config_loads": 0, "model_inits": 0, "checkpoint_loads": 0, "latent_calls": 0}
 
     class FakeConfig:
@@ -1485,7 +1494,13 @@ def test_xtts_provider_worker_cache_misses_when_reference_identity_changes(monke
     assert counters["latent_calls"] == 2
     stage_names = [stage["name"] for stage in profiler.to_dict()["stages"]]
     assert stage_names.count("xtts.runtime_cache_miss") == 2
+    assert stage_names.count("xtts.runtime_cache_store") == 2
     assert "xtts.runtime_cache_hit" not in stage_names
+    cache_store_stages = [stage for stage in profiler.to_dict()["stages"] if stage["name"] == "xtts.runtime_cache_store"]
+    assert cache_store_stages[0]["metadata"]["cache_size_after"] == 1
+    assert cache_store_stages[1]["metadata"]["cache_size_before"] == 1
+    assert cache_store_stages[1]["metadata"]["cache_size_after"] == 1
+    assert len(cache_store_stages[1]["metadata"]["evicted_cache_key_prefixes"]) == 1
 
 
 def test_xtts_provider_torch_runtime_config_tolerates_unsupported_setters(monkeypatch):
@@ -1766,6 +1781,60 @@ def test_reference_audio_upload_only_trims_leading_silence(auth_client: TestClie
     silence_filter = command[command.index("-af") + 1]
     assert "start_periods=1" in silence_filter
     assert "stop_periods" not in silence_filter
+
+
+def test_voice_operation_reference_upload_uses_staged_file_without_read_bytes(auth_client: TestClient, monkeypatch):
+    bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
+    bundled_file.write_text(
+        """
+[
+  {
+    "id": "host_calm_v1",
+    "display_name": "Host",
+    "speaker_names": ["Host"],
+    "portrait_filename": "speaker_1.png",
+    "tts_provider": "openvoice",
+    "fallback_provider": "espeak",
+    "voice": "en-us+f3",
+    "rate": 150,
+    "pitch": 42,
+    "word_gap": 1,
+    "amplitude": 140
+  }
+]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    auth_client.get("/character-presets")
+    recorded: dict[str, object] = {}
+
+    monkeypatch.setattr("app.services.voice_profiles._ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("app.services.voice_profiles.subprocess.run", _fake_reference_audio_ffmpeg_run(recorded, seconds=2.0))
+
+    response = auth_client.post(
+        "/voice-profiles/reference-audio",
+        files={"file": ("reference.mp3", b"fake-mp3-content", "audio/mpeg")},
+        data={
+            "voice_profile_id": "vp_host_calm_v1",
+            "authorization_confirmed": "true",
+            "authorization_note": "owned",
+        },
+    )
+
+    def fail_read_bytes(self):
+        raise AssertionError("voice_worker must not materialize staged uploads with Path.read_bytes()")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+    processed = _run_voice_operation(auth_client, response).json()
+
+    assert processed["status"] == "completed"
+    reference_audio = processed["result"]["reference_audio"]
+    assert reference_audio["processed_sha256"]
+    voice_profile = processed["result"]["voice_profile"]
+    metadata = voice_profile["provider_metadata"]
+    assert metadata["last_reference_audio_sha256"] == metadata["processed_reference_audio"][str(reference_audio["id"])]["uploaded_file_sha256"]
+    assert recorded["commands"]
 
 
 def test_reference_audio_upload_processes_long_mp3_into_short_chunks(auth_client: TestClient, monkeypatch, caplog):
@@ -2920,6 +2989,133 @@ def test_openvoice_synthesize_line_passes_selected_profile_target_embedding(monk
     assert result["controls_applied"] == {"speaking_rate": 0.9}
 
 
+def test_openvoice_synthesize_line_emits_render_profile_stages(monkeypatch, tmp_path: Path):
+    provider = OpenVoiceProvider()
+    with provider._cache_lock:
+        provider._melo_model_cache.clear()
+        provider._converter_cache.clear()
+        provider._source_embedding_cache.clear()
+        provider._target_embedding_cache.clear()
+    reference_path = tmp_path / "selected_reference.wav"
+    _write_wav(reference_path, sample=b"\x05\x00")
+    converter_dir = tmp_path / "converter"
+    converter_dir.mkdir(parents=True)
+    base_speaker_path = tmp_path / "base_speakers" / "ses" / "en-default.pth"
+    base_speaker_path.parent.mkdir(parents=True)
+    base_speaker_path.write_bytes(b"source")
+    recorded: dict[str, object] = {}
+
+    class FakeScalar:
+        def __init__(self, value):
+            self.value = value
+
+        def item(self):
+            return self.value
+
+    class FakeArray:
+        def tobytes(self):
+            return b"fake-embedding"
+
+    class FakeEmbedding:
+        shape = [1, 2, 3]
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def contiguous(self):
+            return self
+
+        def numpy(self):
+            return FakeArray()
+
+        def float(self):
+            return self
+
+        def mean(self):
+            return FakeScalar(0.0)
+
+        def std(self):
+            return FakeScalar(0.0)
+
+        def norm(self):
+            return FakeScalar(1.0)
+
+    class FakeModel:
+        hps = type("Hps", (), {"data": type("Data", (), {"spk2id": {"EN-Default": 0}})()})()
+
+        def __init__(self, language, device):
+            recorded["melo_init"] = {"language": language, "device": device}
+
+        def tts_to_file(self, text, speaker_id, output_path, speed):
+            recorded["base_tts"] = {"text": text, "speaker_id": speaker_id, "speed": speed}
+            _write_wav(Path(output_path), seconds=1.0)
+
+    class FakeConverter:
+        def __init__(self, config_path, device):
+            recorded["converter_init"] = {"config_path": config_path, "device": device}
+
+        def load_ckpt(self, checkpoint_path):
+            recorded["converter_checkpoint"] = checkpoint_path
+
+        def convert(self, audio_src_path, src_se, tgt_se, output_path, message):
+            recorded["conversion"] = {"src_se": src_se, "tgt_se": tgt_se, "message": message}
+            _write_wav(Path(output_path), seconds=1.0)
+
+    class FakeSeExtractor:
+        @staticmethod
+        def get_se(path, converter, vad):
+            recorded["target_embedding_path"] = path
+            recorded["vad"] = vad
+            return FakeEmbedding(), None
+
+    class FakeTorch:
+        @staticmethod
+        def load(path, map_location=None):
+            recorded["source_embedding_path"] = path
+            return FakeEmbedding()
+
+        @staticmethod
+        def save(embedding, path):
+            recorded["saved_embedding_path"] = path
+
+    monkeypatch.setattr(settings, "OPENVOICE_CHECKPOINTS_DIR", str(tmp_path))
+    health = {"available": True, "reason": None, "metadata": {"device": "cpu"}}
+    monkeypatch.setattr(provider, "healthcheck", lambda: health)
+    monkeypatch.setattr(provider, "_import_runtime", lambda: (FakeModel, FakeSeExtractor, FakeConverter, FakeTorch))
+    profiler = RenderProfiler(job_id=10, project_id=2, output_kind="preview", rss_reader=lambda: 100)
+
+    result = provider.synthesize_line(
+        text="Profile this OpenVoice line.",
+        voice_profile={
+            "id": "vp_profiled",
+            "display_name": "Profiled",
+            "provider": "openvoice",
+            "language": "en",
+            "reference_audios": [{"storage_path": str(reference_path)}],
+            "controls": {"speaking_rate": 0.9},
+            "style": {"base_speaker": "EN-Default"},
+            "provider_metadata": {},
+        },
+        output_path=tmp_path / "preview.wav",
+        options={"profiler": profiler, "provider_state": {"openvoice": health}},
+    )
+
+    assert result["provider_used"] == "openvoice"
+    stage_names = [stage["name"] for stage in profiler.to_dict()["stages"]]
+    assert "openvoice.provider_health_reused" in stage_names
+    assert "openvoice.runtime_import" in stage_names
+    assert "openvoice.melo_model_init" in stage_names
+    assert "openvoice.base_tts_inference" in stage_names
+    assert "openvoice.converter_load" in stage_names
+    assert "openvoice.target_embedding_extract" in stage_names
+    assert "openvoice.source_embedding_load" in stage_names
+    assert "openvoice.voice_conversion" in stage_names
+    assert recorded["vad"] is False
+
+
 def test_openvoice_synthesize_line_fails_when_source_embedding_missing(monkeypatch, tmp_path: Path):
     provider = OpenVoiceProvider()
     reference_path = tmp_path / "reference.wav"
@@ -3490,7 +3686,7 @@ def test_xtts_render_job_synthesizes_exact_script_segments_to_persisted_wavs(mon
             },
         },
     }
-    captured: dict[str, object] = {"synthesis_calls": []}
+    captured: dict[str, object] = {"synthesis_calls": [], "portrait_resolutions": []}
 
     def fake_synthesize_line(self, *, text, voice_profile, output_path, requested_provider=None, fallback_allowed=True, options=None):
         assert output_path.parent == segment_dir
@@ -3629,7 +3825,11 @@ def test_xtts_render_job_synthesizes_exact_script_segments_to_persisted_wavs(mon
     monkeypatch.setitem(sys.modules, "moviepy", fake_moviepy)
     monkeypatch.setattr(TTSOrchestrator, "synthesize_line", fake_synthesize_line)
     monkeypatch.setattr("app.services.rendering.subprocess.run", fake_run)
-    monkeypatch.setattr(service, "_resolve_character_portrait", lambda speaker, slot_index, work_dir: portrait_path)
+    def fake_resolve_character_portrait(speaker, slot_index, work_dir):
+        captured["portrait_resolutions"].append((speaker, slot_index))
+        return portrait_path
+
+    monkeypatch.setattr(service, "_resolve_character_portrait", fake_resolve_character_portrait)
     monkeypatch.setattr(service, "_build_dialogue_card", lambda segment, work_dir: caption_path)
 
     result = service.render_preview(
@@ -3651,6 +3851,7 @@ def test_xtts_render_job_synthesizes_exact_script_segments_to_persisted_wavs(mon
     assert captured["audio_inputs"] == [path.resolve() for path in segment_paths]
     assert captured["audio_file_clip_path"] == captured["composite_audio_path"]
     assert captured["final_audio_path"] == captured["composite_audio_path"]
+    assert captured["portrait_resolutions"] == [("Stewie", 0), ("Brian", 1)]
 
     tts_result = result["metadata"]["tts_result"]
     assert tts_result["status"] == "completed"

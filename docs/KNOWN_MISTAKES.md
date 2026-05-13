@@ -19,6 +19,7 @@
 - Do not assume the XTTS worker runtime cache is shared across Celery prefork processes; each process can load its own model and consume several GB of RSS.
 - Do not rewrite the renderer or provider path for performance before checking `generation_profile.json` and preserving persisted segment WAV assembly.
 - Do not run heavy Voice Lab reference processing, dataset analysis, model attach, profile preparation, or calibration candidate synthesis inside FastAPI request handlers; queue it to `voice_worker`.
+- Do not reintroduce whole-file `Path.read_bytes()`/in-memory copies for staged Voice Lab reference uploads in worker jobs; stream/copy from the staged file path and let ffmpeg normalize from disk.
 
 ## Assets
 - Character assets must not come from background preset directories.

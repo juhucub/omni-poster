@@ -168,12 +168,23 @@ class ProjectRenderService:
                 background_clip = self._extend_background(background_clip, total_duration)
             clips_to_close.append(background_clip)
 
+            portrait_path_cache: dict[tuple[str, int], Path] = {}
+
+            def resolve_portrait_once(speaker: str, slot_index: int) -> Path:
+                cache_key = (speaker, slot_index)
+                cached = portrait_path_cache.get(cache_key)
+                if cached is not None:
+                    return cached
+                resolved = self._resolve_character_portrait(speaker, slot_index, work_dir)
+                portrait_path_cache[cache_key] = resolved
+                return resolved
+
             cast = self._primary_cast(segments)
             timeline_layers = [background_clip]
 
             with profiler.stage("moviepy.portrait_layers_build", cast_count=len(cast)):
                 for cast_member in cast:
-                    portrait_path = self._resolve_character_portrait(cast_member.speaker, cast_member.slot_index, work_dir)
+                    portrait_path = resolve_portrait_once(cast_member.speaker, cast_member.slot_index)
                     base_clip = (
                         ImageClip(str(portrait_path))
                         .resized(height=base_height)
@@ -189,7 +200,7 @@ class ProjectRenderService:
                 for item in timed_segments:
                     # Segment order is the canonical timeline for active portraits, captions, and audio.
                     segment = item["segment"]
-                    portrait_path = self._resolve_character_portrait(segment.speaker, segment.slot_index, work_dir)
+                    portrait_path = resolve_portrait_once(segment.speaker, segment.slot_index)
                     speaker_slot = min(segment.slot_index, 1)
                     active_clip = (
                         ImageClip(str(portrait_path))

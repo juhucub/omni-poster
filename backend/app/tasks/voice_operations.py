@@ -19,14 +19,14 @@ from app.services.voice_profiles import (
     get_voice_profile,
     get_voice_profile_model,
     runtime_voice_profile_payload,
-    save_reference_audio_content,
+    save_reference_audio_path,
     update_voice_profile_preparation_metadata,
 )
 from app.services.voice_replication import (
     analyze_voice_reference_dataset,
     attach_character_voice_model,
     process_calibration_batch,
-    save_reference_audio_content_for_dataset,
+    save_reference_audio_path_for_dataset,
     serialize_calibration_batch,
 )
 
@@ -147,10 +147,9 @@ def process_voice_operation_job(job_id: int) -> dict[str, Any]:
             if not pending_path.exists():
                 raise HTTPException(status_code=400, detail="Staged reference audio is missing.")
             _set_job_stage(db, job, "validating_reference_audio", 30)
-            content = pending_path.read_bytes()
             if job.operation_type == "reference_audio_upload":
-                voice_profile, reference_audio = save_reference_audio_content(
-                    content=content,
+                voice_profile, reference_audio = save_reference_audio_path(
+                    staged_path=pending_path,
                     filename=str(request.get("original_filename") or pending_path.name),
                     content_type=request.get("content_type"),
                     voice_profile_id=job.voice_profile_id,
@@ -160,8 +159,8 @@ def process_voice_operation_job(job_id: int) -> dict[str, Any]:
                     db=db,
                 )
                 return _complete_job(db, job, {"voice_profile": voice_profile, "reference_audio": reference_audio})
-            voice_profile, dataset, reference_audio = save_reference_audio_content_for_dataset(
-                content=content,
+            voice_profile, dataset, reference_audio = save_reference_audio_path_for_dataset(
+                staged_path=pending_path,
                 filename=str(request.get("original_filename") or pending_path.name),
                 content_type=request.get("content_type"),
                 voice_profile_id=job.voice_profile_id,

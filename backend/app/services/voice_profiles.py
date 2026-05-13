@@ -742,6 +742,85 @@ def _normalize_reference_audio_upload(content: bytes, filename: str, *, voice_pr
     return source_path, output_path, duration_ms
 
 
+def _normalize_reference_audio_staged_file(staged_path: Path, filename: str, *, voice_profile_id: str) -> tuple[Path, Path, int, int, str]:
+    """Persist a staged upload and normalize it without materializing the source file in memory."""
+    ffmpeg_binary = _ffmpeg_binary()
+    if not ffmpeg_binary:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Reference audio normalization is unavailable because ffmpeg is not installed.",
+        )
+    if not staged_path.exists() or not staged_path.is_file():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Staged reference audio is missing.")
+
+    source_suffix = Path(filename).suffix or staged_path.suffix or ".bin"
+    artifact_dir = voice_reference_audio_profile_dir(voice_profile_id) / uuid.uuid4().hex
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    source_path = artifact_dir / f"original{source_suffix}"
+    output_path = artifact_dir / "processed_reference.wav"
+    source_size_bytes, source_sha256 = _copy_with_sha256(staged_path, source_path)
+    source_duration_ms = _audio_duration_ms(source_path)
+    command = [
+        ffmpeg_binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-map_metadata",
+        "-1",
+        "-ac",
+        "1",
+        "-ar",
+        str(REFERENCE_AUDIO_SAMPLE_RATE),
+        "-sample_fmt",
+        "s16",
+        "-af",
+        REFERENCE_AUDIO_NORMALIZATION_FILTER,
+        str(output_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        output_path.unlink(missing_ok=True)
+        source_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Reference audio could not be decoded or normalized: {exc.stderr.strip() or 'unknown ffmpeg error'}",
+        ) from exc
+
+    duration_ms = _audio_duration_ms(output_path)
+    if duration_ms is None:
+        output_path.unlink(missing_ok=True)
+        source_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reference audio could not be decoded after normalization")
+    if duration_ms < REFERENCE_AUDIO_MIN_DURATION_MS:
+        output_path.unlink(missing_ok=True)
+        source_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Reference audio must contain at least {REFERENCE_AUDIO_MIN_DURATION_MS / 1000:.1f} seconds of usable speech after trimming silence.",
+        )
+    logger.info(
+        "voice.reference_audio.normalized metadata=%s",
+        {
+            "reference_audio_path": str(source_path),
+            "normalized_reference_path": str(output_path),
+            "reference_audio_sha256": source_sha256,
+            "normalized_reference_sha256": _sha256_path(output_path),
+            "duration_before_seconds": round(source_duration_ms / 1000, 3) if source_duration_ms is not None else None,
+            "normalized_audio_duration_seconds": round(duration_ms / 1000, 3),
+            "input_file_size_bytes": source_size_bytes,
+            "normalized_file_size_bytes": output_path.stat().st_size,
+            "ffmpeg_filter": REFERENCE_AUDIO_NORMALIZATION_FILTER,
+            "source": "staged_file",
+        },
+    )
+    return source_path, output_path, duration_ms, source_size_bytes, source_sha256
+
+
 def _parse_silencedetect_windows(stderr: str, duration_seconds: float) -> list[dict[str, float]]:
     silence_events: list[tuple[str, float]] = []
     for line in stderr.splitlines():
@@ -1343,6 +1422,18 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _copy_with_sha256(source_path: Path, destination_path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size_bytes = 0
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with source_path.open("rb") as source, destination_path.open("wb") as destination:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            size_bytes += len(chunk)
+            digest.update(chunk)
+            destination.write(chunk)
+    return size_bytes, digest.hexdigest()
+
+
 def _audio_duration_ms(path: Path) -> int | None:
     try:
         with wave.open(str(path), "rb") as handle:
@@ -1377,42 +1468,24 @@ def save_reference_audio_upload(
     )
 
 
-def save_reference_audio_content(
+def _persist_normalized_reference_audio(
     *,
-    content: bytes,
     filename: str,
-    content_type: str | None,
     voice_profile_id: str,
     current_user_id: int,
-    authorization_confirmed: bool,
     authorization_note: str | None,
     db: Session,
+    original_path: Path,
+    destination: Path,
+    duration_ms: int,
+    uploaded_file_size_bytes: int,
+    uploaded_file_sha256: str,
     reference_dataset_id: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    ensure_seeded_voice_presets(db)
-    if not authorization_confirmed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You must confirm that the reference audio is original or explicitly authorized.",
-        )
     profile = get_voice_profile_model(voice_profile_id, db)
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice profile not found")
     ensure_voice_profile_editable(profile, current_user_id)
-    allowed_types = {item.strip() for item in settings.VOICE_LAB_ALLOWED_AUDIO_TYPES.split(",") if item.strip()}
-    if content_type not in allowed_types:
-        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported reference audio type")
-    if not filename:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
-
-    if len(content) > settings.VOICE_LAB_MAX_REFERENCE_AUDIO_SIZE_BYTES:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Reference audio exceeds max size")
-    sha256 = _sha256_bytes(content)
-    original_path, destination, duration_ms = _normalize_reference_audio_upload(
-        content,
-        filename,
-        voice_profile_id=voice_profile_id,
-    )
     speech_windows = _detect_reference_speech_windows(destination, duration_ms)
     try:
         validation = _validate_reference_audio(destination, duration_ms=duration_ms, speech_windows=speech_windows)
@@ -1430,7 +1503,7 @@ def save_reference_audio_content(
         processed_storage_path=str(destination),
         mime_type="audio/wav",
         duration_ms=duration_ms,
-        sha256=sha256,
+        sha256=uploaded_file_sha256,
         processed_sha256=processed_sha256,
         validation_json=validation,
         validation_status=str(validation.get("status") or "passed"),
@@ -1459,8 +1532,8 @@ def save_reference_audio_content(
         "original_reference_url": f"/voice-profiles/{voice_profile_id}/reference-audio/{reference.id}/original",
         "processed_reference_path": str(destination),
         "processed_reference_url": f"/voice-profiles/{voice_profile_id}/reference-audio/{reference.id}/processed",
-        "uploaded_file_size_bytes": len(content),
-        "uploaded_file_sha256": sha256,
+        "uploaded_file_size_bytes": uploaded_file_size_bytes,
+        "uploaded_file_sha256": uploaded_file_sha256,
         "processed_file_sha256": processed_sha256,
     }
     next_metadata.update(
@@ -1476,7 +1549,7 @@ def save_reference_audio_content(
             "last_reference_processed_path": str(destination),
             "last_reference_original_url": f"/voice-profiles/{voice_profile_id}/reference-audio/{reference.id}/original",
             "last_reference_processed_url": f"/voice-profiles/{voice_profile_id}/reference-audio/{reference.id}/processed",
-            "last_reference_audio_sha256": sha256,
+            "last_reference_audio_sha256": uploaded_file_sha256,
             "last_reference_normalized_sha256": processed_reference["normalized_reference_sha256"],
             "last_reference_processed_sha256": processed_sha256,
             "last_reference_duration_seconds": round(duration_ms / 1000, 3),
@@ -1492,8 +1565,8 @@ def save_reference_audio_content(
             "original_uploaded_filename": filename,
             "original_reference_path": str(original_path),
             "stored_reference_path": str(destination),
-            "file_size_bytes": len(content),
-            "reference_audio_sha256": sha256,
+            "file_size_bytes": uploaded_file_size_bytes,
+            "reference_audio_sha256": uploaded_file_sha256,
             "normalized_reference_sha256": processed_reference["normalized_reference_sha256"],
             "validation_status": validation["status"],
             "validation_warnings": [item.get("code") for item in validation.get("warnings", [])],
@@ -1506,6 +1579,119 @@ def save_reference_audio_content(
     db.refresh(reference)
     profile = get_voice_profile_model(voice_profile_id, db)
     return serialize_voice_profile(profile), _serialize_reference_audio(reference)
+
+
+def _validate_reference_audio_request(
+    *,
+    filename: str,
+    content_type: str | None,
+    voice_profile_id: str,
+    current_user_id: int,
+    authorization_confirmed: bool,
+    db: Session,
+) -> None:
+    ensure_seeded_voice_presets(db)
+    if not authorization_confirmed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You must confirm that the reference audio is original or explicitly authorized.",
+        )
+    profile = get_voice_profile_model(voice_profile_id, db)
+    if not profile:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice profile not found")
+    ensure_voice_profile_editable(profile, current_user_id)
+    allowed_types = {item.strip() for item in settings.VOICE_LAB_ALLOWED_AUDIO_TYPES.split(",") if item.strip()}
+    if content_type not in allowed_types:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported reference audio type")
+    if not filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
+
+
+def save_reference_audio_content(
+    *,
+    content: bytes,
+    filename: str,
+    content_type: str | None,
+    voice_profile_id: str,
+    current_user_id: int,
+    authorization_confirmed: bool,
+    authorization_note: str | None,
+    db: Session,
+    reference_dataset_id: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    _validate_reference_audio_request(
+        filename=filename,
+        content_type=content_type,
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user_id,
+        authorization_confirmed=authorization_confirmed,
+        db=db,
+    )
+    if len(content) > settings.VOICE_LAB_MAX_REFERENCE_AUDIO_SIZE_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Reference audio exceeds max size")
+    sha256 = _sha256_bytes(content)
+    original_path, destination, duration_ms = _normalize_reference_audio_upload(
+        content,
+        filename,
+        voice_profile_id=voice_profile_id,
+    )
+    return _persist_normalized_reference_audio(
+        filename=filename,
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user_id,
+        authorization_note=authorization_note,
+        db=db,
+        original_path=original_path,
+        destination=destination,
+        duration_ms=duration_ms,
+        uploaded_file_size_bytes=len(content),
+        uploaded_file_sha256=sha256,
+        reference_dataset_id=reference_dataset_id,
+    )
+
+
+def save_reference_audio_path(
+    *,
+    staged_path: Path,
+    filename: str,
+    content_type: str | None,
+    voice_profile_id: str,
+    current_user_id: int,
+    authorization_confirmed: bool,
+    authorization_note: str | None,
+    db: Session,
+    reference_dataset_id: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    _validate_reference_audio_request(
+        filename=filename,
+        content_type=content_type,
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user_id,
+        authorization_confirmed=authorization_confirmed,
+        db=db,
+    )
+    if not staged_path.exists() or not staged_path.is_file():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Staged reference audio is missing.")
+    if staged_path.stat().st_size > settings.VOICE_LAB_MAX_REFERENCE_AUDIO_SIZE_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Reference audio exceeds max size")
+    original_path, destination, duration_ms, source_size_bytes, source_sha256 = _normalize_reference_audio_staged_file(
+        staged_path,
+        filename,
+        voice_profile_id=voice_profile_id,
+    )
+    return _persist_normalized_reference_audio(
+        filename=filename,
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user_id,
+        authorization_note=authorization_note,
+        db=db,
+        original_path=original_path,
+        destination=destination,
+        duration_ms=duration_ms,
+        uploaded_file_size_bytes=source_size_bytes,
+        uploaded_file_sha256=source_sha256,
+        reference_dataset_id=reference_dataset_id,
+    )
 
 
 def resolve_voice_reference_audio_artifact(

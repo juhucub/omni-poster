@@ -21,6 +21,7 @@ from app.services.voice_profiles import (
     get_voice_profile,
     get_voice_profile_model,
     save_reference_audio_content,
+    save_reference_audio_path,
     save_reference_audio_upload,
     update_voice_profile_calibration_recipe,
     voice_lab_preview_dir,
@@ -575,6 +576,36 @@ def save_reference_audio_content_for_dataset(
     dataset = _get_dataset(reference_dataset_id, voice_profile_id, db)
     profile_payload, reference_audio = save_reference_audio_content(
         content=content,
+        filename=filename,
+        content_type=content_type,
+        voice_profile_id=voice_profile_id,
+        current_user_id=current_user_id,
+        authorization_confirmed=authorization_confirmed,
+        authorization_note=authorization_note,
+        db=db,
+        reference_dataset_id=dataset.id,
+    )
+    dataset = _get_dataset(reference_dataset_id, voice_profile_id, db)
+    update_reference_dataset_metrics(dataset, db=db)
+    profile_payload = get_voice_profile(voice_profile_id, db)
+    return profile_payload, serialize_reference_dataset(dataset), reference_audio
+
+
+def save_reference_audio_path_for_dataset(
+    *,
+    staged_path: Path,
+    filename: str,
+    content_type: str | None,
+    voice_profile_id: str,
+    reference_dataset_id: int,
+    current_user_id: int,
+    authorization_confirmed: bool,
+    authorization_note: str | None,
+    db: Session,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    dataset = _get_dataset(reference_dataset_id, voice_profile_id, db)
+    profile_payload, reference_audio = save_reference_audio_path(
+        staged_path=staged_path,
         filename=filename,
         content_type=content_type,
         voice_profile_id=voice_profile_id,

@@ -173,6 +173,15 @@ class BaseTTSProvider:
     def is_available(self) -> bool:
         return bool(self.healthcheck()["available"])
 
+    def _profile_stage(self, profiler: Any | None, name: str, **metadata: Any):
+        if profiler is not None and hasattr(profiler, "stage"):
+            return profiler.stage(name, **metadata)
+        return nullcontext()
+
+    def _record_profile_stage(self, profiler: Any | None, name: str, **metadata: Any) -> None:
+        with self._profile_stage(profiler, name, **metadata):
+            pass
+
     def healthcheck(self) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -461,44 +470,66 @@ class OpenVoiceProvider(BaseTTSProvider):
     def _reference_audio_hash(self, reference_paths: list[Path]) -> str:
         return reference_audio_content_hash_from_paths(reference_paths)
 
-    def _get_melo_model(self, language_code: str, device: str, tts_cls: Any) -> Any:
+    def _get_melo_model(self, language_code: str, device: str, tts_cls: Any, profiler: Any | None = None) -> Any:
         cache_key = (language_code, device)
         with self._cache_lock:
             model = self._melo_model_cache.get(cache_key)
             if model is not None:
                 self._log_memory_stage("melo_model_cache_hit", language=language_code, device=device)
+                self._record_profile_stage(
+                    profiler,
+                    "openvoice.melo_model_cache_hit",
+                    language=language_code,
+                    device=device,
+                    cache_key=f"{language_code}:{device}",
+                )
                 return model
         self._log_memory_stage("melo_model_init_begin", language=language_code, device=device)
-        model = tts_cls(language=language_code, device=device)
+        with self._profile_stage(profiler, "openvoice.melo_model_init", language=language_code, device=device):
+            model = tts_cls(language=language_code, device=device)
         with self._cache_lock:
             self._melo_model_cache[cache_key] = model
         self._log_memory_stage("melo_model_init_end", language=language_code, device=device)
         return model
 
-    def _get_converter(self, converter_dir: Path, device: str, converter_cls: Any) -> Any:
+    def _get_converter(self, converter_dir: Path, device: str, converter_cls: Any, profiler: Any | None = None) -> Any:
         cache_key = (str(converter_dir.resolve()), device)
         with self._cache_lock:
             converter = self._converter_cache.get(cache_key)
             if converter is not None:
                 self._log_memory_stage("converter_cache_hit", device=device)
+                self._record_profile_stage(
+                    profiler,
+                    "openvoice.converter_cache_hit",
+                    converter_dir=converter_dir,
+                    device=device,
+                )
                 return converter
         self._log_memory_stage("converter_init_begin", device=device)
-        converter = converter_cls(str(converter_dir / "config.json"), device=device)
-        converter.load_ckpt(str(converter_dir / "checkpoint.pth"))
+        with self._profile_stage(profiler, "openvoice.converter_load", converter_dir=converter_dir, device=device):
+            converter = converter_cls(str(converter_dir / "config.json"), device=device)
+            converter.load_ckpt(str(converter_dir / "checkpoint.pth"))
         with self._cache_lock:
             self._converter_cache[cache_key] = converter
         self._log_memory_stage("converter_init_end", device=device)
         return converter
 
-    def _get_source_embedding(self, base_speaker_path: Path, device: str, torch_module: Any) -> Any:
+    def _get_source_embedding(self, base_speaker_path: Path, device: str, torch_module: Any, profiler: Any | None = None) -> Any:
         cache_key = (str(base_speaker_path.resolve()), device)
         with self._cache_lock:
             source_embedding = self._source_embedding_cache.get(cache_key)
             if source_embedding is not None:
                 self._log_memory_stage("source_embedding_cache_hit", device=device)
+                self._record_profile_stage(
+                    profiler,
+                    "openvoice.source_embedding_cache_hit",
+                    device=device,
+                    base_speaker_path=base_speaker_path,
+                )
                 return source_embedding
         self._log_memory_stage("source_embedding_load_begin", device=device)
-        source_embedding = torch_module.load(str(base_speaker_path), map_location=device)
+        with self._profile_stage(profiler, "openvoice.source_embedding_load", device=device, base_speaker_path=base_speaker_path):
+            source_embedding = torch_module.load(str(base_speaker_path), map_location=device)
         with self._cache_lock:
             self._source_embedding_cache[cache_key] = source_embedding
         self._log_memory_stage("source_embedding_load_end", device=device)
@@ -598,12 +629,25 @@ class OpenVoiceProvider(BaseTTSProvider):
             self._silero_vad_ready_devices.add(device)
         self._log_memory_stage("silero_vad_prewarm_end", device=device)
 
-    def _extract_reference_embedding(self, reference_path: Path, converter: Any, se_extractor: Any, device: str) -> Any:
+    def _extract_reference_embedding(
+        self,
+        reference_path: Path,
+        converter: Any,
+        se_extractor: Any,
+        device: str,
+        profiler: Any | None = None,
+    ) -> Any:
         cache_key = self._reference_audio_cache_key([reference_path], device)
         with self._cache_lock:
             target_embedding = self._target_embedding_cache.get(cache_key)
             if target_embedding is not None:
                 self._log_memory_stage("target_embedding_cache_hit", device=device, reference_audio_path=str(reference_path))
+                self._record_profile_stage(
+                    profiler,
+                    "openvoice.target_embedding_cache_hit",
+                    device=device,
+                    reference_audio_path=str(reference_path),
+                )
                 return target_embedding
         reference_hash = self._reference_audio_hash([reference_path])
         self._log_memory_stage(
@@ -614,7 +658,14 @@ class OpenVoiceProvider(BaseTTSProvider):
             reference_audio_size_bytes=reference_path.stat().st_size,
         )
         try:
-            target_embedding, _ = se_extractor.get_se(str(reference_path), converter, vad=False)
+            with self._profile_stage(
+                profiler,
+                "openvoice.target_embedding_extract",
+                device=device,
+                reference_audio_path=str(reference_path),
+                reference_audio_sha256=reference_hash,
+            ):
+                target_embedding, _ = se_extractor.get_se(str(reference_path), converter, vad=False)
         except Exception as exc:
             raise TTSProviderError(
                 code="reference_embedding_extraction_failed",
@@ -633,7 +684,7 @@ class OpenVoiceProvider(BaseTTSProvider):
         )
         return target_embedding
 
-    def _load_cached_target_embedding(self, artifact_path: Path, device: str, torch_module: Any) -> Any | None:
+    def _load_cached_target_embedding(self, artifact_path: Path, device: str, torch_module: Any, profiler: Any | None = None) -> Any | None:
         if not artifact_path.exists():
             return None
         cache_key = self._artifact_cache_key(artifact_path, device)
@@ -641,9 +692,21 @@ class OpenVoiceProvider(BaseTTSProvider):
             target_embedding = self._target_embedding_cache.get(cache_key)
             if target_embedding is not None:
                 self._log_memory_stage("target_embedding_artifact_cache_hit", device=device)
+                self._record_profile_stage(
+                    profiler,
+                    "openvoice.target_embedding_artifact_cache_hit",
+                    device=device,
+                    target_embedding_path=str(artifact_path),
+                )
                 return target_embedding
         self._log_memory_stage("target_embedding_artifact_load_begin", device=device, target_embedding_path=str(artifact_path))
-        target_embedding = torch_module.load(str(artifact_path), map_location=device)
+        with self._profile_stage(
+            profiler,
+            "openvoice.target_embedding_artifact_load",
+            device=device,
+            target_embedding_path=str(artifact_path),
+        ):
+            target_embedding = torch_module.load(str(artifact_path), map_location=device)
         with self._cache_lock:
             self._target_embedding_cache[cache_key] = target_embedding
         self._log_memory_stage(
@@ -671,6 +734,7 @@ class OpenVoiceProvider(BaseTTSProvider):
         device: str,
         torch_module: Any,
         artifact_path: Path | None = None,
+        profiler: Any | None = None,
     ) -> Any:
         cache_key = self._reference_audio_cache_key(reference_paths, device)
         reference_hash = self._reference_audio_hash(reference_paths)
@@ -684,9 +748,19 @@ class OpenVoiceProvider(BaseTTSProvider):
                     reference_audio_sha256=reference_hash,
                     target_embedding_hash=self._embedding_fingerprint(target_embedding),
                 )
+                self._record_profile_stage(
+                    profiler,
+                    "openvoice.target_embedding_multi_cache_hit",
+                    device=device,
+                    references=len(reference_paths),
+                    reference_audio_sha256=reference_hash,
+                )
                 return target_embedding
         if artifact_path:
-            target_embedding = self._load_cached_target_embedding(artifact_path, device, torch_module)
+            if profiler is None:
+                target_embedding = self._load_cached_target_embedding(artifact_path, device, torch_module)
+            else:
+                target_embedding = self._load_cached_target_embedding(artifact_path, device, torch_module, profiler)
             if target_embedding is not None:
                 # Reuse durable OpenVoice embeddings, but still synthesize fresh segment audio per render line.
                 with self._cache_lock:
@@ -701,7 +775,7 @@ class OpenVoiceProvider(BaseTTSProvider):
                 )
                 return target_embedding
         embeddings = [
-            self._extract_reference_embedding(reference_path, converter, se_extractor, device)
+            self._extract_reference_embedding(reference_path, converter, se_extractor, device, profiler)
             for reference_path in reference_paths
         ]
         target_embedding = embeddings[0] if len(embeddings) == 1 else torch_module.stack(embeddings).mean(dim=0)
@@ -795,7 +869,20 @@ class OpenVoiceProvider(BaseTTSProvider):
         output_path: Path,
         options: dict[str, Any],
     ) -> dict[str, Any]:
-        health = self.healthcheck()
+        options = dict(options or {})
+        profiler = options.get("profiler")
+        provider_state = dict(options.get("provider_state") or {})
+        if self.provider_name in provider_state:
+            health = dict(provider_state.get(self.provider_name) or {})
+            self._record_profile_stage(
+                profiler,
+                "openvoice.provider_health_reused",
+                available=health.get("available"),
+                reason=health.get("reason"),
+            )
+        else:
+            with self._profile_stage(profiler, "openvoice.provider_health_check"):
+                health = self.healthcheck()
         if not health["available"]:
             reason = health.get("reason") or "not_available"
             raise TTSProviderError(
@@ -814,7 +901,8 @@ class OpenVoiceProvider(BaseTTSProvider):
             )
 
         try:
-            TTS, se_extractor, ToneColorConverter, torch = self._import_runtime()
+            with self._profile_stage(profiler, "openvoice.runtime_import"):
+                TTS, se_extractor, ToneColorConverter, torch = self._import_runtime()
         except Exception as exc:
             raise TTSProviderError(
                 code="openvoice_package_missing",
@@ -849,7 +937,11 @@ class OpenVoiceProvider(BaseTTSProvider):
         temp_src_path = output_path.with_name(f"{output_path.stem}_src.wav")
         stage_callback = options.get("stage_callback")
         try:
-            model = self._get_melo_model(language_code, device, TTS)
+            model = (
+                self._get_melo_model(language_code, device, TTS)
+                if profiler is None
+                else self._get_melo_model(language_code, device, TTS, profiler)
+            )
             speaker_key, speaker_id = self._melo_speaker_id(model, language_code, voice_profile)
             controls = dict(voice_profile.get("controls") or {})
             unsupported_controls = {
@@ -868,15 +960,47 @@ class OpenVoiceProvider(BaseTTSProvider):
                 )
             speed = float(controls.get("speaking_rate") or 1.0)
             self._log_memory_stage("tts_infer_begin", language=language_code, device=device)
-            model.tts_to_file(text, speaker_id, str(temp_src_path), speed=speed)
+            with self._profile_stage(
+                profiler,
+                "openvoice.base_tts_inference",
+                language=language_code,
+                device=device,
+                speaker_key=speaker_key,
+                speed=speed,
+                text_length=len(text),
+            ):
+                model.tts_to_file(text, speaker_id, str(temp_src_path), speed=speed)
             self._log_memory_stage("tts_infer_end", language=language_code, device=device)
 
-            converter = self._get_converter(converter_dir, device, ToneColorConverter)
+            converter = (
+                self._get_converter(converter_dir, device, ToneColorConverter)
+                if profiler is None
+                else self._get_converter(converter_dir, device, ToneColorConverter, profiler)
+            )
             reference_hash = self._reference_audio_hash(reference_paths)
             artifact_path = self._embedding_artifact_path(voice_profile, reference_hash)
             if callable(stage_callback):
                 stage_callback("extracting_reference", 55)
-            target_se = self._get_target_embedding(reference_paths, converter, se_extractor, device, torch, artifact_path=artifact_path)
+            target_se = (
+                self._get_target_embedding(
+                    reference_paths,
+                    converter,
+                    se_extractor,
+                    device,
+                    torch,
+                    artifact_path=artifact_path,
+                )
+                if profiler is None
+                else self._get_target_embedding(
+                    reference_paths,
+                    converter,
+                    se_extractor,
+                    device,
+                    torch,
+                    artifact_path=artifact_path,
+                    profiler=profiler,
+                )
+            )
             voice_profile["embedding_path"] = str(artifact_path)
             source_speaker_key = speaker_key.lower().replace("_", "-")
             source_speaker_path = checkpoints_dir / "base_speakers" / "ses" / f"{source_speaker_key}.pth"
@@ -887,7 +1011,11 @@ class OpenVoiceProvider(BaseTTSProvider):
                     provider_state={self.provider_name: self.healthcheck()},
                     suggested_action="Install the OpenVoice base speaker embeddings before generating cloned previews.",
                 )
-            source_se = self._get_source_embedding(source_speaker_path, device, torch)
+            source_se = (
+                self._get_source_embedding(source_speaker_path, device, torch)
+                if profiler is None
+                else self._get_source_embedding(source_speaker_path, device, torch, profiler)
+            )
             if callable(stage_callback):
                 stage_callback("converting", 70)
             target_embedding_hash = self._embedding_fingerprint(target_se)
@@ -930,13 +1058,20 @@ class OpenVoiceProvider(BaseTTSProvider):
                 },
             )
             self._log_memory_stage("voice_conversion_begin", device=device, target_embedding_hash=target_embedding_hash)
-            converter.convert(
-                audio_src_path=str(temp_src_path),
-                src_se=source_se,
-                tgt_se=target_se,
-                output_path=str(output_path),
-                message="@OmniPoster",
-            )
+            with self._profile_stage(
+                profiler,
+                "openvoice.voice_conversion",
+                device=device,
+                target_embedding_hash=target_embedding_hash,
+                output_path=output_path,
+            ):
+                converter.convert(
+                    audio_src_path=str(temp_src_path),
+                    src_se=source_se,
+                    tgt_se=target_se,
+                    output_path=str(output_path),
+                    message="@OmniPoster",
+                )
             self._log_memory_stage("voice_conversion_end", device=device)
         except TTSProviderError:
             raise
@@ -1179,23 +1314,32 @@ class XTTSProvider(BaseTTSProvider):
         cache_key = self._selected_recipe_cache_key(selected_recipe, device)
         # The worker cache holds XTTS model/conditioning state only; rendered WAVs remain per-segment artifacts.
         cache_enabled = bool(settings.XTTS_WORKER_CACHE_ENABLED and int(settings.XTTS_WORKER_CACHE_MAX_ENTRIES or 0) > 0)
+        max_entries = max(1, int(settings.XTTS_WORKER_CACHE_MAX_ENTRIES or 1)) if cache_enabled else 0
+        cache_size_before = 0
         if cache_enabled:
             with self._runtime_cache_lock:
+                cache_size_before = len(self._runtime_cache)
                 cached = self._runtime_cache.get(cache_key)
                 if cached is not None:
                     self._runtime_cache.move_to_end(cache_key)
+                    cache_size_after = len(self._runtime_cache)
                     self._record_xtts_stage(
                         profiler,
                         "xtts.runtime_cache_hit",
                         cache_key=cache_key,
                         character=selected_recipe.character,
                         device=device,
+                        cache_enabled=cache_enabled,
+                        cache_size_before=cache_size_before,
+                        cache_size_after=cache_size_after,
+                        max_entries=max_entries,
                     )
                     self._record_xtts_stage(
                         profiler,
                         "xtts.conditioning_latents_cache_hit",
                         cache_key=cache_key,
                         reference_count=len(selected_recipe.reference_wavs),
+                        cache_size_after=cache_size_after,
                     )
                     return cached
 
@@ -1206,6 +1350,8 @@ class XTTSProvider(BaseTTSProvider):
             character=selected_recipe.character,
             device=device,
             cache_enabled=cache_enabled,
+            cache_size_before=cache_size_before,
+            max_entries=max_entries,
         )
         if profiler is not None and hasattr(profiler, "stage"):
             with profiler.stage("xtts.config_load", config_path=selected_recipe.config_path):
@@ -1246,11 +1392,34 @@ class XTTSProvider(BaseTTSProvider):
                 existing = self._runtime_cache.get(cache_key)
                 if existing is not None:
                     self._runtime_cache.move_to_end(cache_key)
+                    self._record_xtts_stage(
+                        profiler,
+                        "xtts.runtime_cache_race_hit",
+                        cache_key=cache_key,
+                        character=selected_recipe.character,
+                        device=device,
+                        cache_enabled=cache_enabled,
+                        cache_size_after=len(self._runtime_cache),
+                        max_entries=max_entries,
+                    )
                     return existing
                 self._runtime_cache[cache_key] = runtime
-                max_entries = max(1, int(settings.XTTS_WORKER_CACHE_MAX_ENTRIES or 1))
+                evicted_key_prefixes: list[str] = []
                 while len(self._runtime_cache) > max_entries:
-                    self._runtime_cache.popitem(last=False)
+                    evicted_key, _evicted_runtime = self._runtime_cache.popitem(last=False)
+                    evicted_key_prefixes.append(evicted_key[:12])
+                self._record_xtts_stage(
+                    profiler,
+                    "xtts.runtime_cache_store",
+                    cache_key=cache_key,
+                    character=selected_recipe.character,
+                    device=device,
+                    cache_enabled=cache_enabled,
+                    cache_size_before=cache_size_before,
+                    cache_size_after=len(self._runtime_cache),
+                    max_entries=max_entries,
+                    evicted_cache_key_prefixes=evicted_key_prefixes,
+                )
         return runtime
 
     def healthcheck(self) -> dict[str, Any]:
