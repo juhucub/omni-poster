@@ -66,7 +66,7 @@ def _background_asset_for_project(project: Project) -> Asset | None:
         selected = next((asset for asset in project.assets if asset.id == project.background_asset_id), None)
         if selected:
             return selected
-    background_assets = [asset for asset in project.assets if asset.kind in {"background_video", "background_preset"}]
+    background_assets = [asset for asset in project.assets if asset.kind in {"background_video", "background_preset", "background_image"}]
     background_assets.sort(key=lambda asset: asset.created_at, reverse=True)
     return background_assets[0] if background_assets else None
 
@@ -234,6 +234,12 @@ def to_output_video_summary(output: OutputVideo) -> OutputVideoSummary:
 
 
 def to_generation_summary(job: GenerationJob) -> GenerationJobSummary:
+    tts_result = job.tts_result_json or {}
+    assembly = dict(tts_result.get("assembly") or {})
+    render_profile = dict(tts_result.get("render_profile") or {})
+    render_plan = dict(tts_result.get("render_plan") or {})
+    cache_report = dict(tts_result.get("cache_report") or {})
+    debug_extraction = dict(assembly.get("debug_audio_extraction") or {})
     return GenerationJobSummary(
         id=job.id,
         project_id=job.project_id,
@@ -245,8 +251,22 @@ def to_generation_summary(job: GenerationJob) -> GenerationJobSummary:
         error_message=job.error_message,
         voice_manifest=job.voice_manifest_json or {},
         preview_settings=ProjectPreviewSettings(**(job.render_settings_json or {})),
-        tts_result=job.tts_result_json or {},
+        tts_result=tts_result,
         provider_state=job.provider_state_json or {},
+        current_phase=tts_result.get("current_phase") or job.status,
+        cache_statistics=dict(cache_report.get("summary") or {}),
+        timing_breakdown=dict(render_profile.get("summary") or {}),
+        artifact_urls={
+            "render_plan": render_plan.get("artifact_url"),
+            "cache_report": cache_report.get("artifact_url"),
+            "render_profile": render_profile.get("artifact_url"),
+            "composite_audio": assembly.get("composite_audio_artifact_url"),
+            "final_video_audio": assembly.get("final_video_audio_artifact_url"),
+        },
+        debug_artifacts={
+            "final_video_audio": assembly.get("final_video_audio_artifact_url"),
+            "debug_audio_extraction": debug_extraction,
+        },
         output_video_id=job.output_video.id if job.output_video else None,
         started_at=job.started_at,
         finished_at=job.finished_at,

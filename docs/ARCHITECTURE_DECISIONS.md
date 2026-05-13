@@ -1,6 +1,6 @@
 # Omniposter Architecture Decisions
 
-Last updated: 2026-05-06
+Last updated: 2026-05-13
 
 This file records architectural decisions that future Codex agents should not reverse casually.
 
@@ -313,3 +313,38 @@ Character voice replication is a generic Voice Lab pipeline:
 - TTS provider registry and render metadata.
 - Voice Lab calibration UI.
 - Generated storage and `.gitignore`.
+
+## ADR-010: Use FFmpeg-First Render Planning With Strict Content-Addressed Cache
+
+Status: Accepted
+Date: 2026-05-13
+
+### Context
+
+The MoviePy-heavy final render path scaled poorly because every dialogue line created active portrait and caption clips. The renderer also needed repeatable artifact reuse without losing the existing persisted segment-WAV audit contract.
+
+### Decision
+
+Video renders use a render plan plus a strict content-addressed render cache for TTS segment WAVs, normalized WAVs, composite audio, normalized backgrounds, overlay layers, and final videos.
+
+The normal render path is FFmpeg-first:
+
+- Segment audio remains persisted under job-scoped generated artifact storage.
+- Cached TTS audio may be reused for XTTS/OpenVoice only when all content-affecting voice, text, recipe, reference, provider, and settings inputs match.
+- Segment WAVs are normalized to a canonical PCM format before composition.
+- Final MP4 assembly uses normalized background, cached overlay layers, and dialogue composite WAV through FFmpeg.
+- Final-video audio extraction runs only for debug renders.
+
+### Consequences
+
+- Render jobs expose `render_plan.json`, `cache_report.json`, `generation_profile.json`, normalized segment WAVs, composite WAV, and final MP4 metadata.
+- Future renderer changes must update cache schema/version inputs when output-affecting behavior changes.
+- Voice Lab preview/shared audio caches remain separate and must not be used as loose substitutes for render segment artifacts.
+
+### Files/Areas Affected
+
+- `backend/app/services/rendering.py`
+- `backend/app/services/render_cache.py`
+- `backend/app/services/render_planning.py`
+- Generation job API/UI metadata
+- Render regression tests

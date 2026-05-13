@@ -85,6 +85,7 @@ export interface BackgroundPreset {
   description: string;
   filename: string;
   content_url: string;
+  mime_type: string;
 }
 
 export interface CharacterPreset {
@@ -320,6 +321,11 @@ export interface GenerationJob {
   preview_settings: ProjectPreviewSettings;
   tts_result: Record<string, unknown>;
   provider_state: Record<string, unknown>;
+  current_phase: string | null;
+  cache_statistics: Record<string, unknown>;
+  timing_breakdown: Record<string, unknown>;
+  artifact_urls: Record<string, unknown>;
+  debug_artifacts: Record<string, unknown>;
   output_video_id: number | null;
   started_at: string | null;
   finished_at: string | null;

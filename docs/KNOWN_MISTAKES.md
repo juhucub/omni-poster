@@ -10,8 +10,9 @@
 - Do not silently replace selected OpenVoice/XTTS profiles.
 - Do not use hidden temp segment audio.
 - Final MP4 must use persisted segment WAVs.
-- Do not satisfy XTTS render jobs from shared cached audio.
-- XTTS worker runtime reuse may cache loaded models/config/checkpoints and conditioning latents, but must never cache or reuse rendered segment audio.
+- Do not satisfy XTTS/OpenVoice render jobs from Voice Lab preview audio or loose shared audio caches.
+- XTTS/OpenVoice rendered segment audio may be reused only through the strict content-addressed render cache when all text, voice profile, provider, reference, recipe, and render settings inputs match.
+- XTTS worker runtime reuse may cache loaded models/config/checkpoints and conditioning latents, but must not bypass the render cache provenance rules for segment WAV reuse.
 - Preview-only XTTS inference shortcuts must stay opt-in and must not silently change export voice quality.
 - Verify provider availability in Docker.
 - Do not "optimize" render jobs by reusing Voice Lab preview audio or shared preview caches for final render segments.

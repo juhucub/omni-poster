@@ -38,6 +38,7 @@ def get_background_presets():
             description=preset["description"],
             filename=preset["filename"],
             content_url=f"/background-presets/{preset['key']}/content",
+            mime_type=preset.get("mime_type") or "video/mp4",
         )
         for preset in list_background_presets()
     ]
@@ -48,7 +49,7 @@ def get_background_preset_content(preset_key: str):
     preset = resolve_background_preset(preset_key)
     return _video_response(
         preset["path"],
-        media_type="video/mp4",
+        media_type=preset.get("mime_type") or "video/mp4",
         filename=preset["filename"],
     )
 
@@ -66,7 +67,7 @@ async def upload_background_asset(
     asset = Asset(
         user_id=current_user.id,
         project_id=project.id,
-        kind="background_video",
+        kind="background_image" if mime_type.startswith("image/") else "background_video",
         source_type="upload",
         storage_key=str(storage_path),
         original_filename=file.filename or storage_path.name,
@@ -98,7 +99,7 @@ def select_background_preset(
     asset = Asset(
         user_id=current_user.id,
         project_id=project.id,
-        kind="background_preset",
+        kind="background_image" if mime_type.startswith("image/") else "background_preset",
         source_type="preset",
         preset_key=preset_key,
         storage_key=str(storage_path),

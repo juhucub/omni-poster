@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -11,7 +12,7 @@ from app.models import Asset, GenerationJob, OutputVideo, Project
 from app.services.notifications import create_notification
 from app.services.project_state import sync_project_state
 from app.services.rendering import ProjectRenderService
-from app.services.storage import guess_mime_type, store_generated_file
+from app.services.storage import guess_mime_type, project_media_dir, store_generated_file
 from app.services.tts import TTSProviderError
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,7 @@ def process_generation_job(job_id: int) -> dict:
 
         render_service = ProjectRenderService(db=db, project_id=project.id)
         progress_callback = _render_progress_callback(db, job, project)
+        direct_output_path = project_media_dir(project.id) / f"preview_{job.id}.mp4"
         try:
             _set_job_progress(db, job, project, 35)
             logger.info("Generation job %s entering render pipeline", job.id)
@@ -119,6 +121,7 @@ def process_generation_job(job_id: int) -> dict:
                 voice_manifest=job.voice_manifest_json or {},
                 render_settings=job.render_settings_json or {},
                 job_id=job.id,
+                output_path=direct_output_path,
             )
         except TypeError:
             # Compatibility for tests and legacy local monkeypatches that still use the older signature.
@@ -139,7 +142,9 @@ def process_generation_job(job_id: int) -> dict:
 
         generated_path = result["output_path"].replace("file://", "")
         # Store the final MP4 as a project asset while segment WAVs stay under generated job artifacts.
-        stored_path = store_generated_file(project.id, generated_path, f"preview_{job.id}.mp4")
+        stored_path = Path(generated_path)
+        if stored_path.resolve() != direct_output_path.resolve():
+            stored_path = store_generated_file(project.id, generated_path, f"preview_{job.id}.mp4")
         _set_job_progress(db, job, project, 82)
         output_asset = Asset(
             user_id=project.user_id,

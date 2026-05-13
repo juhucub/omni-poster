@@ -45,7 +45,7 @@ def _slugify(value: str) -> str:
 def latest_background_asset(project: Project) -> Asset | None:
     if project.background_asset_id:
         return next((asset for asset in project.assets if asset.id == project.background_asset_id), None)
-    assets = [asset for asset in project.assets if asset.kind in {"background_video", "background_preset"}]
+    assets = [asset for asset in project.assets if asset.kind in {"background_video", "background_preset", "background_image"}]
     assets.sort(key=lambda asset: asset.created_at, reverse=True)
     return assets[0] if assets else None
 

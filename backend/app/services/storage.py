@@ -14,6 +14,8 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 ALLOWED_BACKGROUND_VIDEO_TYPES = {"video/mp4", "video/webm", "video/mpeg"}
+ALLOWED_BACKGROUND_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
+ALLOWED_BACKGROUND_TYPES = ALLOWED_BACKGROUND_VIDEO_TYPES | ALLOWED_BACKGROUND_IMAGE_TYPES
 MAX_BACKGROUND_VIDEO_SIZE = 100 * 1024 * 1024
 
 
@@ -81,8 +83,9 @@ def list_background_presets() -> list[dict]:
     presets: list[dict] = []
     preset_dir = preset_media_dir()
     for path in sorted(preset_dir.glob("*")):
-        if path.suffix.lower() not in {".mp4", ".webm", ".mpeg"}:
+        if path.suffix.lower() not in {".mp4", ".webm", ".mpeg", ".png", ".jpg", ".jpeg", ".webp"}:
             continue
+        mime_type = guess_mime_type(str(path))
         presets.append(
             {
                 "key": path.stem,
@@ -90,6 +93,7 @@ def list_background_presets() -> list[dict]:
                 "description": "Curated background preset",
                 "filename": path.name,
                 "path": path,
+                "mime_type": mime_type,
             }
         )
     logger.info("Scanned bundled background presets in %s: %s found", preset_dir, len(presets))
@@ -106,10 +110,10 @@ def resolve_background_preset(preset_key: str) -> dict:
 async def save_background_asset(project_id: int, file: UploadFile) -> tuple[Path, int, str]:
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
-    if file.content_type not in ALLOWED_BACKGROUND_VIDEO_TYPES:
+    if file.content_type not in ALLOWED_BACKGROUND_TYPES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Unsupported background video type",
+            detail="Unsupported background media type",
         )
 
     destination = project_media_dir(project_id) / f"{uuid.uuid4().hex}_{Path(file.filename).name}"
@@ -148,7 +152,9 @@ def copy_preset_to_project(project_id: int, preset_key: str) -> tuple[Path, int,
 def store_generated_file(project_id: int, source_path: str, filename: str | None = None) -> Path:
     output_name = filename or f"{uuid.uuid4().hex}.mp4"
     destination = project_media_dir(project_id) / output_name
-    shutil.copy2(source_path, destination)
+    source = Path(source_path)
+    if source.resolve() != destination.resolve():
+        shutil.copy2(source, destination)
     return destination
 
 

@@ -182,6 +182,10 @@ const ProjectEditorPage: React.FC = () => {
     () => backgroundAsset?.content_url || previewSettings.background_url || null,
     [backgroundAsset?.content_url, previewSettings.background_url]
   );
+  const selectedBackgroundMimeType = useMemo(
+    () => backgroundAsset?.mime_type || String(previewSettings.background_metadata?.mime_type || ''),
+    [backgroundAsset?.mime_type, previewSettings.background_metadata]
+  );
   const previewSpeakerMappings = useMemo(
     () =>
       detectedSpeakers.map((speakerName) => {
@@ -551,7 +555,7 @@ const ProjectEditorPage: React.FC = () => {
     }
   };
 
-  const generatePreview = async (outputKind: 'preview' | 'final' = 'preview') => {
+  const generatePreview = async (outputKind: 'preview' | 'draft' | 'final' | 'debug' = 'preview') => {
     if (activeGeneration) {
       return;
     }
@@ -740,13 +744,15 @@ const ProjectEditorPage: React.FC = () => {
     if (!generationJob) {
       return null;
     }
+    const cacheStats = (generationJob.cache_statistics || {}) as any;
+    const artifactUrls = (generationJob.artifact_urls || {}) as any;
     return (
       <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4 text-sm text-slate-300">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <span>
             Render job #{generationJob.id}: {generationJob.status} ({generationJob.progress}%)
           </span>
-          {generationStage ? <span className="text-cyan-200">{generationStage}</span> : null}
+          <span className="text-cyan-200">{generationJob.current_phase || generationStage}</span>
         </div>
         <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
           <div className="h-full rounded-full bg-cyan-300 transition-[width] duration-500" style={{ width: `${generationJob.progress}%` }} />
@@ -769,6 +775,32 @@ const ProjectEditorPage: React.FC = () => {
           <div className="mt-3 rounded-xl border border-rose-300/30 bg-rose-950/30 p-3 text-sm text-rose-100">
             <div className="font-medium">{generationTtsError.message || generationTtsError.code || 'TTS provider failed.'}</div>
             {generationTtsError.suggested_action && <div className="mt-1 text-rose-200/80">{generationTtsError.suggested_action}</div>}
+          </div>
+        )}
+        {(artifactUrls.render_plan || artifactUrls.cache_report || artifactUrls.render_profile || cacheStats.total_events) && (
+          <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                Cache: {Number(cacheStats.hits || 0)} hits · {Number(cacheStats.misses || 0)} misses
+              </div>
+              <div className="flex flex-wrap gap-3">
+                {artifactUrls.render_plan && (
+                  <a href={toApiHref(String(artifactUrls.render_plan))} className="text-cyan-200 hover:text-cyan-100">
+                    Render plan
+                  </a>
+                )}
+                {artifactUrls.cache_report && (
+                  <a href={toApiHref(String(artifactUrls.cache_report))} className="text-cyan-200 hover:text-cyan-100">
+                    Cache report
+                  </a>
+                )}
+                {artifactUrls.render_profile && (
+                  <a href={toApiHref(String(artifactUrls.render_profile))} className="text-cyan-200 hover:text-cyan-100">
+                    Timing profile
+                  </a>
+                )}
+              </div>
+            </div>
           </div>
         )}
         {generationSegments.length > 0 && (
@@ -805,7 +837,11 @@ const ProjectEditorPage: React.FC = () => {
                   <div className="mt-1 text-slate-500">
                     {segment.duration_seconds ? `${Number(segment.duration_seconds).toFixed(2)}s` : 'duration unknown'}
                     {segment.fallback_used ? ' · fallback used' : ''}
+                    {segment.tts_cache_hit ? ' · TTS cache' : ''}
                   </div>
+                  {segment.normalized_audio_artifact_url && (
+                    <div className="mt-1 text-cyan-200">Normalized WAV available</div>
+                  )}
                 </a>
               ))}
             </div>
@@ -1123,12 +1159,28 @@ const ProjectEditorPage: React.FC = () => {
                       {activeGeneration ? 'Render In Progress' : busy === 'generation' ? 'Saving + Queueing...' : scriptIsDirty ? 'Save + Generate Preview' : 'Generate Preview'}
                     </button>
                     <button
+                      onClick={() => generatePreview('draft')}
+                      disabled={busy === 'generation' || !backgroundAsset || !script || activeGeneration}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10 disabled:opacity-60"
+                    >
+                      <PlayCircle size={18} />
+                      {activeGeneration ? 'Await Active Render' : scriptIsDirty ? 'Save + Generate Draft' : 'Generate Draft'}
+                    </button>
+                    <button
                       onClick={() => generatePreview('final')}
                       disabled={busy === 'generation' || !backgroundAsset || !script || activeGeneration}
                       className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10 disabled:opacity-60"
                     >
                       <Wand2 size={18} />
                       {activeGeneration ? 'Await Active Render' : scriptIsDirty ? 'Save + Generate Final Pass' : 'Generate Final Pass'}
+                    </button>
+                    <button
+                      onClick={() => generatePreview('debug')}
+                      disabled={busy === 'generation' || !backgroundAsset || !script || activeGeneration}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-cyan-300/30 px-4 py-3 text-sm text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-60"
+                    >
+                      <CircleDashed size={18} />
+                      {activeGeneration ? 'Await Active Render' : 'Generate Debug Pass'}
                     </button>
                   </div>
 
@@ -1489,7 +1541,13 @@ const ProjectEditorPage: React.FC = () => {
 
                 <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_13rem]">
                   <div className="relative mx-auto aspect-[9/16] w-full max-w-[22rem] overflow-hidden rounded-[2rem] border border-white/10 bg-slate-950 shadow-[0_24px_70px_rgba(2,6,23,0.45)]">
-                    {selectedBackgroundUrl ? (
+                    {selectedBackgroundUrl && selectedBackgroundMimeType.startsWith('image/') ? (
+                      <img
+                        src={toApiHref(selectedBackgroundUrl)}
+                        alt="Selected background"
+                        className="absolute inset-0 h-full w-full object-cover opacity-75"
+                      />
+                    ) : selectedBackgroundUrl ? (
                       <video
                         src={toApiHref(selectedBackgroundUrl)}
                         muted

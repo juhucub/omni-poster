@@ -1,6 +1,6 @@
 # Omniposter Current Status
 
-Last updated: 2026-05-11
+Last updated: 2026-05-13
 
 ## Working
 
@@ -21,7 +21,10 @@ Last updated: 2026-05-11
 - OpenVoice-selected render jobs fail closed with structured provider diagnostics instead of silently falling back to local TTS.
 - Render jobs now persist per-segment WAV artifacts under generated job storage and expose safe artifact URLs in job metadata for audio comparison.
 - Final MP4 assembly now builds a persisted per-job dialogue composite WAV from the same render segment WAV artifacts and uses that composite WAV as the final video audio source.
-- Generation renders now write a structured performance profile artifact at `MEDIA_DIR/generated/{job_id}/generation_profile.json`, expose its URL in job/output metadata, and log per-stage timing/RSS summaries for TTS, segment WAV validation, composite audio, MoviePy timeline build, ffmpeg encoding, and final audio extraction.
+- Generation renders now write a structured performance profile artifact at `MEDIA_DIR/generated/{job_id}/generation_profile.json`, expose its URL in job/output metadata, and log per-stage timing/RSS summaries for TTS, segment WAV validation/normalization, composite audio, FFmpeg visual assembly, encoding, and debug-only final audio extraction.
+- Video renders now use an FFmpeg-first render plan and strict content-addressed render cache for TTS segment WAVs, normalized WAVs, dialogue composite audio, normalized backgrounds, overlay layers, and final MP4s. Job artifacts include `render_plan.json`, `cache_report.json`, normalized segment WAV links, the composite dialogue WAV, and cache/timing metadata.
+- Render modes now include `preview`, `draft`, `final`, and `debug`; final MP4 audio extraction runs only for debug renders.
+- Background uploads and presets now accept static images (`png`, `jpg/jpeg`, `webp`) as well as videos, and the pre-render preview displays image backgrounds with an image element.
 - XTTS selected-recipe render segments now reuse loaded config/model/checkpoint runtime objects and conditioning latents inside each worker process, keyed by checkpoint/config/vocab/device/reference recipe identity. This keeps each segment inference and persisted segment WAV distinct while reducing repeated setup work visible as `xtts.runtime_cache_hit` and `xtts.conditioning_latents_cache_hit` in `generation_profile.json`.
 - Render profiles now include OpenVoice provider substage timings for health reuse/checks, runtime import, Melo model/cache use, base TTS inference, converter load/cache use, target/source embedding work, and voice conversion when a render profiler is active. XTTS cache profile stages now include worker-local cache size/max-entry/eviction metadata so Docker RSS behavior is easier to explain without caching rendered audio.
 - XTTS selected-recipe CPU inference now records effective torch thread settings, inference-mode status, and effective inference kwargs in render profiles. Docker/dev CPU-only defaults use `XTTS_CPU_NUM_THREADS=4`, `XTTS_CPU_INTEROP_THREADS=1`, and `CELERY_GENERATION_CONCURRENCY=1` based on render-profile benchmarking; safe runtime controls also include torch inference mode, job-local provider health reuse, preview-only split-sentence override, and configurable preview/export x264 preset/CRF defaults.
@@ -99,6 +102,7 @@ P2:
 - Updated Generate Calibration Previews so XTTS profiles submit a 3x3 XTTS candidate matrix across speed and temperature, plus a single OpenVoice comparison candidate; saved XTTS recipes preserve temperature and sentence-splitting settings. `python3 -m pytest backend/app/tests/test_vertical_slice.py` and `npm run build` passed on 2026-05-09.
 - Moved memory-heavy Voice Lab operations out of FastAPI request handlers and into `voice_worker` Celery jobs. Added `voice_operation_jobs`, worker-side reference audio validation failure reporting with `http_status=400`, RSS/peak RSS memory logging around voice enqueue/worker stages, and `--max-tasks-per-child=${CELERY_VOICE_MAX_TASKS_PER_CHILD:-1}` for `voice_worker`. `python3 -m pytest backend/app/tests/test_vertical_slice.py`, `python3 -m compileall backend/app`, and `npm run build` passed on 2026-05-11; Docker compose `ps -a` still showed the prior `api` container as `Exited (137)` before restart/runtime replay.
 - Reduced Docker Voice Lab upload memory pressure by removing `pending_path.read_bytes()` from worker reference-audio processing; added OpenVoice render-profile substages, XTTS cache occupancy/eviction metadata, and per-render portrait path reuse. `python3 -m pytest backend/app/tests/test_vertical_slice.py` passed with `93 passed`, and `python3 -m compileall backend/app` passed on 2026-05-11.
+- Added the FFmpeg-first cached render pipeline, strict render-cache TTS reuse for XTTS/OpenVoice exact matches, normalized segment WAV artifacts, render plan/cache report artifacts, draft/debug render modes, debug-only final audio extraction, direct final MP4 output handling, image background support, and Project Editor cache/timing links. `python3 -m pytest backend/app/tests/test_vertical_slice.py` passed with `96 passed`, `python3 -m compileall backend/app` passed, and `npm run build` passed on 2026-05-13.
 
 ## Open Questions
 

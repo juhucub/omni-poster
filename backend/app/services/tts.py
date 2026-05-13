@@ -144,6 +144,12 @@ class SpeechSegment:
     fallback_reason: str | None = None
     recipe_used: dict[str, Any] | None = None
     golden_preview_wav: str | None = None
+    cache_hit: bool = False
+    cache_key: str | None = None
+    cache_source_path: str | None = None
+    normalized_audio_path: str | None = None
+    normalized_cache_hit: bool = False
+    normalized_cache_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2335,6 +2341,7 @@ class TTSOrchestrator:
                     fallback_reason=getattr(result, "fallback_reason", None),
                     recipe_used=getattr(result, "recipe_used", None),
                     golden_preview_wav=getattr(result, "golden_preview_wav", None),
+                    cache_hit=getattr(result, "cache_hit", False),
                 )
             )
         if not segments:
@@ -2513,7 +2520,7 @@ class LocalSpeechService:
             },
         )
 
-    def synthesize_dialogue(self, parsed_lines: list[dict[str, Any]], work_dir: Path) -> list[SpeechSegment]:
+    def resolve_voice_profile_map(self, parsed_lines: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         voice_profile_map: dict[str, dict[str, Any]] = {}
         slot_map: dict[str, int] = {}
         for index, line in enumerate(parsed_lines):
@@ -2526,6 +2533,10 @@ class LocalSpeechService:
                     voice_profile_map[speaker] = self._resolved_profile_for_speaker(speaker, slot_index)
             else:
                 voice_profile_map[speaker] = self._resolved_profile_for_speaker(speaker, slot_index)
+        return voice_profile_map
+
+    def synthesize_dialogue(self, parsed_lines: list[dict[str, Any]], work_dir: Path) -> list[SpeechSegment]:
+        voice_profile_map = self.resolve_voice_profile_map(parsed_lines)
         return self.orchestrator.synthesize_dialogue(
             lines=parsed_lines,
             voice_profile_map=voice_profile_map,

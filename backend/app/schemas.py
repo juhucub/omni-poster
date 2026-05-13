@@ -152,6 +152,7 @@ class BackgroundPresetSummary(BaseModel):
     description: str
     filename: str
     content_url: str
+    mime_type: str = "video/mp4"
 
 
 class CharacterPresetSummary(BaseModel):
@@ -641,7 +642,7 @@ class ScriptGenerateRequest(BaseModel):
 class GenerationJobCreateRequest(BaseModel):
     script_revision_id: int | None = None
     background_style: Literal["none", "blur", "grayscale"] = "none"
-    output_kind: Literal["preview", "final"] = "preview"
+    output_kind: Literal["preview", "draft", "final", "debug"] = "preview"
     provider_name: str = "local-compositor"
 
 
@@ -658,6 +659,11 @@ class GenerationJobSummary(BaseModel):
     preview_settings: ProjectPreviewSettings = Field(default_factory=ProjectPreviewSettings)
     tts_result: dict = Field(default_factory=dict)
     provider_state: dict = Field(default_factory=dict)
+    current_phase: str | None = None
+    cache_statistics: dict = Field(default_factory=dict)
+    timing_breakdown: dict = Field(default_factory=dict)
+    artifact_urls: dict = Field(default_factory=dict)
+    debug_artifacts: dict = Field(default_factory=dict)
     output_video_id: int | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None

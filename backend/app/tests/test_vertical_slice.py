@@ -11,6 +11,7 @@ import wave
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from app.core.config import settings
 from app.db import SessionLocal
@@ -99,6 +100,39 @@ def _write_sine_wav(path: Path, *, seconds: float = 1.6, sample_rate: int = 1600
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
         handle.writeframes(bytes(frames))
+
+
+def _write_png(
+    path: Path,
+    *,
+    size: tuple[int, int] = (64, 96),
+    color: tuple[int, int, int, int] = (80, 160, 220, 255),
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", size, color).save(path)
+
+
+def _fake_ffmpeg_render_run(captured: dict):
+    def fake_run(command, *args, **kwargs):
+        if not command or command[0] != "ffmpeg":
+            stdout = "arm64\n" if kwargs.get("text") or kwargs.get("encoding") else b"Mach-O 64-bit"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        output_path = Path(command[-1])
+        captured.setdefault("ffmpeg_outputs", []).append(str(output_path))
+        if output_path.name == "dialogue_composite.wav":
+            captured.setdefault("composite_inputs", []).append(
+                (output_path.parent / "dialogue_segments.txt").read_text(encoding="utf-8")
+            )
+        if output_path.name == "final_video_audio.wav":
+            captured["debug_audio_extracted"] = True
+        if output_path.suffix == ".wav":
+            _write_wav(output_path, seconds=1.4)
+        else:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"video")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    return fake_run
 
 
 def _write_stewie_selected_recipe_tree(root: Path) -> dict[str, Path]:
@@ -206,8 +240,38 @@ def test_background_presets_are_loaded_from_bundled_media_dir(auth_client: TestC
             "description": "Curated background preset",
             "filename": "aurora_grid.mp4",
             "content_url": "/background-presets/aurora_grid/content",
+            "mime_type": "video/mp4",
         }
     ]
+
+
+def test_image_background_upload_and_preset_selection(auth_client: TestClient):
+    preset_dir = Path("test_storage") / "bundled" / "presets"
+    preset_dir.mkdir(parents=True, exist_ok=True)
+    _write_png(preset_dir / "still_scene.png")
+
+    presets = auth_client.get("/background-presets")
+    assert presets.status_code == 200
+    assert presets.json()[0]["key"] == "still_scene"
+    assert presets.json()[0]["mime_type"] == "image/png"
+
+    project = auth_client.post("/projects", json={"name": "Image Background", "target_platform": "youtube"})
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+    upload_path = Path("test_storage") / "upload_background.png"
+    _write_png(upload_path)
+    upload = auth_client.post(
+        f"/projects/{project_id}/assets/background",
+        files={"file": ("upload_background.png", upload_path.read_bytes(), "image/png")},
+    )
+    assert upload.status_code == 201
+    assert upload.json()["kind"] == "background_image"
+    assert upload.json()["mime_type"] == "image/png"
+
+    selected = auth_client.post(f"/projects/{project_id}/assets/background/preset/still_scene")
+    assert selected.status_code == 201
+    assert selected.json()["kind"] == "background_image"
+    assert selected.json()["mime_type"] == "image/png"
 
 
 def test_character_presets_list_and_runtime_override(auth_client: TestClient):
@@ -3434,8 +3498,8 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
     background_path.write_bytes(b"fake-video")
     portrait_path = tmp_path / "portrait.png"
     caption_path = tmp_path / "caption.png"
-    portrait_path.write_bytes(b"fake-portrait")
-    caption_path.write_bytes(b"fake-caption")
+    _write_png(portrait_path)
+    _write_png(caption_path)
     captured: dict[str, object] = {"image_heights": []}
 
     def fake_synthesize_dialogue(self, parsed_lines, work_dir):
@@ -3469,16 +3533,44 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
         if not command or command[0] != "ffmpeg":
             stdout = "arm64\n" if kwargs.get("text") or kwargs.get("encoding") else b"Mach-O 64-bit"
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
-        output_audio_path = Path(command[-1])
-        if "-filter_complex" in command:
-            concat_list_path = output_audio_path.parent / "dialogue_segments.txt"
+        output_path = Path(command[-1])
+        if output_path.name == "dialogue_composite.wav":
+            concat_list_path = output_path.parent / "dialogue_segments.txt"
             captured["concat_list"] = concat_list_path.read_text(encoding="utf-8")
             captured["command"] = " ".join(command)
             captured["composite_audio_path"] = command[-1]
+        if output_path.suffix == ".mp4" and "-filter_complex" in command:
+            captured["final_mp4_path"] = str(output_path)
+        if output_path.suffix == ".wav":
+            _write_wav(output_path, seconds=1.8)
         else:
-            captured["final_video_audio_path"] = command[-1]
-        _write_wav(output_audio_path, seconds=1.8)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"video")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def fake_synthesize_line(self, *, text, voice_profile, output_path, requested_provider=None, fallback_allowed=True, options=None):
+        seconds = 0.8 if "correct" in text else 1.0
+        _write_wav(output_path, seconds=seconds)
+        return type(
+            "Result",
+            (),
+            {
+                "audio_path": str(output_path),
+                "voice": "Render Voice",
+                "duration_seconds": seconds,
+                "provider_used": "openvoice",
+                "fallback_used": False,
+                "controls_applied": {},
+                "reference_audio_count": 0,
+                "provider_state": {"openvoice": {"available": True}},
+                "cache_hit": False,
+                "voice_profile_id": "vp_host_openvoice" if "correct" in text else "vp_guest_openvoice",
+                "provider_failures": {},
+                "fallback_reason": None,
+                "recipe_used": {},
+                "golden_preview_wav": None,
+            },
+        )()
 
     class FakeVideoClip:
         w = 1080
@@ -3569,6 +3661,7 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
 
     monkeypatch.setitem(sys.modules, "moviepy", fake_moviepy)
     monkeypatch.setattr(LocalSpeechService, "synthesize_dialogue", fake_synthesize_dialogue)
+    monkeypatch.setattr(TTSOrchestrator, "synthesize_line", fake_synthesize_line)
     monkeypatch.setattr("app.services.rendering.subprocess.run", fake_run)
     monkeypatch.setattr(service, "_resolve_character_portrait", lambda speaker, slot_index, work_dir: portrait_path)
     def fake_dialogue_card(segment, work_dir, chat_font_size_px=18):
@@ -3591,39 +3684,32 @@ def test_render_preview_final_mp4_uses_persisted_segment_wavs(monkeypatch, tmp_p
         job_id=job_id,
     )
 
-    assert str(host_segment.resolve()) in captured["concat_list"]
-    assert str(guest_segment.resolve()) in captured["concat_list"]
-    assert str(host_segment.resolve()) in captured["command"]
-    assert str(guest_segment.resolve()) in captured["command"]
-    assert captured["audio_file_clip_path"] == captured["composite_audio_path"]
-    assert captured["final_audio_path"] == captured["composite_audio_path"]
     tts_result = result["metadata"]["tts_result"]
+    normalized_paths = [Path(segment["normalized_audio_path"]) for segment in tts_result["segments"]]
+    assert all(str(path.resolve()) in captured["concat_list"] for path in normalized_paths)
     assert tts_result["assembly"]["composite_audio_path"] == captured["composite_audio_path"]
     assert tts_result["assembly"]["final_mp4_path"] == captured["final_mp4_path"]
-    assert tts_result["assembly"]["final_video_audio_path"] == captured["final_video_audio_path"]
-    assert tts_result["assembly"]["final_video_audio_artifact_url"].endswith("/audio/final_video_audio.wav")
+    assert tts_result["assembly"]["final_video_audio_path"] is None
+    assert tts_result["assembly"]["debug_audio_extraction"]["skipped"] is True
     assert tts_result["render_profile"]["artifact_url"].endswith("/generation_profile.json")
     assert tts_result["render_settings"]["layout"] == {"character_scale": 1.25, "chat_font_size_px": 24}
     assert result["metadata"]["render_settings"]["layout"] == {"character_scale": 1.25, "chat_font_size_px": 24}
-    assert captured["chat_font_size_px"] == 24
-    assert 775 in captured["image_heights"]
-    assert 975 in captured["image_heights"]
     assert result["metadata"]["render_profile_artifact_url"].endswith("/generation_profile.json")
+    assert result["metadata"]["render_plan_artifact_url"].endswith("/render_plan.json")
+    assert result["metadata"]["cache_report_artifact_url"].endswith("/cache_report.json")
     profile_path = generated_job_segment_dir(job_id).parent / "generation_profile.json"
     profile_payload = json.loads(profile_path.read_text(encoding="utf-8"))
     stage_names = [stage["name"] for stage in profile_payload["stages"]]
     assert "render.full_generation_path" in stage_names
     assert "ffmpeg.composite_audio_build" in stage_names
-    assert "moviepy.ffmpeg_encode_and_mp4_write" in stage_names
+    assert "ffmpeg.final_video_render" in stage_names
     assert profile_payload["context"]["segment_count"] == 2
     assert profile_payload["context"]["resolution"] == {"width": 1080, "height": 1920}
     assert profile_payload["context"]["preview_layout"] == {"character_scale": 1.25, "chat_font_size_px": 24}
     assert profile_payload["context"]["ffmpeg_threads"] >= 1
-    assert tts_result["segments"][0]["audio_path"] == str(host_segment)
-    assert tts_result["segments"][0]["audio_path_used_for_final_assembly"] == str(host_segment)
     assert tts_result["segments"][0]["provider_used"] == "openvoice"
     assert tts_result["segments"][0]["fallback_used"] is False
-    assert tts_result["segments"][1]["audio_path_used_for_final_assembly"] == str(guest_segment)
+    assert tts_result["segments"][0]["audio_path_used_for_final_assembly"] == tts_result["segments"][0]["normalized_audio_path"]
 
 
 def test_xtts_render_job_synthesizes_exact_script_segments_to_persisted_wavs(monkeypatch, tmp_path: Path):
@@ -3634,8 +3720,8 @@ def test_xtts_render_job_synthesizes_exact_script_segments_to_persisted_wavs(mon
     portrait_path = tmp_path / "portrait.png"
     caption_path = tmp_path / "caption.png"
     background_path.write_bytes(b"fake-video")
-    portrait_path.write_bytes(b"fake-portrait")
-    caption_path.write_bytes(b"fake-caption")
+    _write_png(portrait_path)
+    _write_png(caption_path)
     parsed_lines = [
         {"speaker": "Stewie", "text": "Victory shall be mine.", "order": 0},
         {"speaker": "Brian", "text": "Let's verify the second line.", "order": 1},
@@ -3726,16 +3812,20 @@ def test_xtts_render_job_synthesizes_exact_script_segments_to_persisted_wavs(mon
         )()
 
     def fake_run(command, check, capture_output, text):
-        output_audio_path = Path(command[-1])
-        if "-filter_complex" in command:
-            audio_inputs = [Path(command[index + 1]).resolve() for index, item in enumerate(command) if item == "-i"]
-            concat_list_path = output_audio_path.parent / "dialogue_segments.txt"
+        output_path = Path(command[-1])
+        if output_path.name == "dialogue_composite.wav":
+            audio_inputs = [Path(line.split("'", 2)[1]).resolve() for line in (output_path.parent / "dialogue_segments.txt").read_text(encoding="utf-8").splitlines() if line.startswith("file ")]
+            concat_list_path = output_path.parent / "dialogue_segments.txt"
             captured["concat_list"] = concat_list_path.read_text(encoding="utf-8")
             captured["audio_inputs"] = audio_inputs
             captured["composite_audio_path"] = command[-1]
+        if output_path.suffix == ".mp4" and "-filter_complex" in command:
+            captured["final_mp4_path"] = str(output_path)
+        if output_path.suffix == ".wav":
+            _write_wav(output_path, seconds=2.4)
         else:
-            captured["final_video_audio_path"] = command[-1]
-        _write_wav(output_audio_path, seconds=2.4)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"video")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     class FakeVideoClip:
@@ -3848,12 +3938,11 @@ def test_xtts_render_job_synthesizes_exact_script_segments_to_persisted_wavs(mon
     assert len(segment_paths) == len(parsed_lines)
     assert all(path.parent == segment_dir for path in segment_paths)
     assert all(path.exists() for path in segment_paths)
-    assert captured["audio_inputs"] == [path.resolve() for path in segment_paths]
-    assert captured["audio_file_clip_path"] == captured["composite_audio_path"]
-    assert captured["final_audio_path"] == captured["composite_audio_path"]
+    tts_result = result["metadata"]["tts_result"]
+    normalized_paths = [Path(segment["normalized_audio_path"]) for segment in tts_result["segments"]]
+    assert captured["audio_inputs"] == [path.resolve() for path in normalized_paths]
     assert captured["portrait_resolutions"] == [("Stewie", 0), ("Brian", 1)]
 
-    tts_result = result["metadata"]["tts_result"]
     assert tts_result["status"] == "completed"
     assert [segment["text"] for segment in tts_result["segments"]] == [line["text"] for line in parsed_lines]
     assert [segment["provider_used"] for segment in tts_result["segments"]] == ["xtts", "xtts", "xtts"]
@@ -3869,12 +3958,146 @@ def test_xtts_render_job_synthesizes_exact_script_segments_to_persisted_wavs(mon
         "Stewie Griffin",
     ]
     assert [segment["audio_path"] for segment in tts_result["segments"]] == [str(path) for path in segment_paths]
-    assert all(segment["used_for_final_assembly"] is True for segment in tts_result["segments"])
+    assert all(segment["audio_path_used_for_final_assembly"] == segment["normalized_audio_path"] for segment in tts_result["segments"])
     assert all(segment["artifact_url"].endswith(f"/segments/{Path(segment['audio_path']).name}") for segment in tts_result["segments"])
     assert tts_result["assembly"]["composite_audio_path"] == captured["composite_audio_path"]
     assert tts_result["assembly"]["final_mp4_path"] == captured["final_mp4_path"]
-    assert tts_result["assembly"]["final_video_audio_path"] == captured["final_video_audio_path"]
+    assert tts_result["assembly"]["final_video_audio_path"] is None
     assert [item["segment_audio_path"] for item in tts_result["assembly"]["segments"]] == [str(path) for path in segment_paths]
+    assert [item["audio_path_used_for_final_assembly"] for item in tts_result["assembly"]["segments"]] == [str(path) for path in normalized_paths]
+
+
+def test_ffmpeg_render_cache_reuses_tts_and_invalidates_changed_inputs(monkeypatch, tmp_path: Path):
+    service = ProjectRenderService()
+    background_path = tmp_path / "background.mp4"
+    other_background_path = tmp_path / "background_other.mp4"
+    background_path.write_bytes(b"background-a")
+    other_background_path.write_bytes(b"background-b")
+    portrait_path = tmp_path / "portrait.png"
+    _write_png(portrait_path, color=(80, 160, 220, 255))
+    captured: dict[str, object] = {"tts_calls": []}
+
+    def fake_synthesize_line(self, *, text, voice_profile, output_path, requested_provider=None, fallback_allowed=True, options=None):
+        _write_wav(output_path, seconds=0.7 if "first" in text else 0.9)
+        captured["tts_calls"].append(text)
+        return type(
+            "Result",
+            (),
+            {
+                "audio_path": str(output_path),
+                "voice": voice_profile.get("display_name") or "Host",
+                "duration_seconds": 0.7 if "first" in text else 0.9,
+                "provider_used": "xtts",
+                "fallback_used": False,
+                "controls_applied": {},
+                "reference_audio_count": 1,
+                "provider_state": {"xtts": {"available": True}},
+                "cache_hit": False,
+                "voice_profile_id": voice_profile.get("id") or "vp_host",
+                "provider_failures": {},
+                "fallback_reason": None,
+                "recipe_used": dict(voice_profile.get("selected_recipe") or {}),
+                "golden_preview_wav": None,
+            },
+        )()
+
+    monkeypatch.setattr(TTSOrchestrator, "synthesize_line", fake_synthesize_line)
+    monkeypatch.setattr("app.services.rendering.subprocess.run", _fake_ffmpeg_render_run(captured))
+    monkeypatch.setattr(service, "_resolve_character_portrait", lambda speaker, slot_index, work_dir: portrait_path)
+
+    voice_manifest = {
+        "speakers": {
+            "Host": {
+                "speaker": "Host",
+                "requested_provider": "xtts",
+                "fallback_allowed": False,
+                "voice_profile": {
+                    "id": "vp_host_xtts",
+                    "display_name": "Host",
+                    "provider": "xtts",
+                    "fallback_provider": "espeak",
+                    "reference_audios": [{"id": 1, "processed_sha256": "ref-a"}],
+                    "selected_recipe": {"provider": "xtts", "temperature": 0.75},
+                    "fallback_allowed": False,
+                },
+            }
+        }
+    }
+    parsed_lines = [
+        {"speaker": "Host", "text": "first cached line", "order": 0},
+        {"speaker": "Host", "text": "second cached line", "order": 1},
+    ]
+
+    first = service.render_preview(1, str(background_path), parsed_lines, "none", output_kind="preview", voice_manifest=voice_manifest, job_id=201)
+    second = service.render_preview(1, str(background_path), parsed_lines, "none", output_kind="preview", voice_manifest=voice_manifest, job_id=202)
+    changed_line = service.render_preview(
+        1,
+        str(background_path),
+        [{"speaker": "Host", "text": "first cached line", "order": 0}, {"speaker": "Host", "text": "changed line", "order": 1}],
+        "none",
+        output_kind="preview",
+        voice_manifest=voice_manifest,
+        job_id=203,
+    )
+    changed_background = service.render_preview(1, str(other_background_path), parsed_lines, "none", output_kind="preview", voice_manifest=voice_manifest, job_id=204)
+    _write_png(portrait_path, color=(220, 120, 80, 255))
+    changed_portrait = service.render_preview(1, str(background_path), parsed_lines, "none", output_kind="preview", voice_manifest=voice_manifest, job_id=205)
+
+    assert captured["tts_calls"] == ["first cached line", "second cached line", "changed line"]
+    assert [segment["tts_cache_hit"] for segment in first["metadata"]["tts_result"]["segments"]] == [False, False]
+    assert [segment["tts_cache_hit"] for segment in second["metadata"]["tts_result"]["segments"]] == [True, True]
+    assert [segment["tts_cache_hit"] for segment in changed_line["metadata"]["tts_result"]["segments"]] == [True, False]
+    assert [segment["tts_cache_hit"] for segment in changed_background["metadata"]["tts_result"]["segments"]] == [True, True]
+    assert [segment["tts_cache_hit"] for segment in changed_portrait["metadata"]["tts_result"]["segments"]] == [True, True]
+    assert second["metadata"]["cache_statistics"]["by_type"]["final_video"]["materialized_from_cache"] >= 1
+    assert changed_background["metadata"]["cache_statistics"]["by_type"]["background"]["regenerated"] >= 1
+    assert changed_portrait["metadata"]["cache_statistics"]["by_type"]["static_overlay"]["regenerated"] >= 1
+
+
+def test_debug_mode_extracts_final_audio_and_preview_skips(monkeypatch, tmp_path: Path):
+    service = ProjectRenderService()
+    background_path = tmp_path / "background.mp4"
+    background_path.write_bytes(b"background")
+    portrait_path = tmp_path / "portrait.png"
+    _write_png(portrait_path)
+    captured: dict[str, object] = {}
+
+    def fake_synthesize_line(self, *, text, voice_profile, output_path, requested_provider=None, fallback_allowed=True, options=None):
+        _write_wav(output_path, seconds=0.8)
+        return type(
+            "Result",
+            (),
+            {
+                "audio_path": str(output_path),
+                "voice": "Host",
+                "duration_seconds": 0.8,
+                "provider_used": "espeak",
+                "fallback_used": False,
+                "controls_applied": {},
+                "reference_audio_count": 0,
+                "provider_state": {"espeak": {"available": True}},
+                "cache_hit": False,
+                "voice_profile_id": "vp_host",
+                "provider_failures": {},
+                "fallback_reason": None,
+                "recipe_used": {},
+                "golden_preview_wav": None,
+            },
+        )()
+
+    monkeypatch.setattr(TTSOrchestrator, "synthesize_line", fake_synthesize_line)
+    monkeypatch.setattr("app.services.rendering.subprocess.run", _fake_ffmpeg_render_run(captured))
+    monkeypatch.setattr(service, "_resolve_character_portrait", lambda speaker, slot_index, work_dir: portrait_path)
+    parsed_lines = [{"speaker": "Host", "text": "debug me", "order": 0}]
+
+    preview = service.render_preview(1, str(background_path), parsed_lines, "none", output_kind="preview", voice_manifest={"speakers": {}}, job_id=211)
+    debug = service.render_preview(1, str(background_path), parsed_lines, "none", output_kind="debug", voice_manifest={"speakers": {}}, job_id=212)
+
+    assert preview["metadata"]["tts_result"]["assembly"]["debug_audio_extraction"]["skipped"] is True
+    assert preview["metadata"]["tts_result"]["assembly"]["final_video_audio_artifact_url"] is None
+    assert debug["metadata"]["tts_result"]["assembly"]["debug_audio_extraction"]["enabled"] is True
+    assert debug["metadata"]["tts_result"]["assembly"]["final_video_audio_artifact_url"].endswith("/audio/final_video_audio.wav")
+    assert captured["debug_audio_extracted"] is True
 
 
 def test_render_segment_metadata_exposes_safe_artifact_url():
