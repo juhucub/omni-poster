@@ -581,6 +581,10 @@ class ProjectPreviewSettings(BaseModel):
     background_metadata: dict = Field(default_factory=dict)
     speaker_mappings: list[ProjectPreviewSpeakerMapping] = Field(default_factory=list)
     layout: ProjectPreviewLayout = Field(default_factory=ProjectPreviewLayout)
+    layout_preset: str = Field(default="left_right_locked", max_length=64)
+    caption_style: str = Field(default="bold_bubble", max_length=64)
+    speaker_png_size: str = Field(default="standard", max_length=64)
+    render_preset: str = Field(default="shorts_1080x1920", max_length=64)
 
 
 class ProjectPreviewSettingsUpdate(BaseModel):
@@ -591,6 +595,10 @@ class ProjectPreviewSettingsUpdate(BaseModel):
     background_metadata: dict | None = None
     speaker_mappings: list[ProjectPreviewSpeakerMapping] | None = None
     layout: ProjectPreviewLayout | None = None
+    layout_preset: str | None = Field(default=None, max_length=64)
+    caption_style: str | None = Field(default=None, max_length=64)
+    speaker_png_size: str | None = Field(default=None, max_length=64)
+    render_preset: str | None = Field(default=None, max_length=64)
 
 
 class DialogueScriptLine(BaseModel):

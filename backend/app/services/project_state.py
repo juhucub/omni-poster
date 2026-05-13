@@ -86,6 +86,10 @@ def _preview_settings_from_stored(project: Project) -> ProjectPreviewSettings:
             if isinstance(item, dict)
         ],
         layout=normalize_preview_layout(dict(stored.get("layout") or {})),
+        layout_preset=str(stored.get("layout_preset") or "left_right_locked"),
+        caption_style=str(stored.get("caption_style") or "bold_bubble"),
+        speaker_png_size=str(stored.get("speaker_png_size") or "standard"),
+        render_preset=str(stored.get("render_preset") or "shorts_1080x1920"),
     )
 
 
@@ -144,6 +148,9 @@ def update_project_preview_settings(project: Project, payload: dict[str, Any]) -
     for key in ("background_asset_id", "background_preset_id", "background_source_type", "background_url"):
         if key in payload:
             setattr(current, key, payload[key])
+    for key in ("layout_preset", "caption_style", "speaker_png_size", "render_preset"):
+        if key in payload and payload[key] is not None:
+            setattr(current, key, str(payload[key]))
     if "background_metadata" in payload and payload["background_metadata"] is not None:
         current.background_metadata = dict(payload["background_metadata"] or {})
     if "speaker_mappings" in payload and payload["speaker_mappings"] is not None:

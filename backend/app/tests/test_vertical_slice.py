@@ -4559,9 +4559,16 @@ def test_generation_job_snapshots_preview_settings(auth_client: TestClient, monk
     monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
     settings_response = auth_client.patch(
         f"/projects/{flow['project_id']}/preview-settings",
-        json={"layout": {"character_scale": 1.4, "chat_font_size_px": 26}},
+        json={
+            "layout": {"character_scale": 1.4, "chat_font_size_px": 26},
+            "layout_preset": "stacked_reaction",
+            "caption_style": "large_karaoke",
+            "speaker_png_size": "large",
+            "render_preset": "draft_720x1280",
+        },
     )
     assert settings_response.status_code == 200
+    assert settings_response.json()["caption_style"] == "large_karaoke"
 
     create_job = auth_client.post(
         f"/projects/{flow['project_id']}/generation-jobs",
@@ -4572,12 +4579,17 @@ def test_generation_job_snapshots_preview_settings(auth_client: TestClient, monk
     body = create_job.json()
     assert body["preview_settings"]["background_asset_id"] == flow["asset_id"]
     assert body["preview_settings"]["layout"] == {"character_scale": 1.4, "chat_font_size_px": 26}
+    assert body["preview_settings"]["layout_preset"] == "stacked_reaction"
+    assert body["preview_settings"]["caption_style"] == "large_karaoke"
+    assert body["preview_settings"]["speaker_png_size"] == "large"
+    assert body["preview_settings"]["render_preset"] == "draft_720x1280"
     assert body["preview_settings"]["speaker_mappings"][0]["speaker_name"] == "Host"
     assert body["voice_manifest"]["speakers"]["Host"]["character_portrait_url"] == "/character-presets/host_clone_v1/portrait"
     db = SessionLocal()
     try:
         job = db.get(GenerationJob, body["id"])
         assert job.render_settings_json["layout"] == {"character_scale": 1.4, "chat_font_size_px": 26}
+        assert job.render_settings_json["caption_style"] == "large_karaoke"
     finally:
         db.close()
 
@@ -4951,6 +4963,83 @@ def test_generation_job_list_exposes_latest_completed_job(auth_client: TestClien
     assert jobs.json()["items"][0]["id"] == job_id
     assert jobs.json()["items"][0]["status"] == "completed"
     assert jobs.json()["items"][0]["tts_result"]["segments"][0]["artifact_url"].endswith("/segments/000_host.wav")
+
+
+def test_generation_job_artifacts_summary_exposes_debug_urls(auth_client: TestClient, monkeypatch):
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert create_job.status_code == 201
+    job_id = create_job.json()["id"]
+
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        assert job is not None
+        job.status = "completed"
+        job.progress = 100
+        job.tts_result_json = {
+            "segments": [
+                {
+                    "segment_id": "line_001",
+                    "segment_index": 0,
+                    "speaker": "Host",
+                    "voice_profile_id": "vp_host_clone_v1",
+                    "provider_used": "openvoice",
+                    "artifact_url": f"/generation-jobs/{job_id}/artifacts/segments/000_host.wav",
+                    "normalized_audio_artifact_url": f"/generation-jobs/{job_id}/artifacts/normalized/000_host.wav",
+                }
+            ],
+            "assembly": {
+                "composite_audio_artifact_url": f"/generation-jobs/{job_id}/artifacts/audio/dialogue_composite.wav",
+                "final_video_audio_artifact_url": f"/generation-jobs/{job_id}/artifacts/audio/final_video_audio.wav",
+            },
+            "render_plan": {"artifact_url": f"/generation-jobs/{job_id}/artifacts/render_plan.json"},
+            "cache_report": {"artifact_url": f"/generation-jobs/{job_id}/artifacts/cache_report.json", "summary": {"total_events": 3}},
+            "render_profile": {"artifact_url": f"/generation-jobs/{job_id}/artifacts/generation_profile.json", "summary": {"total_ms": 42}},
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    response = auth_client.get(f"/generation-jobs/{job_id}/artifacts")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["artifact_urls"]["render_plan"].endswith("/render_plan.json")
+    assert body["segment_wavs"][0]["artifact_url"].endswith("/segments/000_host.wav")
+    assert body["segment_wavs"][0]["normalized_audio_artifact_url"].endswith("/normalized/000_host.wav")
+    assert body["composite_audio_url"].endswith("/dialogue_composite.wav")
+    assert body["final_video_audio_url"].endswith("/final_video_audio.wav")
+    assert body["cache_statistics"]["total_events"] == 3
+    assert body["timing_breakdown"]["total_ms"] == 42
+
+
+def test_production_aliases_reuse_project_contract(auth_client: TestClient, monkeypatch):
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+
+    created = auth_client.post("/productions", json={"name": "Alias Production", "target_platform": "youtube"})
+    assert created.status_code == 201
+    production_id = created.json()["id"]
+
+    listed = auth_client.get("/productions")
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["id"] == production_id
+
+    patched = auth_client.patch(
+        f"/productions/{production_id}/preview-settings",
+        json={"layout_preset": "narrator_only", "caption_style": "clean_lower_third"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["layout_preset"] == "narrator_only"
+    assert patched.json()["caption_style"] == "clean_lower_third"
+
+    project = auth_client.get(f"/projects/{production_id}")
+    assert project.status_code == 200
+    assert project.json()["preview_settings"]["layout_preset"] == "narrator_only"
 
 
 def test_stale_processing_generation_job_is_reconciled(auth_client: TestClient, monkeypatch):

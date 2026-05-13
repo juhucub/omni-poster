@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 
 import apiClient from '../api/client';
 import type { Project } from '../api/models';
-import Sidebar from '../components/Sidebar';
+import StudioShell from '../components/studio/StudioShell';
 
 const ProjectsPage: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -39,18 +39,20 @@ const ProjectsPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#08111f] text-slate-100 flex">
-      <Sidebar />
-      <main className="flex-1 p-8">
-        <div className="mx-auto max-w-6xl">
-          <div className="flex items-center justify-between gap-4">
+    <StudioShell mainClassName="studio-detail-surface">
+      <div className="mx-auto w-full max-w-6xl">
+        <div className="space-y-6">
+          <div className="studio-page-hero flex items-center justify-between gap-4">
             <div>
-              <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Projects</div>
-              <h1 className="mt-2 text-4xl font-semibold">Create and review renders</h1>
+              <div className="studio-page-kicker">Productions</div>
+              <h1 className="mt-2">Create and review renders</h1>
+              <p className="mt-3 max-w-3xl text-sm text-slate-400">
+                Durable production records for script, voice cast, scenes, previews, renders, and release drafts.
+              </p>
             </div>
           </div>
 
-          <div className="mt-6 rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
             <div className="flex flex-wrap gap-3">
               <input
                 value={name}
@@ -65,7 +67,7 @@ const ProjectsPage: React.FC = () => {
             {error ? <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div> : null}
           </div>
 
-          <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {projects.map((project) => (
               <Link key={project.id} to={`/projects/${project.id}`} className="rounded-3xl border border-white/10 bg-white/[0.04] p-6 hover:border-cyan-300/40">
                 <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">{project.status}</div>
@@ -80,8 +82,8 @@ const ProjectsPage: React.FC = () => {
             ) : null}
           </div>
         </div>
-      </main>
-    </div>
+      </div>
+    </StudioShell>
   );
 };
 

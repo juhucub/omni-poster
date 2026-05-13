@@ -19,6 +19,7 @@ from app.routers.character_presets import router as character_presets_router
 from app.routers.generation import router as generation_router
 from app.routers.history import router as history_router
 from app.routers.metadata import router as metadata_router
+from app.routers.productions import router as productions_router
 from app.routers.projects import router as projects_router
 from app.routers.publish import router as publish_router
 from app.routers.reviews import router as reviews_router
@@ -75,6 +76,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(social_accounts_router)
 app.include_router(projects_router)
+app.include_router(productions_router)
 app.include_router(assets_router)
 app.include_router(character_presets_router)
 app.include_router(script_generation_router)

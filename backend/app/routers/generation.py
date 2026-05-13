@@ -244,6 +244,58 @@ def get_generation_job(job_id: int, current_user: User = Depends(get_current_use
     return to_generation_summary(job)
 
 
+@router.get("/generation-jobs/{job_id}/artifacts")
+def get_generation_job_artifacts(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = (
+        db.query(GenerationJob)
+        .join(Project, Project.id == GenerationJob.project_id)
+        .filter(GenerationJob.id == job_id, Project.user_id == current_user.id)
+        .one_or_none()
+    )
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation job not found")
+
+    summary = to_generation_summary(job)
+    tts_result = summary.tts_result or {}
+    assembly = dict(tts_result.get("assembly") or {})
+    segments = list(tts_result.get("segments") or [])
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "output_video_id": summary.output_video_id,
+        "artifact_urls": summary.artifact_urls,
+        "segment_wavs": [
+            {
+                "segment_id": segment.get("segment_id"),
+                "segment_index": segment.get("segment_index"),
+                "speaker": segment.get("speaker"),
+                "voice_profile_id": segment.get("voice_profile_id"),
+                "provider_used": segment.get("provider_used"),
+                "artifact_url": segment.get("artifact_url"),
+                "normalized_audio_artifact_url": segment.get("normalized_audio_artifact_url"),
+            }
+            for segment in segments
+            if isinstance(segment, dict)
+        ],
+        "composite_audio_url": assembly.get("composite_audio_artifact_url"),
+        "final_video_audio_url": assembly.get("final_video_audio_artifact_url"),
+        "debug_artifacts": summary.debug_artifacts,
+        "cache_statistics": summary.cache_statistics,
+        "timing_breakdown": summary.timing_breakdown,
+        "voice_manifest": summary.voice_manifest,
+        "preview_settings": summary.preview_settings.model_dump(),
+        "mismatch_debug": {
+            "provider_state": summary.provider_state,
+            "tts_result_error": tts_result.get("error"),
+            "assembly": assembly,
+        },
+    }
+
+
 @router.get("/generation-jobs/{job_id}/artifacts/{artifact_path:path}")
 def get_generation_job_artifact(
     job_id: int,

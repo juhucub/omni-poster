@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 
 import apiClient from '../api/client';
 import type { SocialAccount } from '../api/models';
-import Sidebar from '../components/Sidebar';
+import StudioShell from '../components/studio/StudioShell';
 
 const AccountManager: React.FC = () => {
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
@@ -22,12 +22,16 @@ const AccountManager: React.FC = () => {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#08111f] text-slate-100 flex">
-      <Sidebar />
-      <main className="flex-1 p-8">
-        <div className="mx-auto max-w-5xl rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-          <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Accounts</div>
-          <h1 className="mt-2 text-4xl font-semibold">Connected destinations</h1>
+    <StudioShell mainClassName="studio-detail-surface">
+      <div className="mx-auto w-full max-w-5xl space-y-6">
+        <div className="studio-page-hero">
+          <div className="studio-page-kicker">Channels</div>
+          <h1 className="mt-2">Connected destinations</h1>
+          <p className="mt-3 max-w-3xl text-sm text-slate-400">
+            Manage release destinations used by Command Room routing and production publish drafts.
+          </p>
+        </div>
+        <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
           {error ? (
             <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
               {error}
@@ -47,8 +51,8 @@ const AccountManager: React.FC = () => {
             ) : null}
           </div>
         </div>
-      </main>
-    </div>
+      </div>
+    </StudioShell>
   );
 };
 

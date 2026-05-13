@@ -382,6 +382,10 @@ export interface ProjectPreviewSettings {
   background_metadata: Record<string, unknown>;
   speaker_mappings: ProjectPreviewSpeakerMapping[];
   layout: ProjectPreviewLayout;
+  layout_preset: string;
+  caption_style: string;
+  speaker_png_size: string;
+  render_preset: string;
 }
 
 export interface GenerationJob {

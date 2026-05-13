@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 
+import CommandRoomPage from './components/command-room/CommandRoom';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { useAuth } from './context/AuthContext';
 import AccountManager from './pages/AccountManager';
@@ -16,7 +17,8 @@ const AppRoutes: React.FC = () => {
 
   return (
     <Routes>
-      <Route path="/login" element={isAuthenticated ? <Navigate to="/projects" replace /> : <AuthPage />} />
+      <Route path="/login" element={isAuthenticated ? <Navigate to="/" replace /> : <AuthPage />} />
+      <Route path="/" element={<CommandRoomPage />} />
       <Route
         path="/projects"
         element={
@@ -57,7 +59,6 @@ const AppRoutes: React.FC = () => {
           </ProtectedRoute>
         }
       />
-      <Route path="/" element={<Navigate to={isAuthenticated ? '/projects' : '/login'} replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

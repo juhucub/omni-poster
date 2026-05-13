@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 
 import apiClient from '../api/client';
 import type { PublishJob, PublishedPost } from '../api/models';
-import Sidebar from '../components/Sidebar';
+import StudioShell from '../components/studio/StudioShell';
 
 const PublishHistoryPage: React.FC = () => {
   const [history, setHistory] = useState<{ jobs: PublishJob[]; posts: PublishedPost[] }>({ jobs: [], posts: [] });
@@ -21,12 +21,16 @@ const PublishHistoryPage: React.FC = () => {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#08111f] text-slate-100 flex">
-      <Sidebar />
-      <main className="flex-1 p-8">
-        <div className="mx-auto max-w-6xl rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-          <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">History</div>
-          <h1 className="mt-2 text-4xl font-semibold">Publish history</h1>
+    <StudioShell mainClassName="studio-detail-surface">
+      <div className="mx-auto w-full max-w-6xl space-y-6">
+        <div className="studio-page-hero">
+          <div className="studio-page-kicker">Release History</div>
+          <h1 className="mt-2">Publish history</h1>
+          <p className="mt-3 max-w-3xl text-sm text-slate-400">
+            Review assisted release jobs and external post links created from approved productions.
+          </p>
+        </div>
+        <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
           {error ? <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div> : null}
           <div className="mt-6 grid gap-6 lg:grid-cols-2">
             <div className="space-y-3">
@@ -49,8 +53,8 @@ const PublishHistoryPage: React.FC = () => {
             </div>
           </div>
         </div>
-      </main>
-    </div>
+      </div>
+    </StudioShell>
   );
 };
 

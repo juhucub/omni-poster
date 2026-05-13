@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 
 import apiClient, { apiBaseUrl } from '../api/client';
 import type {
   CharacterPreset,
+  Project,
   TTSFailure,
   VoiceCalibrationBatch,
   VoiceCalibrationMatrix,
@@ -11,7 +13,7 @@ import type {
   VoiceProfile,
   VoiceProviderCapability,
 } from '../api/models';
-import Sidebar from '../components/Sidebar';
+import StudioShell from '../components/studio/StudioShell';
 
 const emptyForm = {
   display_name: '',
@@ -46,8 +48,10 @@ const fixedTestPhrases = [
 ];
 
 const VoiceLabPage: React.FC = () => {
+  const [searchParams] = useSearchParams();
   const [presets, setPresets] = useState<CharacterPreset[]>([]);
   const [profiles, setProfiles] = useState<VoiceProfile[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [providerCapabilities, setProviderCapabilities] = useState<VoiceProviderCapability[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [previewProviderPreference, setPreviewProviderPreference] = useState<'auto' | 'openvoice' | 'xtts' | 'rvc' | 'espeak'>('auto');
@@ -92,6 +96,8 @@ const VoiceLabPage: React.FC = () => {
     [providerCapabilities, form.provider]
   );
   const selectedAssociatedImageUrl = selectedVoiceProfile?.associated_character_image_url || selectedPreset?.portrait_url || null;
+  const linkedProductionId = searchParams.get('productionId');
+  const linkedSpeakerId = searchParams.get('speakerId');
 
   const supportedControls = useMemo(
     () => new Set((selectedProviderCapability?.supported_controls || []).map((item) => String(item))),
@@ -120,6 +126,16 @@ const VoiceLabPage: React.FC = () => {
   const goldenPreviewUrl = String(selectedVoiceProfile?.provider_metadata?.['golden_preview_url'] || selectedRecipeStatus['golden_preview_url'] || '');
   const recipeReady = Boolean(selectedRecipeStatus['ready_for_test_render']);
   const recipeError = selectedRecipeStatus['error'] as { code?: string; message?: string } | undefined;
+  const selectedProfileUsage = useMemo(
+    () =>
+      projects
+        .flatMap((project) =>
+          (project.speaker_bindings || [])
+            .filter((binding) => binding.voice_profile_id === selectedVoiceProfile?.id)
+            .map((binding) => ({ project, binding }))
+        ),
+    [projects, selectedVoiceProfile?.id]
+  );
 
   const supportsControl = (controlName: string) => supportedControls.has(controlName);
 
@@ -182,9 +198,14 @@ const VoiceLabPage: React.FC = () => {
     }
   };
 
+  const loadProjects = async () => {
+    const response = await apiClient.get<{ items: Project[] }>('/projects');
+    setProjects(response.data.items || []);
+  };
+
   const loadAll = async () => {
     try {
-      await Promise.all([loadCapabilities(), loadVoiceProfiles(), loadPresets()]);
+      await Promise.all([loadCapabilities(), loadVoiceProfiles(), loadPresets(), loadProjects()]);
       setError(null);
       setProviderError(null);
     } catch (err: any) {
@@ -195,6 +216,17 @@ const VoiceLabPage: React.FC = () => {
   useEffect(() => {
     loadAll();
   }, []);
+
+  useEffect(() => {
+    const profileId = searchParams.get('profileId');
+    if (!profileId || !presets.length) {
+      return;
+    }
+    const matchingPreset = presets.find((preset) => preset.voice_profile_id === profileId);
+    if (matchingPreset && selectedId !== matchingPreset.id) {
+      setSelectedId(matchingPreset.id);
+    }
+  }, [presets, searchParams, selectedId]);
 
   useEffect(() => {
     hydrateForm(selectedPreset, selectedVoiceProfile);
@@ -704,13 +736,29 @@ const VoiceLabPage: React.FC = () => {
   const providerFailures = Object.entries(providerError?.provider_failures || {});
 
   return (
-    <div className="min-h-screen bg-[#08111f] text-slate-100 flex">
-      <Sidebar />
-      <main className="flex-1 p-8">
-        <div className="max-w-7xl mx-auto grid gap-6 xl:grid-cols-[0.85fr_1.15fr]">
+    <StudioShell mainClassName="studio-detail-surface">
+      <div className="max-w-7xl mx-auto w-full space-y-6">
+        <div className="studio-page-hero flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="studio-page-kicker">Voice Lab</div>
+            <h1 className="mt-2">Voice cast profiles</h1>
+            <p className="mt-3 max-w-3xl text-sm text-slate-400">
+              Build reusable character voices, then bind them into productions without breaking render provenance.
+            </p>
+            <div className="studio-quick-links mt-4">
+              <Link className="studio-link-pill" to="/">Command Room</Link>
+              {linkedProductionId && <Link className="studio-link-pill" to={`/projects/${linkedProductionId}?tab=voices`}>Back to Production</Link>}
+              {linkedSpeakerId && <span className="studio-link-pill">Speaker: {linkedSpeakerId}</span>}
+            </div>
+          </div>
+          <button onClick={loadAll} className="rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10">
+            Refresh
+          </button>
+        </div>
+        <div className="grid gap-6 xl:grid-cols-[0.85fr_1.15fr]">
           <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
             <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Character presets</div>
-            <h1 className="mt-2 text-4xl font-semibold">Voice Lab</h1>
+            <h2 className="mt-2 text-3xl font-semibold">Profile library</h2>
             <p className="mt-3 text-slate-400">
               Build character voices with a clear split between voice identity and performance. Reference audio drives OpenVoice tone color cloning; performance controls only affect providers that actually support them today.
             </p>
@@ -827,6 +875,42 @@ const VoiceLabPage: React.FC = () => {
                 <div className="mt-1 text-sm text-slate-400">
                   {selectedVoiceProfile?.id || selectedPreset?.voice_profile_id || 'Save a preset to create a voice profile.'}
                 </div>
+              </div>
+            </div>
+            <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-100">Production Usage</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    Profiles selected here are the same voice profile IDs used by Production Lab render snapshots.
+                  </div>
+                </div>
+                {selectedVoiceProfile && <span className="rounded-full border border-cyan-300/30 px-3 py-1 text-xs text-cyan-200">{selectedProfileUsage.length} binding{selectedProfileUsage.length === 1 ? '' : 's'}</span>}
+              </div>
+              <div className="mt-3 space-y-2">
+                {selectedProfileUsage.map(({ project, binding }) => (
+                  <Link
+                    key={`${project.id}-${binding.speaker_name}`}
+                    to={`/projects/${project.id}?tab=voices`}
+                    className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm hover:border-cyan-300/40"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate text-slate-100">{project.name}</span>
+                      <span className="mt-1 block text-xs text-slate-500">{binding.speaker_name} · {binding.provider}</span>
+                    </span>
+                    <span className="text-xs text-cyan-200">Open</span>
+                  </Link>
+                ))}
+                {selectedVoiceProfile && selectedProfileUsage.length === 0 && (
+                  <div className="rounded-xl border border-dashed border-white/10 px-3 py-3 text-sm text-slate-500">
+                    This profile is not bound to a production yet.
+                  </div>
+                )}
+                {!selectedVoiceProfile && (
+                  <div className="rounded-xl border border-dashed border-white/10 px-3 py-3 text-sm text-slate-500">
+                    Select or create a profile to see production bindings.
+                  </div>
+                )}
               </div>
             </div>
             <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
@@ -1543,8 +1627,8 @@ const VoiceLabPage: React.FC = () => {
             </div>
           </section>
         </div>
-      </main>
-    </div>
+      </div>
+    </StudioShell>
   );
 };
 

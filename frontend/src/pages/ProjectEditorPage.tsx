@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import {
   CheckCircle2,
   CircleDashed,
@@ -34,7 +34,7 @@ import type {
   ScriptGenerationProviderMetadata,
   ScriptGenerationResponse,
 } from '../api/models';
-import Sidebar from '../components/Sidebar';
+import StudioShell from '../components/studio/StudioShell';
 
 const STAGES = ['Assets', 'Script', 'Generate', 'Review', 'Metadata', 'Routing', 'Publish', 'History'] as const;
 type Stage = (typeof STAGES)[number];
@@ -88,10 +88,21 @@ const defaultPreviewSettings: ProjectPreviewSettings = {
     character_scale: 1,
     chat_font_size_px: 18,
   },
+  layout_preset: 'left_right_locked',
+  caption_style: 'bold_bubble',
+  speaker_png_size: 'standard',
+  render_preset: 'shorts_1080x1920',
 };
 
 const clampPreviewLayout = (settings: ProjectPreviewSettings): ProjectPreviewSettings => ({
+  ...defaultPreviewSettings,
   ...settings,
+  background_metadata: settings.background_metadata || {},
+  speaker_mappings: settings.speaker_mappings || [],
+  layout_preset: settings.layout_preset || defaultPreviewSettings.layout_preset,
+  caption_style: settings.caption_style || defaultPreviewSettings.caption_style,
+  speaker_png_size: settings.speaker_png_size || defaultPreviewSettings.speaker_png_size,
+  render_preset: settings.render_preset || defaultPreviewSettings.render_preset,
   layout: {
     // Match backend renderer bounds so saved controls cannot create an impossible preview state.
     character_scale: Math.min(Math.max(Number(settings.layout?.character_scale || 1), 0.75), 1.5),
@@ -132,6 +143,7 @@ const generationStageLabel = (job: GenerationJob | null) => {
 
 const ProjectEditorPage: React.FC = () => {
   const { projectId } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const id = Number(projectId);
 
   const [stage, setStage] = useState<Stage>('Assets');
@@ -173,6 +185,27 @@ const ProjectEditorPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    const tabToStage: Record<string, Stage> = {
+      assets: 'Assets',
+      scenes: 'Assets',
+      script: 'Script',
+      generate: 'Generate',
+      voices: 'Generate',
+      preview: 'Generate',
+      render: 'Generate',
+      review: 'Review',
+      metadata: 'Metadata',
+      routing: 'Routing',
+      release: 'Publish',
+      history: 'History',
+    };
+    if (tab && tabToStage[tab] && tabToStage[tab] !== stage) {
+      setStage(tabToStage[tab]);
+    }
+  }, [searchParams]);
 
   const activeGeneration = useMemo(
     () => Boolean(generationJob && ['queued', 'processing', 'retrying'].includes(generationJob.status)),
@@ -863,6 +896,14 @@ const ProjectEditorPage: React.FC = () => {
                   {entry.character_display_name || 'Unmapped'} · {entry.provider || 'tts'}
                 </div>
                 <div className="mt-1 text-xs text-cyan-200">{entry.voice_profile_id || 'ephemeral voice profile'}</div>
+                {entry.voice_profile_id && (
+                  <Link
+                    to={`/voice-lab?profileId=${encodeURIComponent(entry.voice_profile_id)}&productionId=${id}&speakerId=${encodeURIComponent(entry.speaker)}`}
+                    className="mt-2 inline-flex text-xs text-cyan-200 hover:text-cyan-100"
+                  >
+                    Edit in Voice Lab
+                  </Link>
+                )}
               </div>
             ))}
           </div>
@@ -949,25 +990,29 @@ const ProjectEditorPage: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#08111f] text-white flex">
-        <Sidebar />
-        <main className="flex-1 p-8">Loading project...</main>
-      </div>
+      <StudioShell mainClassName="studio-detail-surface">
+        <div className="mx-auto w-full max-w-7xl">
+          <div className="studio-page-hero">Loading production...</div>
+        </div>
+      </StudioShell>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#08111f] text-slate-100 flex">
-      <Sidebar />
-      <main className="flex-1 p-8">
-        <div className="max-w-7xl mx-auto space-y-6">
-          <div className="flex items-center justify-between gap-4">
+    <StudioShell currentProject={project} mainClassName="studio-detail-surface">
+      <div className="max-w-7xl mx-auto w-full space-y-6">
+          <div className="studio-page-hero flex items-center justify-between gap-4">
             <div>
-              <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">{project?.status}</div>
-              <h1 className="mt-2 text-4xl font-semibold">{project?.name}</h1>
+              <div className="studio-page-kicker">Production Lab · {project?.status}</div>
+              <h1 className="mt-2">{project?.name}</h1>
               <p className="mt-3 max-w-3xl text-slate-400">
                 Stage the asset, refine the dialogue, render a preview, move it through human review, then publish in assisted or automatic mode.
               </p>
+              <div className="studio-quick-links mt-4">
+                <Link className="studio-link-pill" to="/">Command Room</Link>
+                <Link className="studio-link-pill" to={`/voice-lab?productionId=${id}`}>Voice Lab</Link>
+                <a className="studio-link-pill" href="#pre-render-preview">Preview Settings</a>
+              </div>
             </div>
             <button
               onClick={loadAll}
@@ -1003,7 +1048,10 @@ const ProjectEditorPage: React.FC = () => {
               {STAGES.map((item) => (
                 <button
                   key={item}
-                  onClick={() => setStage(item)}
+                  onClick={() => {
+                    setStage(item);
+                    setSearchParams({ tab: item.toLowerCase() });
+                  }}
                   className={`rounded-2xl px-4 py-3 text-sm font-medium transition ${
                     stage === item ? 'bg-cyan-300 text-slate-950' : 'bg-slate-950/50 text-slate-300 hover:bg-white/10'
                   }`}
@@ -1342,6 +1390,14 @@ const ProjectEditorPage: React.FC = () => {
                               <div className="mt-1 text-xs text-slate-500">
                                 {binding ? `${binding.character_display_name} · ${binding.provider}` : 'No preset selected yet'}
                               </div>
+                              {binding?.voice_profile_id && (
+                                <Link
+                                  to={`/voice-lab?profileId=${encodeURIComponent(binding.voice_profile_id)}&productionId=${id}&speakerId=${encodeURIComponent(speakerName)}`}
+                                  className="mt-2 inline-flex text-xs text-cyan-200 hover:text-cyan-100"
+                                >
+                                  Edit selected voice in Voice Lab
+                                </Link>
+                              )}
                             </div>
                             <div className="mt-3 grid gap-2 sm:grid-cols-2">
                               {characterPresets.map((preset) => {
@@ -1770,7 +1826,7 @@ const ProjectEditorPage: React.FC = () => {
             </section>
 
             <section className="space-y-6">
-              <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+              <div id="pre-render-preview" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <h2 className="text-xl font-semibold">Pre-Render Preview</h2>
@@ -1959,8 +2015,7 @@ const ProjectEditorPage: React.FC = () => {
             </section>
           </div>
         </div>
-      </main>
-    </div>
+    </StudioShell>
   );
 };
 
