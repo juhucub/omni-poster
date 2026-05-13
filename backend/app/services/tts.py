@@ -134,6 +134,7 @@ class SpeechSegment:
     slot_index: int
     audio_path: str
     duration_seconds: float
+    caption_text: str | None = None
     voice_profile_id: str = ""
     provider_used: str = "espeak"
     fallback_used: bool = False
@@ -232,6 +233,7 @@ class BaseTTSProvider:
         for index, line in enumerate(lines):
             speaker = str(line.get("speaker") or f"Speaker {index + 1}").strip()
             text = str(line.get("text") or "").strip()
+            caption_text = str(line.get("caption_text") or text).strip()
             if not text:
                 continue
             profile = voice_profile_map[speaker]
@@ -2303,6 +2305,7 @@ class TTSOrchestrator:
         for index, line in enumerate(lines):
             speaker = str(line.get("speaker") or f"Speaker {index + 1}").strip()
             text = str(line.get("text") or "").strip()
+            caption_text = str(line.get("caption_text") or text).strip()
             if not text:
                 continue
             slot_index = slot_map.setdefault(speaker, len(slot_map))
@@ -2331,6 +2334,7 @@ class TTSOrchestrator:
                     slot_index=slot_index,
                     audio_path=result.audio_path,
                     duration_seconds=result.duration_seconds,
+                    caption_text=caption_text,
                     voice_profile_id=result.voice_profile_id,
                     provider_used=result.provider_used,
                     fallback_used=result.fallback_used,

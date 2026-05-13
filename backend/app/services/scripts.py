@@ -7,12 +7,21 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.models import ScriptLineItem, ScriptRevision
-from app.schemas import ScriptLine
+from app.schemas import DialogueScriptLine, GeneratedScript
 
 SCRIPT_LINE_RE = re.compile(r"^\s*<([^>]+)>\s*(.+?)\s*$")
 
 
-def _normalize_script_line(speaker: str, text: str, order: int, line_id: int | None = None) -> dict:
+def _normalize_script_line(
+    speaker: str,
+    text: str,
+    order: int,
+    line_id: int | None = None,
+    *,
+    caption_text: str | None = None,
+    section: str | None = None,
+    generated_line_id: str | None = None,
+) -> dict:
     normalized_speaker = speaker.strip()
     normalized_text = text.strip()
     if not normalized_speaker or not normalized_text:
@@ -20,12 +29,19 @@ def _normalize_script_line(speaker: str, text: str, order: int, line_id: int | N
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Each script line must include a speaker and dialogue text.",
         )
-    return {
+    payload = {
         "id": line_id,
         "speaker": normalized_speaker,
         "text": normalized_text,
         "order": order,
     }
+    if caption_text:
+        payload["caption_text"] = caption_text.strip()
+    if section:
+        payload["section"] = section.strip()
+    if generated_line_id:
+        payload["line_id"] = generated_line_id.strip()
+    return payload
 
 
 def parse_dialogue_script(raw_text: str) -> tuple[list[dict], list[str]]:
@@ -61,15 +77,23 @@ def parse_dialogue_script(raw_text: str) -> tuple[list[dict], list[str]]:
     return lines, characters
 
 
-def parse_script_lines(lines: Iterable[ScriptLine | dict]) -> tuple[list[dict], list[str]]:
+def parse_script_lines(lines: Iterable[DialogueScriptLine | dict]) -> tuple[list[dict], list[str]]:
     normalized: list[dict] = []
     characters: list[str] = []
 
     for index, line in enumerate(lines):
-        speaker = line.speaker if isinstance(line, ScriptLine) else line.get("speaker")
-        text = line.text if isinstance(line, ScriptLine) else line.get("text")
-        line_id = line.id if isinstance(line, ScriptLine) else line.get("id")
-        normalized_line = _normalize_script_line(speaker, text, index, line_id=line_id)
+        speaker = line.speaker if isinstance(line, DialogueScriptLine) else line.get("speaker")
+        text = line.text if isinstance(line, DialogueScriptLine) else line.get("text")
+        line_id = line.id if isinstance(line, DialogueScriptLine) else line.get("id")
+        normalized_line = _normalize_script_line(
+            speaker,
+            text,
+            index,
+            line_id=line_id,
+            caption_text=None if isinstance(line, DialogueScriptLine) else line.get("caption_text"),
+            section=None if isinstance(line, DialogueScriptLine) else line.get("section"),
+            generated_line_id=None if isinstance(line, DialogueScriptLine) else line.get("line_id"),
+        )
         normalized.append(normalized_line)
         if normalized_line["speaker"] not in characters:
             characters.append(normalized_line["speaker"])
@@ -92,10 +116,11 @@ def save_script_revision(
     *,
     project_id: int,
     raw_text: str | None,
-    parsed_lines: list[ScriptLine] | list[dict] | None,
+    parsed_lines: list[DialogueScriptLine] | list[dict] | None,
     source: str,
     parent_revision_id: int | None = None,
     generation_provider: str | None = None,
+    generated_script: GeneratedScript | dict | None = None,
 ) -> ScriptRevision:
     if parsed_lines is not None:
         normalized_lines, characters = parse_script_lines(parsed_lines)
@@ -115,6 +140,7 @@ def save_script_revision(
         raw_text=normalized_raw_text,
         parsed_lines_json=normalized_lines,
         characters_json=characters,
+        generated_script_json=generated_script.model_dump() if isinstance(generated_script, GeneratedScript) else generated_script,
         source=source,
         generation_provider=generation_provider,
         is_current=True,

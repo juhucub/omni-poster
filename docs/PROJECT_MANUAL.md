@@ -79,6 +79,8 @@ These domain concepts should remain distinct:
 
 A user-authored dialogue script. It may contain two speakers or many speakers.
 
+Generated scripts should be structured production data, not raw paragraphs. A generated script should preserve speaker definitions, sectioned lines, caption-ready text, optional visual cues, metadata suggestions, provider diagnostics, and validation warnings while still deriving speaker segments for rendering.
+
 ### Speaker Segment
 
 A parsed unit of dialogue with:
@@ -119,6 +121,7 @@ The output video and any intermediate artifacts worth exposing or debugging.
 - Long-running video generation should be queued through Celery.
 - Backend code should separate API routes, services, providers, storage, and rendering concerns.
 - Health checks should report provider availability and common runtime dependencies.
+- Script generation should prefer local Ollama when configured, but must return deterministic structured fallback output when Ollama is disabled or unavailable.
 
 ### Frontend
 
@@ -176,6 +179,21 @@ The renderer must not guess speaker identity from file ordering when explicit sp
 Render jobs should leave observable performance evidence without changing render correctness. Profiling output should be written as a generated job artifact at `MEDIA_DIR/generated/{job_id}/generation_profile.json` and exposed through the authenticated job artifact route. The profile should identify slow stages across provider health checks, TTS/profile resolution, XTTS load/conditioning/inference, persisted and normalized segment WAV handling, composite audio, FFmpeg visual assembly, encoding, and debug-only final audio extraction when available.
 
 Runtime performance controls may cap preview/export resolution and FPS separately (`RENDER_PREVIEW_WIDTH`, `RENDER_PREVIEW_HEIGHT`, `RENDER_PREVIEW_FPS_CAP`, `RENDER_EXPORT_WIDTH`, `RENDER_EXPORT_HEIGHT`, `RENDER_EXPORT_FPS_CAP`) and may cap ffmpeg threads (`RENDER_FFMPEG_THREAD_CAP`). Profiling can be toggled with `RENDER_PROFILING_ENABLED`, defaulting on for development. XTTS selected-recipe render segments may reuse loaded runtime objects and conditioning latents inside a worker process with `XTTS_WORKER_CACHE_ENABLED` and `XTTS_WORKER_CACHE_MAX_ENTRIES`. Rendered XTTS/OpenVoice segment WAVs may be reused only through the strict content-addressed render cache when all content-affecting text, voice, provider, reference, recipe, and render settings inputs match; renders must still materialize distinct job-scoped segment WAV artifacts for auditability. Safe CPU inference controls may enable torch inference mode, set optional torch CPU thread caps, and apply an opt-in preview-only split-sentence override. Preview/export x264 preset and CRF may be configured separately while preserving existing defaults. For Docker/dev CPU-only XTTS runs, the measured default profile is `XTTS_CPU_NUM_THREADS=4`, `XTTS_CPU_INTEROP_THREADS=1`, and `CELERY_GENERATION_CONCURRENCY=1`; do not replace persisted render segment WAVs with hidden temp audio or Voice Lab/shared preview audio. Opt-in fast preview testing can also use `RENDER_PREVIEW_WIDTH=540`, `RENDER_PREVIEW_HEIGHT=960`, `RENDER_PREVIEW_FPS_CAP=12`, `RENDER_PREVIEW_ENCODE_PRESET=ultrafast`, `RENDER_PREVIEW_CRF=28`, and `RENDER_FFMPEG_THREAD_CAP=4`.
+
+### Local Ollama Script Generation
+
+Local script generation is configured with `OLLAMA_ENABLED`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, and `OLLAMA_TEMPERATURE`.
+
+Docker development can start Ollama with:
+
+```sh
+docker compose -f deploy/compose/docker-compose.yml --profile ollama up ollama
+docker compose -f deploy/compose/docker-compose.yml exec ollama ollama pull llama3.1
+```
+
+When running the backend outside Docker, use a host Ollama service such as `OLLAMA_BASE_URL=http://localhost:11434` and pull the same model with `ollama pull llama3.1`.
+
+If Ollama is not reachable, disabled, times out, or returns invalid output after repair, script generation must return deterministic structured fallback output instead of failing app startup or blocking the script workflow.
 
 ## Non-Goals for MVP
 

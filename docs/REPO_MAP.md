@@ -8,7 +8,7 @@ Use this map before broad scans. Inspect the smallest relevant area first, then 
 
 - `backend/app/main.py` - FastAPI app setup and router registration.
 - `backend/app/routers/` - API routes for auth, assets, character presets, generation jobs, metadata, projects, publishing, reviews, routing, scripts, and social accounts.
-- `backend/app/services/` - Business logic for storage, rendering, TTS, voice profiles, voice replication, character presets, scripts, generation helpers, publishing, auth, notifications, and project state.
+- `backend/app/services/` - Business logic for storage, rendering, TTS, voice profiles, voice replication, character presets, scripts, script generation, generation helpers, publishing, auth, notifications, and project state.
 - `backend/app/tasks/` - Celery tasks for generation, voice preview, publishing, and scheduler work.
 - `backend/app/models.py` and `backend/app/schemas.py` - Database models and API schemas.
 - `backend/app/core/` - Shared configuration and request utilities.

@@ -1000,6 +1000,7 @@ class ProjectRenderService:
         for index, line in enumerate(parsed_lines):
             speaker = str(line.get("speaker") or f"Speaker {index + 1}").strip()
             text = str(line.get("text") or "").strip()
+            caption_text = str(line.get("caption_text") or text).strip()
             if not text:
                 continue
             slot_index = slot_map.setdefault(speaker, len(slot_map))
@@ -1040,6 +1041,7 @@ class ProjectRenderService:
                         slot_index=slot_index,
                         audio_path=str(output_path),
                         duration_seconds=float(metadata.get("duration_seconds") or self._wav_duration_seconds(output_path)),
+                        caption_text=caption_text,
                         voice_profile_id=str(metadata.get("voice_profile_id") or voice_profile.get("id") or ""),
                         provider_used=str(metadata.get("provider_used") or requested_provider or "espeak"),
                         fallback_used=bool(metadata.get("fallback_used", False)),
@@ -1095,6 +1097,7 @@ class ProjectRenderService:
                 "fallback_reason": result.fallback_reason,
                 "recipe_used": result.recipe_used or {},
                 "golden_preview_wav": result.golden_preview_wav,
+                "caption_text": caption_text,
                 "created_at": datetime.utcnow().isoformat(),
             }
             cache.store(output_path, cache_path, metadata)
@@ -1114,6 +1117,7 @@ class ProjectRenderService:
                     slot_index=slot_index,
                     audio_path=str(output_path),
                     duration_seconds=result.duration_seconds,
+                    caption_text=caption_text,
                     voice_profile_id=result.voice_profile_id,
                     provider_used=result.provider_used,
                     fallback_used=result.fallback_used,
@@ -1626,7 +1630,7 @@ class ProjectRenderService:
         label_font = self._load_font(max(24, int(chat_font_size_px * 1.45)))
         body_font = self._load_font(max(28, int(chat_font_size_px * 2)))
         draw.text((70, 74), segment.speaker.upper(), fill=palette["accent"], font=label_font)
-        wrapped_lines = textwrap.wrap(segment.text, width=24)[:4]
+        wrapped_lines = textwrap.wrap(segment.caption_text or segment.text, width=24)[:4]
         y = 138
         for line in wrapped_lines:
             draw.text((70, y), line, fill=(245, 248, 255, 255), font=body_font)

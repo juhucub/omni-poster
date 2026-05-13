@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -593,19 +593,122 @@ class ProjectPreviewSettingsUpdate(BaseModel):
     layout: ProjectPreviewLayout | None = None
 
 
-class ScriptLine(BaseModel):
+class DialogueScriptLine(BaseModel):
     id: int | None = None
     speaker: str
     text: str
     order: int
 
 
+ScriptSection = Literal["hook", "body", "payoff", "cta"]
+PlatformTarget = Literal["tiktok", "youtube_shorts", "instagram_reels"]
+
+
+class ScriptVisualCue(BaseModel):
+    cue_type: str = Field(default="none", max_length=64)
+    description: str = Field(default="", max_length=500)
+    asset_slot: str | None = Field(default=None, max_length=128)
+
+
+class ScriptLine(BaseModel):
+    id: str
+    section: ScriptSection
+    speaker_id: str
+    speaker_label: str
+    text: str
+    caption_text: str
+    estimated_duration_sec: float = Field(ge=0)
+    emotion: str | None = Field(default=None, max_length=64)
+    delivery: str | None = Field(default=None, max_length=128)
+    visual_cue: ScriptVisualCue | None = None
+
+
+class ScriptSpeaker(BaseModel):
+    id: str
+    label: str
+    role: str
+    voice_profile_id: str | None = None
+    speaker_image_id: str | None = None
+
+
+class CaptionBlock(BaseModel):
+    id: str
+    line_id: str
+    speaker_id: str
+    text: str
+    start_sec: float | None = None
+    end_sec: float | None = None
+
+
+class ScriptMetadataSuggestions(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    hashtags: list[str] = Field(default_factory=list)
+    cta: str | None = None
+
+
+class ScriptGenerationProviderConfig(BaseModel):
+    provider: str = "auto"
+    model: str | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    timeout_seconds: float | None = Field(default=None, gt=0)
+
+
+class GeneratedScript(BaseModel):
+    id: str
+    idea: str
+    content_format_id: str
+    platform: PlatformTarget
+    target_duration_sec: int
+    tone: str | None = None
+    audience: str | None = None
+    speakers: list[ScriptSpeaker]
+    lines: list[ScriptLine]
+    sections: list[ScriptSection] = Field(default_factory=list)
+    caption_blocks: list[CaptionBlock] = Field(default_factory=list)
+    metadata_suggestions: ScriptMetadataSuggestions = Field(default_factory=ScriptMetadataSuggestions)
+    total_estimated_duration_sec: float = 0
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    validation_warnings: list[str] = Field(default_factory=list)
+
+
+class ScriptGenerationRequest(BaseModel):
+    idea: str = Field(min_length=1, max_length=2000)
+    content_format_id: str = Field(default="educational_short", max_length=64)
+    platform: PlatformTarget = "tiktok"
+    target_duration_sec: int | None = Field(default=None, ge=10, le=180)
+    tone: str | None = Field(default="engaging", max_length=128)
+    audience: str | None = Field(default="general short-form viewers", max_length=256)
+    speaker_names: list[str] = Field(default_factory=list)
+    provider: str | None = Field(default=None, max_length=64)
+    provider_config: ScriptGenerationProviderConfig | None = None
+    debug: bool = False
+
+
+class ScriptGenerationProviderMetadata(BaseModel):
+    provider_name: str
+    model: str | None = None
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    generation_duration_ms: int | None = None
+    repair_attempted: bool = False
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScriptGenerationResponse(BaseModel):
+    generated_script: GeneratedScript
+    provider_metadata: ScriptGenerationProviderMetadata
+    validation_warnings: list[str] = Field(default_factory=list)
+    fallback_used: bool = False
+
+
 class ScriptRevisionSummary(BaseModel):
     id: int
     parent_revision_id: int | None = None
     raw_text: str
-    parsed_lines: list[ScriptLine]
+    parsed_lines: list[DialogueScriptLine]
     characters: list[str]
+    generated_script: GeneratedScript | None = None
     source: str
     generation_provider: str | None = None
     is_current: bool
@@ -622,13 +725,14 @@ class ScriptRevisionListResponse(BaseModel):
 
 class ScriptUpdateRequest(BaseModel):
     raw_text: str | None = None
-    parsed_lines: list[ScriptLine] | None = None
+    parsed_lines: list[DialogueScriptLine] | None = None
+    generated_script: GeneratedScript | None = None
     source: str = "manual"
     parent_revision_id: int | None = None
 
     @model_validator(mode="after")
     def validate_script_payload(self) -> "ScriptUpdateRequest":
-        if not self.raw_text and not self.parsed_lines:
+        if not self.raw_text and not self.parsed_lines and not self.generated_script:
             raise ValueError("Provide raw_text or parsed_lines.")
         return self
 
@@ -637,6 +741,11 @@ class ScriptGenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=1000)
     character_names: list[str] = Field(default_factory=lambda: ["Host", "Guest"])
     tone: str = Field(default="explanatory", max_length=64)
+    content_format_id: str = Field(default="educational_short", max_length=64)
+    platform: PlatformTarget = "tiktok"
+    target_duration_sec: int | None = Field(default=None, ge=10, le=180)
+    audience: str | None = Field(default="general short-form viewers", max_length=256)
+    debug: bool = False
 
 
 class GenerationJobCreateRequest(BaseModel):

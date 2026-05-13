@@ -9,6 +9,7 @@ from app.dependencies import get_current_user, get_db
 from app.models import ScriptRevision, User
 from app.routers.projects import get_owned_project
 from app.schemas import (
+    ScriptGenerationRequest,
     ScriptGenerateRequest,
     ScriptResponse,
     ScriptRevisionListResponse,
@@ -17,6 +18,8 @@ from app.schemas import (
 from app.services.audit import record_audit
 from app.services.notifications import create_notification
 from app.services.project_state import sync_project_state, to_script_summary
+from app.services.script_generation import ScriptGenerationService
+from app.services.script_generation.service import generated_script_to_dialogue_lines
 from app.services.scripts import generate_script_draft, save_script_revision
 
 router = APIRouter(tags=["scripts"])
@@ -58,14 +61,20 @@ def restore_script_revision(
     )
     if not revision:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Script revision not found")
+    restored_generated_lines = (
+        generated_script_to_dialogue_lines(revision.generated_script_json)
+        if revision.generated_script_json
+        else None
+    )
     restored = save_script_revision(
         db,
         project_id=project.id,
-        raw_text=revision.raw_text,
-        parsed_lines=None,
+        raw_text=None if restored_generated_lines else revision.raw_text,
+        parsed_lines=restored_generated_lines,
         source="restore",
         parent_revision_id=revision.id,
         generation_provider=revision.generation_provider,
+        generated_script=revision.generated_script_json,
     )
     project.current_script_revision_id = restored.id
     sync_project_state(project)
@@ -90,13 +99,15 @@ def update_project_script(
     db: Session = Depends(get_db),
 ):
     project = get_owned_project(db, current_user.id, project_id)
+    parsed_lines = generated_script_to_dialogue_lines(payload.generated_script) if payload.generated_script else payload.parsed_lines
     revision = save_script_revision(
         db,
         project_id=project.id,
         raw_text=payload.raw_text,
-        parsed_lines=payload.parsed_lines,
+        parsed_lines=parsed_lines,
         source=payload.source,
         parent_revision_id=payload.parent_revision_id or project.current_script_revision_id,
+        generated_script=payload.generated_script,
     )
     project.current_script_revision_id = revision.id
     sync_project_state(project)
@@ -130,15 +141,30 @@ def generate_project_script(
     db: Session = Depends(get_db),
 ):
     project = get_owned_project(db, current_user.id, project_id)
-    raw_text, provider = generate_script_draft(payload.prompt, payload.character_names, payload.tone)
+    generation_response = ScriptGenerationService().generate(
+        ScriptGenerationRequest(
+            idea=payload.prompt,
+            content_format_id=payload.content_format_id,
+            platform=payload.platform,
+            target_duration_sec=payload.target_duration_sec,
+            tone=payload.tone,
+            audience=payload.audience,
+            speaker_names=payload.character_names,
+            debug=payload.debug,
+        )
+    )
+    generated_script = generation_response.generated_script
+    provider = generation_response.provider_metadata.provider_name
+    parsed_lines = generated_script_to_dialogue_lines(generated_script)
     revision = save_script_revision(
         db,
         project_id=project.id,
-        raw_text=raw_text,
-        parsed_lines=None,
+        raw_text=None,
+        parsed_lines=parsed_lines,
         source="generated",
         parent_revision_id=project.current_script_revision_id,
         generation_provider=provider,
+        generated_script=generated_script,
     )
     project.current_script_revision_id = revision.id
     sync_project_state(project)

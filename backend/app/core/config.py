@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     RVC_MODELS_DIR: str = ""
     RVC_RMVPE_PATH: str = ""
     RVC_INFER_COMMAND: str = ""
+    OLLAMA_ENABLED: bool = True
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.1"
+    OLLAMA_TIMEOUT_SECONDS: float = 240.0
+    OLLAMA_TEMPERATURE: float = 0.7
 
     YOUTUBE_CLIENT_ID: str | None = None
     YOUTUBE_CLIENT_SECRET: str | None = None

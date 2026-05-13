@@ -26,7 +26,8 @@ from app.schemas import (
     ReviewCommentSummary,
     ReviewQueueItemSummary,
     SpeakerBindingSummary,
-    ScriptLine,
+    DialogueScriptLine,
+    GeneratedScript,
     ScriptRevisionSummary,
 )
 from app.services.voice_profiles import character_preset_portrait_url
@@ -201,11 +202,17 @@ def to_script_summary(revision: ScriptRevision | None) -> ScriptRevisionSummary 
         return None
 
     line_items = [
-        ScriptLine(id=line.id, speaker=line.speaker, text=line.text, order=line.line_order)
+        DialogueScriptLine(id=line.id, speaker=line.speaker, text=line.text, order=line.line_order)
         for line in revision.line_items
     ]
     if not line_items:
-        line_items = [ScriptLine(**line) for line in revision.parsed_lines_json]
+        line_items = [DialogueScriptLine(**line) for line in revision.parsed_lines_json]
+    generated_script = None
+    if revision.generated_script_json:
+        try:
+            generated_script = GeneratedScript(**revision.generated_script_json)
+        except Exception:
+            generated_script = None
 
     return ScriptRevisionSummary(
         id=revision.id,
@@ -213,6 +220,7 @@ def to_script_summary(revision: ScriptRevision | None) -> ScriptRevisionSummary 
         raw_text=revision.raw_text,
         parsed_lines=line_items,
         characters=revision.characters_json,
+        generated_script=generated_script,
         source=revision.source,
         generation_provider=revision.generation_provider,
         is_current=revision.is_current,

@@ -494,6 +494,7 @@ class ScriptRevision(Base):
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)
     parsed_lines_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     characters_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    generated_script_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     source: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
     generation_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

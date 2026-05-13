@@ -348,3 +348,31 @@ The normal render path is FFmpeg-first:
 - `backend/app/services/render_planning.py`
 - Generation job API/UI metadata
 - Render regression tests
+
+## ADR-011: Treat GeneratedScript As The Canonical Structured Script Artifact
+
+Status: Accepted
+Date: 2026-05-13
+
+### Context
+
+Format-aware script generation needs richer production data than the legacy manual `<Speaker> dialogue` format can carry. At the same time, rendering and TTS already rely on parsed speaker segments as the canonical timeline.
+
+### Decision
+
+Script generation produces a `GeneratedScript` object with speakers, sectioned lines, caption text, visual cues, metadata suggestions, provider diagnostics, and validation warnings.
+
+Generated scripts are persisted on script revisions as structured JSON. The existing parsed speaker segment list remains the render/TTS bridge and is derived from `GeneratedScript.lines` for generated scripts.
+
+### Consequences
+
+- Manual scripts keep working through the legacy dialogue-line path.
+- Generated scripts can feed captions, preview, metadata, future Content Format Presets, and publishing prep without reparsing raw paragraphs.
+- Render/TTS correctness still depends on speaker segment order, text, and explicit speaker mapping.
+
+### Files/Areas Affected
+
+- Script generation schemas, route, services, and migration.
+- Project Editor Script UI.
+- Script revision serialization.
+- TTS/render caption display.

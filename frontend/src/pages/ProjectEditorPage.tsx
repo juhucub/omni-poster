@@ -17,7 +17,9 @@ import type {
   BackgroundPreset,
   CharacterPreset,
   GenerationJob,
+  GeneratedScript,
   OutputVideo,
+  PlatformTarget,
   PlatformMetadata,
   Project,
   PublishJob,
@@ -29,6 +31,7 @@ import type {
   ScriptRevision,
   SocialAccount,
   ProjectPreviewSettings,
+  ScriptGenerationResponse,
 } from '../api/models';
 import Sidebar from '../components/Sidebar';
 
@@ -36,6 +39,21 @@ const STAGES = ['Assets', 'Script', 'Generate', 'Review', 'Metadata', 'Routing',
 type Stage = (typeof STAGES)[number];
 
 const defaultScript = '<Host> Welcome to Omni-poster.\n<Guest> We can keep revising this conversation before it ships.';
+const contentFormats = [
+  { id: 'reddit_story', label: 'Reddit Story' },
+  { id: 'character_dialogue', label: 'Character Dialogue' },
+  { id: 'podcast_clip', label: 'Podcast Clip' },
+  { id: 'debate_format', label: 'Debate Format' },
+  { id: 'meme_news_reaction', label: 'Meme News Reaction' },
+  { id: 'educational_short', label: 'Educational Short' },
+  { id: 'multi_speaker_skit', label: 'Multi-Speaker Skit' },
+];
+
+const platformTargets: Array<{ id: PlatformTarget; label: string }> = [
+  { id: 'tiktok', label: 'TikTok' },
+  { id: 'youtube_shorts', label: 'YouTube Shorts' },
+  { id: 'instagram_reels', label: 'Instagram Reels' },
+];
 
 const parseDraftToLines = (value: string): ScriptLine[] =>
   value
@@ -124,6 +142,14 @@ const ProjectEditorPage: React.FC = () => {
   const [scriptDraft, setScriptDraft] = useState(defaultScript);
   const [scriptLines, setScriptLines] = useState<ScriptLine[]>(parseDraftToLines(defaultScript));
   const [scriptPrompt, setScriptPrompt] = useState('an explainer about why short-form distribution pipelines need review');
+  const [scriptFormatId, setScriptFormatId] = useState('educational_short');
+  const [scriptPlatform, setScriptPlatform] = useState<PlatformTarget>('tiktok');
+  const [scriptTargetDuration, setScriptTargetDuration] = useState(45);
+  const [scriptTone, setScriptTone] = useState('explanatory');
+  const [scriptAudience, setScriptAudience] = useState('general short-form viewers');
+  const [generatedScript, setGeneratedScript] = useState<GeneratedScript | null>(null);
+  const [scriptProviderStatus, setScriptProviderStatus] = useState<Record<string, unknown> | null>(null);
+  const [scriptGenerationWarnings, setScriptGenerationWarnings] = useState<string[]>([]);
   const [metadata, setMetadata] = useState<PlatformMetadata | null>(null);
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [outputs, setOutputs] = useState<OutputVideo[]>([]);
@@ -260,6 +286,7 @@ const ProjectEditorPage: React.FC = () => {
     const nextLines = revision?.parsed_lines?.length ? revision.parsed_lines : parseDraftToLines(nextDraft);
     setScriptDraft(nextDraft);
     setScriptLines(nextLines);
+    setGeneratedScript(revision?.generated_script || null);
   };
 
   const loadAll = async () => {
@@ -481,15 +508,56 @@ const ProjectEditorPage: React.FC = () => {
   const generateScript = async () => {
     try {
       setBusy('script-generate');
-      const response = await apiClient.post<{ current_revision: ScriptRevision }>(`/projects/${id}/script/generate`, {
-        prompt: scriptPrompt,
-        character_names: scriptLines.slice(0, 2).map((line) => line.speaker).filter(Boolean),
-        tone: 'explanatory',
+      const response = await apiClient.post<ScriptGenerationResponse>('/script-generation/generate', {
+        idea: scriptPrompt,
+        content_format_id: scriptFormatId,
+        platform: scriptPlatform,
+        target_duration_sec: scriptTargetDuration,
+        tone: scriptTone,
+        audience: scriptAudience,
+        speaker_names: detectedSpeakers,
+      });
+      setGeneratedScript(response.data.generated_script);
+      setScriptProviderStatus(response.data.provider_metadata);
+      setScriptGenerationWarnings(response.data.validation_warnings || []);
+      const nextLines = response.data.generated_script.lines.map((line, index) => ({
+        id: undefined,
+        speaker: line.speaker_label,
+        text: line.text,
+        order: index,
+      }));
+      syncDraftFromLines(nextLines);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Script generation failed.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const acceptGeneratedScript = async () => {
+    if (!generatedScript) {
+      return;
+    }
+    try {
+      setBusy('script');
+      const parsedLines = generatedScript.lines.map((line, index) => ({
+        speaker: line.speaker_label,
+        text: line.text,
+        caption_text: line.caption_text,
+        section: line.section,
+        line_id: line.id,
+        order: index,
+      }));
+      const response = await apiClient.put<{ current_revision: ScriptRevision }>(`/projects/${id}/script`, {
+        parsed_lines: parsedLines,
+        generated_script: generatedScript,
+        source: 'generated',
+        parent_revision_id: script?.id || null,
       });
       hydrateScriptState(response.data.current_revision);
       await loadAll();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Script generation failed.');
+      setError(err.response?.data?.detail || 'Failed to accept generated script.');
     } finally {
       setBusy(null);
     }
@@ -993,12 +1061,81 @@ const ProjectEditorPage: React.FC = () => {
                     </div>
                   )}
 
-                  <input
-                    value={scriptPrompt}
-                    onChange={(event) => setScriptPrompt(event.target.value)}
-                    placeholder="Prompt for AI-assisted script generation"
-                    className="mt-4 w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                  />
+                  <div className="mt-4 grid gap-3 lg:grid-cols-[1.4fr_0.8fr_0.8fr_0.5fr]">
+                    <input
+                      value={scriptPrompt}
+                      onChange={(event) => setScriptPrompt(event.target.value)}
+                      placeholder="Idea for structured script generation"
+                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                    />
+                    <select
+                      value={scriptFormatId}
+                      onChange={(event) => setScriptFormatId(event.target.value)}
+                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                    >
+                      {contentFormats.map((format) => (
+                        <option key={format.id} value={format.id}>{format.label}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={scriptPlatform}
+                      onChange={(event) => setScriptPlatform(event.target.value as PlatformTarget)}
+                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                    >
+                      {platformTargets.map((platform) => (
+                        <option key={platform.id} value={platform.id}>{platform.label}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      min={10}
+                      max={180}
+                      value={scriptTargetDuration}
+                      onChange={(event) => setScriptTargetDuration(Number(event.target.value) || 45)}
+                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                    />
+                  </div>
+
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <input
+                      value={scriptTone}
+                      onChange={(event) => setScriptTone(event.target.value)}
+                      placeholder="Tone"
+                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                    />
+                    <input
+                      value={scriptAudience}
+                      onChange={(event) => setScriptAudience(event.target.value)}
+                      placeholder="Audience"
+                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                    />
+                  </div>
+
+                  {(generatedScript || scriptProviderStatus) && (
+                    <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-4 text-sm text-cyan-50">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          Script provider: {String(scriptProviderStatus?.provider_name || generatedScript?.provider_metadata?.provider_name || 'unknown')}
+                          {scriptProviderStatus?.fallback_used ? ' · fallback used' : ''}
+                          {generatedScript ? ` · ${generatedScript.total_estimated_duration_sec.toFixed(1)}s estimated` : ''}
+                        </div>
+                        {generatedScript && (
+                          <button
+                            onClick={acceptGeneratedScript}
+                            disabled={busy === 'script'}
+                            className="rounded-2xl bg-cyan-100 px-4 py-2 font-medium text-slate-950 disabled:opacity-60"
+                          >
+                            Accept Structured Script
+                          </button>
+                        )}
+                      </div>
+                      {scriptGenerationWarnings.length > 0 && (
+                        <div className="mt-2 text-xs text-amber-100">
+                          {scriptGenerationWarnings.slice(0, 3).join(' · ')}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div className="mt-6 grid gap-4 xl:grid-cols-[1fr_0.8fr]">
                     <div className="space-y-3">
@@ -1031,6 +1168,18 @@ const ProjectEditorPage: React.FC = () => {
                       >
                         Add Dialogue Line
                       </button>
+                      {generatedScript && (
+                        <div className="space-y-2 rounded-2xl border border-white/10 bg-slate-950/30 p-4">
+                          <div className="text-sm font-medium text-slate-200">Structured Lines</div>
+                          {generatedScript.lines.slice(0, 8).map((line) => (
+                            <div key={line.id} className="rounded-xl border border-white/10 bg-black/20 p-3 text-sm">
+                              <div className="text-xs uppercase tracking-wide text-cyan-200">{line.section} · {line.speaker_label}</div>
+                              <div className="mt-1 text-slate-100">{line.text}</div>
+                              <div className="mt-1 text-xs text-slate-400">{line.caption_text}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
                     <div className="space-y-4">

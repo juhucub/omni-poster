@@ -50,12 +50,68 @@ export interface ScriptLine {
   order: number;
 }
 
+export type ScriptSection = 'hook' | 'body' | 'payoff' | 'cta';
+export type PlatformTarget = 'tiktok' | 'youtube_shorts' | 'instagram_reels';
+
+export interface ScriptVisualCue {
+  cue_type: string;
+  description: string;
+  asset_slot: string | null;
+}
+
+export interface GeneratedScriptLine {
+  id: string;
+  section: ScriptSection;
+  speaker_id: string;
+  speaker_label: string;
+  text: string;
+  caption_text: string;
+  estimated_duration_sec: number;
+  emotion?: string | null;
+  delivery?: string | null;
+  visual_cue?: ScriptVisualCue | null;
+}
+
+export interface ScriptSpeaker {
+  id: string;
+  label: string;
+  role: string;
+  voice_profile_id: string | null;
+  speaker_image_id: string | null;
+}
+
+export interface GeneratedScript {
+  id: string;
+  idea: string;
+  content_format_id: string;
+  platform: PlatformTarget;
+  target_duration_sec: number;
+  tone: string | null;
+  audience: string | null;
+  speakers: ScriptSpeaker[];
+  lines: GeneratedScriptLine[];
+  sections: ScriptSection[];
+  caption_blocks: Array<Record<string, unknown>>;
+  metadata_suggestions: Record<string, unknown>;
+  total_estimated_duration_sec: number;
+  provider_metadata: Record<string, unknown>;
+  validation_warnings: string[];
+}
+
+export interface ScriptGenerationResponse {
+  generated_script: GeneratedScript;
+  provider_metadata: Record<string, unknown>;
+  validation_warnings: string[];
+  fallback_used: boolean;
+}
+
 export interface ScriptRevision {
   id: number;
   parent_revision_id: number | null;
   raw_text: string;
   parsed_lines: ScriptLine[];
   characters: string[];
+  generated_script: GeneratedScript | null;
   source: string;
   generation_provider: string | null;
   is_current: boolean;
