@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -21,6 +23,8 @@ router = APIRouter(tags=["assets"])
 
 
 def _video_response(path: str, *, media_type: str, filename: str):
+    if not Path(path).exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset file is missing from storage")
     return FileResponse(
         path,
         media_type=media_type,
@@ -160,6 +164,8 @@ def get_asset_content(
     asset = db.query(Asset).filter(Asset.id == asset_id, Asset.user_id == current_user.id).one_or_none()
     if not asset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    if not Path(asset.storage_key).exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset file is missing from storage")
     if asset.mime_type.startswith("video/"):
         return _video_response(asset.storage_key, media_type=asset.mime_type, filename=asset.original_filename)
     return FileResponse(asset.storage_key, media_type=asset.mime_type, filename=asset.original_filename)

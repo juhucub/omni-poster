@@ -16,6 +16,8 @@ cat docs/CONTEXT_INDEX.md
 
 Then use `docs/CONTEXT_INDEX.md`, `docs/TASK_ROUTING.md`, and `docs/REPO_MAP.md` to choose the full context docs and code areas required for the task.
 
+Read `docs/AGENT_HANDOFF.md` before switching work between agents, continuing another agent's in-progress migration slice, or creating a checkpoint intended for another agent to resume from.
+
 Do not read every full context doc unless the task is broad, architectural, MVP-wide, or explicitly asks for a full audit.
 
 If a file is missing, create a minimal version and mention it in the final response.
@@ -58,6 +60,7 @@ Before editing, identify:
 - Current known mistake risks.
 - Whether docs may need an update.
 - How completion will be verified.
+- Whether a handoff packet or checkpoint is needed before another agent continues.
 
 Do not perform broad rewrites unless required.
 

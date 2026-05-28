@@ -1,6 +1,6 @@
 # Omniposter Architecture Decisions
 
-Last updated: 2026-05-13
+Last updated: 2026-05-26
 
 This file records architectural decisions that future Codex agents should not reverse casually.
 
@@ -376,3 +376,125 @@ Generated scripts are persisted on script revisions as structured JSON. The exis
 - Project Editor Script UI.
 - Script revision serialization.
 - TTS/render caption display.
+
+## ADR-012: Use A Content Format Registry And Script Generation Cache
+
+Status: Accepted
+Date: 2026-05-19
+
+### Context
+
+Script generation was format-aware in name but still relied on scattered frontend lists, compact generic prompts, and deterministic templates that were difficult to browse, validate, or reuse. Repeated identical Ollama requests also re-entered the slow path even when the generation settings had not changed.
+
+### Decision
+
+Omniposter uses a backend content format preset registry as the durable source of truth for reusable short-form content formats.
+
+Each preset defines:
+
+- Stable format ID, display name, purpose, best use case, and description.
+- Ideal duration range, supported speaker count, default speaker roles, tone options, pacing rules, section structure, caption hints, metadata hints, prompt guidance, and validation rules.
+
+The registry is exposed through `GET /script-generation/formats` and `GET /script-generation/formats/{format_id}`. Frontend format browsers should load this API and use local constants only as an API-failure fallback.
+
+Script generation also uses a local JSON cache under generated storage. Cache keys include the user scope, selected format, normalized idea, target duration, platform targets, tone/audience/quality hints, speaker roles/context, provider/model, and relevant generation settings. Debug requests and transient provider-failure fallbacks are not cached.
+
+### Consequences
+
+- New content formats should be added to the backend registry first, with tests proving the preset is exposed and validates.
+- Prompt construction, fallback generation, validation, and UI browsing should consume preset fields instead of duplicating format rules.
+- Cache-hit diagnostics can support measured speed claims; no performance improvement should be claimed from cache work without command output, logs, or provider diagnostics.
+- Synchronous script generation remains acceptable for this slice; moving script generation into Celery should be decided from measured Ollama timing diagnostics.
+
+### Files/Areas Affected
+
+- `backend/app/services/script_generation/formats.py`
+- `backend/app/services/script_generation/cache.py`
+- `backend/app/services/script_generation/prompt_builder.py`
+- `backend/app/services/script_generation/providers.py`
+- `backend/app/services/script_generation/validator.py`
+- `backend/app/routers/script_generation.py`
+- `frontend/src/components/script-generation/FormatBrowser.tsx`
+- `frontend/src/pages/ProjectEditorPage.tsx`
+- `frontend/src/components/command-room/CommandRoom.tsx`
+
+## ADR-013: Use Domain, Infra, Worker, Runtime, And Seed-Asset Boundaries
+
+Status: Accepted
+Date: 2026-05-25
+
+### Context
+
+Omniposter needs to stay maintainable for one-engineer development while separating product behavior from runtime artifacts and low-level adapters. The previous `services/`-heavy layout made source ownership harder to see and allowed generated/runtime files to drift into tracked paths.
+
+### Decision
+
+The repository uses explicit modular boundaries:
+
+- `backend/app/domains/` owns product-domain behavior.
+- `backend/app/infra/` owns low-level runtime adapters such as storage, FFmpeg, Redis, and Ollama.
+- `backend/app/api/` is the future home for thin API routes.
+- `backend/app/workers/` is the future home for thin Celery wrappers.
+- `seed_assets/` is the future tracked home for small curated seed assets.
+- `runtime/` and existing generated storage paths remain ignored homes for local/generated artifacts.
+
+Script generation is the first migrated domain. Old `backend/app/services/script_generation/*` imports remain compatibility shims.
+
+### Consequences
+
+- Generated media, local DBs, render cache, voice datasets, and model/checkpoint artifacts must not be tracked.
+- New product behavior should be placed under the closest domain owner.
+- Routers and workers should delegate to domain services rather than accumulating business logic.
+- Future migrations should proceed in small tested slices with compatibility imports until callers are updated.
+
+### Files/Areas Affected
+
+- `backend/app/domains/script_generation/`
+- `backend/app/services/script_generation/`
+- `backend/app/api/`
+- `backend/app/infra/`
+- `backend/app/workers/`
+- `seed_assets/`
+- `runtime/`
+- `docs/REPO_STRUCTURE.md`
+
+## ADR-014: Stop Phase 5 Render Micro-Extraction Before Voice/TTS Migration
+
+Status: Accepted
+Date: 2026-05-26
+
+### Context
+
+Phase 5 moved pure render-domain decisions out of `backend/app/services/rendering.py` in narrow tested slices: cache keys, planning, readiness, geometry, audio timeline and mixdown payloads, video command payloads, overlay payloads, artifact/result metadata, progress labels, diagnostics, and cache report metadata shaping.
+
+The remaining renderer code is mostly orchestration and runtime side effects: FFmpeg/MoviePy execution, `RenderCache` materialization and stores, TTS synthesis and persisted segment WAV writes, PIL drawing/saving, generated artifact paths/URLs, profile/cache report file writes, character portrait lookup, and final result file stats.
+
+### Decision
+
+Phase 5 render-domain migration stops here. Do not keep extracting small helpers from `backend/app/services/rendering.py` before Phase 6.
+
+Keep these responsibilities in `rendering.py` until their owning domains are clearer:
+
+- FFmpeg/MoviePy orchestration and `_run_ffmpeg(...)`.
+- `RenderCache` path/materialize/store calls.
+- TTS synthesis/cache orchestration and persisted segment WAV writes.
+- PIL image creation/drawing/saving for portraits, captions, and overlays.
+- Generated job artifact directories, URLs, profile/cache report file writes, and final file stats.
+- Character portrait lookup and fallback generated portrait creation.
+
+Future render cleanup may still extract artifact path metadata builders, normalized segment metadata enrichment, render plan/cache report artifact metadata envelopes, or MIME/background classification helpers, but those should wait until voice, media, and jobs ownership is clearer.
+
+Phase 6 should begin with a voice/TTS audit and move map for `tts.py`, `voice_profiles.py`, `voice_replication.py`, `voice_operation_jobs.py`, `voice_preview_jobs.py`, `character_voice_recipes.py`, related tests, and provider/runtime paths.
+
+### Consequences
+
+- `rendering.py` may remain large while it owns orchestration and runtime side effects.
+- The next high-value modular boundary is voice/TTS, not more render micro-extraction.
+- Final render must continue using persisted segment WAV artifacts, and provider behavior must remain fail-closed for selected clone providers.
+
+### Files/Areas Affected
+
+- `backend/app/services/rendering.py`
+- `backend/app/domains/render/`
+- Future `backend/app/domains/voice/`
+- Voice/TTS services and tests

@@ -11,6 +11,7 @@ Use this file to reduce context-token usage. Always read the short core first, t
 - `docs/CONTEXT_INDEX.md`
 
 Also read `docs/TASK_ROUTING.md` when the task touches code, tests, runtime behavior, MVP verification, or any repeated risk area.
+Read `docs/AGENT_HANDOFF.md` before switching work between Codex, Claude Code, or another coding agent, or before creating a migration checkpoint.
 
 ## Read Full Docs When Needed
 
@@ -49,6 +50,18 @@ Do not mark `Complete` without specific evidence.
 Read when the task changes agent workflow, documentation maintenance rules, final response requirements, or prompt/process guidance.
 
 Update only for workflow changes that should apply to future Codex tasks.
+
+### `docs/AGENT_HANDOFF.md`
+
+Read when the task involves agent handoff, checkpointing a broad worktree, continuing a prior agent's migration slice, or coordinating Codex with Claude Code.
+
+Update when the handoff/checkpoint process itself changes.
+
+### `docs/REPO_STRUCTURE.md`
+
+Read when the task adds, moves, or questions permanent directories; changes source/runtime/seed asset ownership; updates `.gitignore`; or works on repo hygiene.
+
+Update when adding permanent directories or changing what belongs in source, seed assets, runtime storage, or ignored generated artifacts.
 
 ## Broad-Context Exceptions
 

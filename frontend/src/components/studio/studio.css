@@ -1,5 +1,6 @@
 .studio-detail-surface {
   width: 100%;
+  min-width: 0;
 }
 
 .studio-detail-surface .max-w-7xl,
@@ -80,7 +81,7 @@
 .studio-detail-surface .bg-cyan-300,
 .studio-detail-surface .bg-cyan-400 {
   background: var(--cyan);
-  color: #080c14;
+  color: var(--bg-root);
 }
 
 .studio-detail-surface .text-cyan-100,
@@ -96,7 +97,7 @@
 }
 
 .studio-page-hero {
-  background: linear-gradient(135deg, #0d1830 0%, #0f1624 48%, #0a1020 100%);
+  background: linear-gradient(135deg, var(--bg-elevated) 0%, var(--bg-panel) 48%, var(--bg-inset) 100%);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-xl);
   padding: var(--space-6);
@@ -136,6 +137,14 @@
   background: var(--cyan-dim);
 }
 
+.studio-link-pill:focus-visible,
+.studio-detail-surface a:focus-visible,
+.studio-detail-surface button:focus-visible {
+  outline: none;
+  border-color: var(--border-cyan);
+  box-shadow: 0 0 0 3px var(--cyan-glow);
+}
+
 .studio-linked-profile {
   border-color: var(--border-cyan) !important;
   box-shadow: var(--shadow-cyan);
@@ -144,5 +153,9 @@
 @media (max-width: 900px) {
   .studio-detail-surface h1 {
     font-size: var(--text-2xl);
+  }
+
+  .studio-page-hero {
+    padding: var(--space-5);
   }
 }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -15,10 +15,14 @@ from app.schemas import (
     GenerationJobCreateRequest,
     GenerationJobListResponse,
     GenerationJobSummary,
+    GeneratedMediaListResponse,
+    GeneratedMediaSummary,
     OkResponse,
     OutputVideoListResponse,
+    RenderReadinessEstimate,
 )
 from app.services.audit import record_audit
+from app.services.draft_readiness import DraftReadinessPlanner
 from app.services.notifications import create_notification
 from app.services.project_state import sync_project_state, to_generation_summary, to_output_video_summary, to_project_preview_settings
 from app.services.storage import guess_mime_type, resolve_generated_job_artifact
@@ -78,6 +82,36 @@ def _default_voice_profile_payload(speaker: str, slot_index: int) -> dict:
         "embedding_path": None,
         "provider_metadata": {},
     }
+
+
+def _limit_exceeded(detail: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+
+
+def _enforce_generation_queue_limits(db: Session, user_id: int) -> None:
+    active_statuses = tuple(ACTIVE_GENERATION_STATUSES)
+    max_user_active = int(settings.MAX_ACTIVE_GENERATION_JOBS_PER_USER or 0)
+    if max_user_active > 0:
+        user_active = (
+            db.query(GenerationJob)
+            .join(Project, Project.id == GenerationJob.project_id)
+            .filter(Project.user_id == user_id, GenerationJob.status.in_(active_statuses))
+            .count()
+        )
+        if user_active >= max_user_active:
+            raise _limit_exceeded("Too many active render jobs for this user. Wait for one to finish before starting another.")
+
+    max_total_active = int(settings.MAX_ACTIVE_GENERATION_JOBS_TOTAL or 0)
+    if max_total_active > 0:
+        total_active = db.query(GenerationJob).filter(GenerationJob.status.in_(active_statuses)).count()
+        if total_active >= max_total_active:
+            raise _limit_exceeded("Render capacity is full. Try again after queued jobs advance.")
+
+    max_total_queued = int(settings.MAX_QUEUED_GENERATION_JOBS_TOTAL or 0)
+    if max_total_queued > 0:
+        total_queued = db.query(GenerationJob).filter(GenerationJob.status == "queued").count()
+        if total_queued >= max_total_queued:
+            raise _limit_exceeded("Render queue is full. Try again after queued jobs advance.")
 
 
 def build_generation_voice_manifest(project_id: int, parsed_lines: list[dict], db: Session) -> dict:
@@ -189,6 +223,8 @@ def create_generation_job(
         response.status_code = status.HTTP_200_OK
         return to_generation_summary(existing_active_job)
 
+    _enforce_generation_queue_limits(db, current_user.id)
+
     job = GenerationJob(
         project_id=project.id,
         input_asset_id=background_asset.id,
@@ -244,6 +280,41 @@ def get_generation_job(job_id: int, current_user: User = Depends(get_current_use
     return to_generation_summary(job)
 
 
+@router.get("/projects/{project_id}/render-readiness", response_model=RenderReadinessEstimate)
+def get_project_render_readiness(
+    project_id: int,
+    output_kind: str = Query("draft", pattern="^(preview|draft|final|debug)$"),
+    script_revision_id: int | None = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = get_owned_project(db, current_user.id, project_id)
+    script_revision = project.current_script_revision
+    if script_revision_id is not None:
+        script_revision = next(
+            (revision for revision in project.script_revisions if revision.id == script_revision_id),
+            None,
+        )
+    background_asset = latest_background_asset(project)
+    parsed_lines = list(script_revision.parsed_lines_json or []) if script_revision else []
+    voice_manifest = build_generation_voice_manifest(project.id, parsed_lines, db) if parsed_lines else {"speakers": {}}
+    recent_jobs = (
+        db.query(GenerationJob)
+        .filter(GenerationJob.project_id == project.id, GenerationJob.status == "completed")
+        .order_by(GenerationJob.created_at.desc())
+        .limit(5)
+        .all()
+    )
+    return DraftReadinessPlanner().estimate(
+        project=project,
+        script_revision=script_revision,
+        background_asset=background_asset,
+        voice_manifest=voice_manifest,
+        output_kind=output_kind,
+        recent_jobs=recent_jobs,
+    )
+
+
 @router.get("/generation-jobs/{job_id}/artifacts")
 def get_generation_job_artifacts(
     job_id: int,
@@ -286,6 +357,7 @@ def get_generation_job_artifacts(
         "debug_artifacts": summary.debug_artifacts,
         "cache_statistics": summary.cache_statistics,
         "timing_breakdown": summary.timing_breakdown,
+        "performance_summary": summary.performance_summary,
         "voice_manifest": summary.voice_manifest,
         "preview_settings": summary.preview_settings.model_dump(),
         "mismatch_debug": {
@@ -324,6 +396,7 @@ def get_generation_job_artifact(
 @router.get("/projects/{project_id}/generation-jobs", response_model=GenerationJobListResponse)
 def list_project_generation_jobs(
     project_id: int,
+    limit: int = Query(20, ge=1, le=20),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -335,10 +408,31 @@ def list_project_generation_jobs(
         db.query(GenerationJob)
         .filter(GenerationJob.project_id == project.id)
         .order_by(GenerationJob.created_at.desc())
-        .limit(20)
+        .limit(limit)
         .all()
     )
     return GenerationJobListResponse(items=[to_generation_summary(job) for job in jobs])
+
+
+@router.get("/projects/{project_id}/generation-jobs/latest", response_model=GenerationJobSummary)
+def get_latest_generation_job(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = get_owned_project(db, current_user.id, project_id)
+    reconciled = reconcile_stale_generation_jobs(db, project_id=project.id)
+    if reconciled:
+        db.commit()
+    job = (
+        db.query(GenerationJob)
+        .filter(GenerationJob.project_id == project.id)
+        .order_by(GenerationJob.created_at.desc())
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No generation job")
+    return to_generation_summary(job)
 
 
 @router.get("/projects/{project_id}/generation-jobs/active", response_model=GenerationJobSummary)
@@ -374,6 +468,40 @@ def list_project_outputs(
     project = get_owned_project(db, current_user.id, project_id)
     outputs = sorted(project.output_videos, key=lambda output: output.created_at, reverse=True)
     return OutputVideoListResponse(items=[to_output_video_summary(item) for item in outputs])
+
+
+@router.get("/generated-media", response_model=GeneratedMediaListResponse)
+def list_generated_media(
+    limit: int = Query(50, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    outputs = (
+        db.query(OutputVideo)
+        .join(Project, Project.id == OutputVideo.project_id)
+        .filter(Project.user_id == current_user.id, Project.archived_at.is_(None))
+        .order_by(OutputVideo.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    items: list[GeneratedMediaSummary] = []
+    for output in outputs:
+        job = output.generation_job
+        job_summary = to_generation_summary(job) if job else None
+        items.append(
+            GeneratedMediaSummary(
+                id=output.id,
+                project_id=output.project_id,
+                project_name=output.project.name,
+                project_status=output.project.status,
+                generation_job=job_summary,
+                output=to_output_video_summary(output),
+                artifact_urls=job_summary.artifact_urls if job_summary else {},
+                provider_state=job_summary.provider_state if job_summary else {},
+                created_at=output.created_at,
+            )
+        )
+    return GeneratedMediaListResponse(items=items)
 
 
 @router.post("/generation-jobs/{job_id}/cancel", response_model=OkResponse)

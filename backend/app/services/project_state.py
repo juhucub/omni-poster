@@ -20,6 +20,7 @@ from app.schemas import (
     OutputVideoSummary,
     ProjectSummary,
     ProjectPreviewLayout,
+    ProjectScriptGenerationSettings,
     ProjectPreviewSettings,
     ProjectPreviewSpeakerMapping,
     PublishJobSummary,
@@ -141,6 +142,29 @@ def to_project_preview_settings(project: Project) -> ProjectPreviewSettings:
     return stored
 
 
+def to_project_script_generation_settings(project: Project) -> ProjectScriptGenerationSettings:
+    stored = dict(project.script_generation_settings_json or {})
+    return ProjectScriptGenerationSettings(
+        content_format_id=str(stored.get("content_format_id") or "educational_short"),
+        platform=stored.get("platform") or "tiktok",
+        target_duration_sec=int(stored.get("target_duration_sec") or 45),
+        tone=str(stored.get("tone") or "engaging"),
+        audience=str(stored.get("audience") or "general short-form viewers"),
+        speaker_names=[str(item) for item in list(stored.get("speaker_names") or []) if str(item).strip()],
+    )
+
+
+def update_project_script_generation_settings(project: Project, payload: dict[str, Any]) -> ProjectScriptGenerationSettings:
+    current = to_project_script_generation_settings(project)
+    data = current.model_dump()
+    for key in ("content_format_id", "platform", "target_duration_sec", "tone", "audience", "speaker_names"):
+        if key in payload and payload[key] is not None:
+            data[key] = payload[key]
+    next_settings = ProjectScriptGenerationSettings(**data)
+    project.script_generation_settings_json = next_settings.model_dump()
+    return next_settings
+
+
 def update_project_preview_settings(project: Project, payload: dict[str, Any]) -> ProjectPreviewSettings:
     current = _preview_settings_from_stored(project)
     if "layout" in payload and payload["layout"] is not None:
@@ -254,6 +278,7 @@ def to_generation_summary(job: GenerationJob) -> GenerationJobSummary:
     render_profile = dict(tts_result.get("render_profile") or {})
     render_plan = dict(tts_result.get("render_plan") or {})
     cache_report = dict(tts_result.get("cache_report") or {})
+    performance_summary = dict(tts_result.get("performance_summary") or {})
     debug_extraction = dict(assembly.get("debug_audio_extraction") or {})
     return GenerationJobSummary(
         id=job.id,
@@ -271,6 +296,7 @@ def to_generation_summary(job: GenerationJob) -> GenerationJobSummary:
         current_phase=tts_result.get("current_phase") or job.status,
         cache_statistics=dict(cache_report.get("summary") or {}),
         timing_breakdown=dict(render_profile.get("summary") or {}),
+        performance_summary=performance_summary,
         artifact_urls={
             "render_plan": render_plan.get("artifact_url"),
             "cache_report": cache_report.get("artifact_url"),
@@ -403,6 +429,7 @@ def to_project_summary(project: Project) -> ProjectSummary:
         latest_notifications=[to_notification_summary(item) for item in recent_notifications],
         speaker_bindings=[to_speaker_binding_summary(item) for item in project.speaker_bindings],
         preview_settings=to_project_preview_settings(project),
+        script_generation_settings=to_project_script_generation_settings(project),
     )
 
 

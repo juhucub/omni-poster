@@ -162,6 +162,7 @@ class Project(Base):
     allowed_platforms_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     publish_windows_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     preview_settings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    script_generation_settings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)

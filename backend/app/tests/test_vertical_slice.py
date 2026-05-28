@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import io
 import json
 from pathlib import Path
 import math
@@ -15,12 +16,13 @@ from PIL import Image
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import GenerationJob, SocialAccount, VoicePreviewJob, VoiceProfile, VoiceReferenceAudio
+from app.models import Asset, GenerationJob, OutputVideo, SocialAccount, VoicePreviewJob, VoiceProfile, VoiceReferenceAudio
 from app.services.voice_preview_jobs import STALE_VOICE_PREVIEW_ERROR_CODE
 from app.services.character_presets import get_character_preset
 from app.services.crypto import decrypt_secret
 from app.services.render_profiling import RenderProfiler
 from app.services.rendering import ProjectRenderService
+from app.services.render_cache import RenderCache, RenderCacheReport
 from app.services.storage import generated_job_artifact_url, generated_job_segment_dir
 from app.services.character_voice_recipes import validate_selected_character_recipe
 from app.services.tts import LocalSpeechService, OpenVoiceProvider, SpeechSegment, TTSOrchestrator, TextToSpeechError, XTTSProvider
@@ -110,6 +112,16 @@ def _write_png(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", size, color).save(path)
+
+
+def _png_bytes(
+    *,
+    size: tuple[int, int] = (64, 96),
+    color: tuple[int, int, int, int] = (80, 160, 220, 255),
+) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGBA", size, color).save(output, format="PNG")
+    return output.getvalue()
 
 
 def _fake_ffmpeg_render_run(captured: dict):
@@ -274,6 +286,38 @@ def test_image_background_upload_and_preset_selection(auth_client: TestClient):
     assert selected.json()["mime_type"] == "image/png"
 
 
+def test_background_upload_rejects_declared_type_mismatch(auth_client: TestClient):
+    project = auth_client.post("/projects", json={"name": "Bad Background", "target_platform": "youtube"})
+    assert project.status_code == 201
+
+    upload = auth_client.post(
+        f"/projects/{project.json()['id']}/assets/background",
+        files={"file": ("background.png", b"not-a-png", "image/png")},
+    )
+
+    assert upload.status_code == 415
+    assert upload.json()["detail"] == "Uploaded background media does not match its declared type"
+
+
+def test_script_import_enforces_size_and_type_gates(auth_client: TestClient, monkeypatch):
+    project = auth_client.post("/projects", json={"name": "Script Upload", "target_platform": "youtube"})
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+
+    bad_type = auth_client.post(
+        f"/projects/{project_id}/script/import",
+        files={"file": ("script.png", _png_bytes(), "image/png")},
+    )
+    assert bad_type.status_code == 415
+
+    monkeypatch.setattr(settings, "SCRIPT_IMPORT_MAX_SIZE_BYTES", 12)
+    too_large = auth_client.post(
+        f"/projects/{project_id}/script/import",
+        files={"file": ("script.txt", b"<Host> This script is intentionally too large.", "text/plain")},
+    )
+    assert too_large.status_code == 413
+
+
 def test_character_presets_list_and_runtime_override(auth_client: TestClient):
     bundled_file = Path("test_storage") / "bundled" / "character_presets.json"
     bundled_file.write_text(
@@ -342,6 +386,40 @@ def test_character_presets_list_and_runtime_override(auth_client: TestClient):
     deleted = auth_client.delete(f"/character-presets/{created_id}")
     assert deleted.status_code == 200
     assert get_character_preset(created_id) is None
+
+
+def test_character_preset_portrait_upload_updates_visual_asset_only(auth_client: TestClient):
+    created = auth_client.post(
+        "/character-presets",
+        json={
+            "display_name": "Portrait Host",
+            "speaker_names": ["Host"],
+            "tts_provider": "espeak",
+            "fallback_provider": "espeak",
+            "voice": "en-us+f3",
+            "rate": 155,
+            "pitch": 45,
+            "word_gap": 1,
+            "amplitude": 140,
+        },
+    )
+    assert created.status_code == 201
+    preset_id = created.json()["id"]
+    assert created.json()["portrait_url"] is None
+
+    upload = auth_client.post(
+        f"/character-presets/{preset_id}/portrait",
+        files={"file": ("portrait.png", b"portrait-bytes", "image/png")},
+    )
+    assert upload.status_code == 200
+    body = upload.json()
+    assert body["portrait_filename"].endswith(".png")
+    assert body["portrait_url"] == f"/character-presets/{preset_id}/portrait"
+    assert body["voice_profile_id"] == created.json()["voice_profile_id"]
+
+    portrait = auth_client.get(body["portrait_url"])
+    assert portrait.status_code == 200
+    assert portrait.content == b"portrait-bytes"
 
 
 def test_bundled_voice_lab_presets_are_empty():
@@ -4054,6 +4132,73 @@ def test_ffmpeg_render_cache_reuses_tts_and_invalidates_changed_inputs(monkeypat
     assert changed_portrait["metadata"]["cache_statistics"]["by_type"]["static_overlay"]["regenerated"] >= 1
 
 
+def test_render_cache_materializes_with_link_or_copy(tmp_path: Path):
+    cache = RenderCache()
+    source = tmp_path / "source.mp4"
+    destination = tmp_path / "job" / "source.mp4"
+    source.write_bytes(b"cached-video")
+    cache_key = f"test_materialize_{datetime.utcnow().timestamp()}".replace(".", "_")
+    cache_path = cache.path("final_videos", cache_key, ".mp4")
+
+    cache.store(source, cache_path, {"cache_key": cache_key})
+    store_method = cache.last_transfer["method"]
+    assert store_method in {"hardlink", "copy", "same_path"}
+
+    assert cache.materialize(cache_path, destination) is True
+    assert destination.read_bytes() == b"cached-video"
+    assert cache.last_transfer["method"] in {"hardlink", "copy", "same_path"}
+
+
+def test_segment_normalization_skips_ffmpeg_for_render_ready_wav(monkeypatch, tmp_path: Path):
+    service = ProjectRenderService()
+    source = tmp_path / "ready.wav"
+    frame_count = int(0.8 * service.audio_export_fps)
+    with wave.open(str(source), "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(service.audio_export_fps)
+        handle.writeframes(b"\x00\x00\x00\x00" * frame_count)
+    segment = SpeechSegment(
+        speaker="Host",
+        text="Already normalized",
+        voice="Host",
+        slot_index=0,
+        audio_path=str(source),
+        duration_seconds=0.8,
+        voice_profile_id="vp_host",
+        provider_used="espeak",
+    )
+
+    def fail_ffmpeg(command):
+        raise AssertionError(f"ffmpeg should not be called for render-ready WAV: {command}")
+
+    monkeypatch.setattr(service, "_run_ffmpeg", fail_ffmpeg)
+    real_report = RenderCacheReport()
+    normalized_paths, normalized_keys = service._normalize_segment_wavs(
+        segments=[segment],
+        cache=RenderCache(),
+        cache_report=real_report,
+        audio_dir=tmp_path / "audio",
+    )
+
+    assert normalized_paths[0].exists()
+    assert normalized_keys[0]
+    regenerated = [event for event in real_report.events if event["artifact_type"] == "normalized_audio" and event["status"] == "regenerated"]
+    assert regenerated[-1]["metadata"]["normalization_skipped"] is True
+    assert getattr(segment, "normalized_duration_seconds") == pytest.approx(0.8, rel=0.01)
+
+
+def test_background_cache_duration_buckets_preview_but_not_final():
+    service = ProjectRenderService()
+    preview_preset = service._render_preset("preview")
+    draft_preset = service._render_preset("draft")
+    final_preset = service._render_preset("final")
+
+    assert service._background_cache_duration_seconds(11.2, preview_preset) == 15.0
+    assert service._background_cache_duration_seconds(11.2, draft_preset) == 15.0
+    assert service._background_cache_duration_seconds(11.2, final_preset) == pytest.approx(11.2)
+
+
 def test_debug_mode_extracts_final_audio_and_preview_skips(monkeypatch, tmp_path: Path):
     service = ProjectRenderService()
     background_path = tmp_path / "background.mp4"
@@ -4111,6 +4256,7 @@ def test_render_segment_metadata_exposes_safe_artifact_url():
         slot_index=0,
         audio_path=str(segment_path),
         duration_seconds=0.9,
+        line_id="generated-line-001",
         voice_profile_id="vp_host_calm_v1",
         provider_used="openvoice",
         fallback_used=False,
@@ -4153,6 +4299,7 @@ def test_render_segment_metadata_exposes_safe_artifact_url():
 
     assert metadata["segment_index"] == 0
     assert metadata["speaker"] == "Host"
+    assert metadata["line_id"] == "generated-line-001"
     assert metadata["voice_profile_id"] == "vp_host_calm_v1"
     assert metadata["provider_used"] == "openvoice"
     assert metadata["fallback_used"] is False
@@ -4391,7 +4538,7 @@ def _create_project_flow(client: TestClient) -> dict:
 
     asset = client.post(
         f"/projects/{project_id}/assets/background",
-        files={"file": ("background.mp4", b"fake-video", "video/mp4")},
+        files={"file": ("background.png", _png_bytes(), "image/png")},
     )
     assert asset.status_code == 201
 
@@ -4476,7 +4623,7 @@ def test_script_validation_and_asset_ownership(auth_client: TestClient, client: 
 
     asset = auth_client.post(
         f"/projects/{project_id}/assets/background",
-        files={"file": ("background.mp4", b"fake-video", "video/mp4")},
+        files={"file": ("background.png", _png_bytes(), "image/png")},
     )
     assert asset.status_code == 201
 
@@ -4489,6 +4636,61 @@ def test_script_validation_and_asset_ownership(auth_client: TestClient, client: 
 
     forbidden_delete = client.delete(f"/projects/{project_id}/assets/{asset_id}", cookies=other_user.cookies)
     assert forbidden_delete.status_code == 404
+
+
+def test_asset_content_reports_missing_storage_file(auth_client: TestClient):
+    project = auth_client.post("/projects", json={"name": "Missing Asset", "target_platform": "youtube"})
+    project_id = project.json()["id"]
+    asset = auth_client.post(
+        f"/projects/{project_id}/assets/background",
+        files={"file": ("background.png", _png_bytes(), "image/png")},
+    )
+    assert asset.status_code == 201
+    asset_id = asset.json()["id"]
+
+    db = SessionLocal()
+    try:
+        model = db.get(Asset, asset_id)
+        assert model is not None
+        Path(model.storage_key).unlink()
+        db.commit()
+    finally:
+        db.close()
+
+    response = auth_client.get(f"/assets/{asset_id}/content")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Asset file is missing from storage"
+
+
+def test_deep_health_reports_runtime_checks(auth_client: TestClient, monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "_database_check", lambda: {"status": "ok", "ok": True, "migrations": {"ok": True}})
+    monkeypatch.setattr(main_module, "_storage_check", lambda: {"status": "ok", "ok": True, "writable": True})
+    monkeypatch.setattr(main_module, "_redis_check", lambda: {"status": "ok", "ok": True})
+    monkeypatch.setattr(main_module, "_celery_check", lambda: {"status": "ok", "ok": True, "workers": ["worker@example"], "queues": ["generation"]})
+    monkeypatch.setattr(main_module, "_binary_check", lambda binary: {"status": "ok", "ok": True, "binary": f"/usr/bin/{binary}"})
+    monkeypatch.setattr(
+        main_module,
+        "_provider_checks",
+        lambda: {
+            "tts_providers": {"status": "ok", "ok": True, "providers": {"espeak": {"available": True}}},
+            "tts_fallback": {"status": "ok", "ok": True, "available": True},
+            "openvoice": {"status": "degraded", "ok": False, "enabled": True, "reason": "missing_models"},
+            "xtts": {"status": "degraded", "ok": False, "enabled": False, "reason": "disabled"},
+            "rvc": {"status": "degraded", "ok": False, "enabled": False, "reason": "disabled"},
+        },
+    )
+
+    response = auth_client.get("/health/deep")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["database"]["status"] == "ok"
+    assert body["checks"]["redis"]["status"] == "ok"
+    assert body["checks"]["ffmpeg"]["binary"] == "/usr/bin/ffmpeg"
+    assert body["checks"]["tts_fallback"]["available"] is True
+    assert body["checks"]["openvoice"]["reason"] == "missing_models"
 
 
 def _write_voice_manifest_presets() -> None:
@@ -4592,6 +4794,27 @@ def test_generation_job_snapshots_preview_settings(auth_client: TestClient, monk
         assert job.render_settings_json["caption_style"] == "large_karaoke"
     finally:
         db.close()
+
+
+def test_generation_job_rejects_when_user_active_job_limit_is_reached(auth_client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "MAX_ACTIVE_GENERATION_JOBS_PER_USER", 1)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+    first_flow = _create_project_flow(auth_client)
+    second_flow = _create_project_flow(auth_client)
+
+    first = auth_client.post(
+        f"/projects/{first_flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+    assert first.status_code == 201
+
+    second = auth_client.post(
+        f"/projects/{second_flow['project_id']}/generation-jobs",
+        json={"background_style": "none"},
+    )
+
+    assert second.status_code == 429
+    assert second.json()["detail"] == "Too many active render jobs for this user. Wait for one to finish before starting another."
 
 
 def test_saved_calibration_recipe_is_snapshotted_for_video_render(auth_client: TestClient, monkeypatch):
@@ -4958,11 +5181,86 @@ def test_generation_job_list_exposes_latest_completed_job(auth_client: TestClien
     active = auth_client.get(f"/projects/{flow['project_id']}/generation-jobs/active")
     assert active.status_code == 404
 
-    jobs = auth_client.get(f"/projects/{flow['project_id']}/generation-jobs")
+    jobs = auth_client.get(f"/projects/{flow['project_id']}/generation-jobs?limit=1")
     assert jobs.status_code == 200
+    assert len(jobs.json()["items"]) == 1
     assert jobs.json()["items"][0]["id"] == job_id
     assert jobs.json()["items"][0]["status"] == "completed"
     assert jobs.json()["items"][0]["tts_result"]["segments"][0]["artifact_url"].endswith("/segments/000_host.wav")
+
+    latest = auth_client.get(f"/projects/{flow['project_id']}/generation-jobs/latest")
+    assert latest.status_code == 200
+    assert latest.json()["id"] == job_id
+
+
+def test_generated_media_lists_user_outputs_and_downloads(auth_client: TestClient, client: TestClient, monkeypatch):
+    flow = _create_project_flow(auth_client)
+    monkeypatch.setattr(process_generation_job, "delay", lambda job_id: None)
+
+    create_job = auth_client.post(
+        f"/projects/{flow['project_id']}/generation-jobs",
+        json={"background_style": "none", "output_kind": "draft"},
+    )
+    assert create_job.status_code == 201
+    job_id = create_job.json()["id"]
+    output_path = Path("test_storage") / "project_output.mp4"
+    output_path.write_bytes(b"fake-mp4")
+
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        assert job is not None
+        asset = Asset(
+            user_id=job.project.user_id,
+            project_id=job.project_id,
+            kind="render_output",
+            source_type="generated",
+            provider_name="local-compositor",
+            storage_key=str(output_path),
+            original_filename="project_output.mp4",
+            mime_type="video/mp4",
+            size_bytes=output_path.stat().st_size,
+            duration_ms=1200,
+        )
+        db.add(asset)
+        db.flush()
+        output = OutputVideo(
+            project_id=job.project_id,
+            generation_job_id=job.id,
+            asset_id=asset.id,
+            output_kind="draft",
+            provider_name="local-compositor",
+            is_preview=True,
+            duration_ms=1200,
+        )
+        db.add(output)
+        db.flush()
+        job.status = "completed"
+        job.progress = 100
+        job.project.current_output_video_id = output.id
+        db.commit()
+        asset_id = asset.id
+    finally:
+        db.close()
+
+    media = auth_client.get("/generated-media")
+    assert media.status_code == 200
+    body = media.json()
+    assert len(body["items"]) == 1
+    assert body["items"][0]["project_id"] == flow["project_id"]
+    assert body["items"][0]["generation_job"]["id"] == job_id
+    assert body["items"][0]["output"]["asset"]["content_url"] == f"/assets/{asset_id}/content"
+
+    downloaded = auth_client.get(f"/assets/{asset_id}/content")
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"fake-mp4"
+    assert "project_output.mp4" in downloaded.headers["content-disposition"]
+
+    other_user = client.post("/auth/register", json={"username": "media_other_user", "password": "Password1"})
+    assert other_user.status_code == 201
+    forbidden = client.get("/generated-media", cookies=other_user.cookies)
+    assert forbidden.status_code == 200
+    assert forbidden.json()["items"] == []
 
 
 def test_generation_job_artifacts_summary_exposes_debug_urls(auth_client: TestClient, monkeypatch):

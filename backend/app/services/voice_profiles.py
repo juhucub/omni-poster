@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import mimetypes
 import re
 import shutil
 import subprocess
@@ -17,6 +18,23 @@ from fastapi import HTTPException, UploadFile, status
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import settings
+from app.domains.voice.profiles.artifacts import (
+    reference_audio_content_hash_from_paths,
+    sha256_path as _sha256_path,
+    voice_embedding_artifact_path,
+    voice_embedding_artifact_path_for_reference,
+)
+from app.domains.voice.profiles.paths import (
+    _runtime_lab_dir,
+    character_portrait_dir,
+    voice_cache_dir,
+    voice_embedding_dir,
+    voice_lab_preview_dir,
+    voice_models_dir,
+    voice_reference_audio_dir,
+    voice_reference_audio_profile_dir,
+    voice_reference_chunk_dir,
+)
 from app.services.character_voice_recipes import selected_character_recipe_status
 from app.db import SessionLocal
 from app.models import CharacterPreset, Project, ProjectSpeakerBinding, VoiceProfile, VoiceReferenceAudio
@@ -34,56 +52,7 @@ REFERENCE_AUDIO_SILENCE_FILTER = (
     "start_periods=1:start_silence=0.25:start_threshold=-45dB"
 )
 REFERENCE_AUDIO_NORMALIZATION_FILTER = f"{REFERENCE_AUDIO_SILENCE_FILTER},loudnorm=I=-18:TP=-3:LRA=11"
-
-
-def _runtime_lab_dir() -> Path:
-    path = Path(settings.MEDIA_DIR) / "voice_lab"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def voice_lab_preview_dir() -> Path:
-    path = _runtime_lab_dir() / "previews"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def voice_reference_audio_dir() -> Path:
-    path = _runtime_lab_dir() / "reference_audio"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def voice_reference_audio_profile_dir(voice_profile_id: str) -> Path:
-    # Profile ids can come from runtime presets, so sanitize before creating artifact directories.
-    safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", voice_profile_id).strip("._") or "profile"
-    path = voice_reference_audio_dir() / safe_id
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def voice_reference_chunk_dir(voice_profile_id: str) -> Path:
-    path = _runtime_lab_dir() / "reference_chunks" / voice_profile_id
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def voice_cache_dir() -> Path:
-    path = Path(settings.MEDIA_DIR) / "voice_cache"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def voice_embedding_dir() -> Path:
-    path = _runtime_lab_dir() / "embeddings"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def voice_models_dir() -> Path:
-    path = Path(settings.VOICE_MODELS_DIR)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+ALLOWED_CHARACTER_PORTRAIT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
 
 def _bundled_presets_path() -> Path:
@@ -470,6 +439,50 @@ def character_preset_portrait_url(preset: CharacterPreset | None) -> str | None:
     return f"/character-presets/{preset.id}/portrait"
 
 
+async def save_character_preset_portrait_upload(
+    preset: CharacterPreset,
+    file: UploadFile,
+    *,
+    current_user_id: int,
+    db: Session,
+) -> CharacterPreset:
+    if not _can_mutate_preset(preset, current_user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Character preset is not editable by this user")
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
+    content_type = file.content_type or mimetypes.guess_type(file.filename)[0] or ""
+    if content_type not in ALLOWED_CHARACTER_PORTRAIT_TYPES:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported character portrait image type")
+
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        suffix = ".png" if content_type == "image/png" else ".jpg" if content_type == "image/jpeg" else ".webp"
+    safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", preset.id).strip("._") or "character"
+    filename = f"{safe_id}_{uuid.uuid4().hex[:12]}{suffix}"
+    destination = character_portrait_dir() / filename
+    size = 0
+    try:
+        await file.seek(0)
+        with open(destination, "wb") as out_file:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 20 * 1024 * 1024:
+                    raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Character portrait exceeds 20MB limit")
+                out_file.write(chunk)
+    except HTTPException:
+        destination.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
+    old_path = resolve_character_portrait_path({"portrait_filename": preset.portrait_filename}) if preset.portrait_filename else None
+    preset.portrait_filename = filename
+    db.flush()
+    if old_path and old_path.parent == character_portrait_dir() and old_path.name != filename:
+        old_path.unlink(missing_ok=True)
+    return preset
+
+
 def runtime_voice_profile_payload(profile: VoiceProfile, display_name: str) -> dict[str, Any]:
     provider_metadata = _voice_profile_provider_metadata(profile)
     selected_recipe = dict(profile.selected_recipe_json or {})
@@ -563,19 +576,6 @@ def _can_mutate_voice_profile(profile: VoiceProfile, current_user_id: int) -> bo
 def ensure_voice_profile_editable(profile: VoiceProfile, current_user_id: int) -> None:
     if not _can_mutate_voice_profile(profile, current_user_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Voice profile is not editable by this user")
-
-
-def voice_embedding_artifact_path(profile_id: str) -> Path:
-    return voice_embedding_dir() / f"{profile_id}.pth"
-
-
-def voice_embedding_artifact_path_for_reference(profile_id: str, reference_audio_sha256: str) -> Path:
-    return voice_embedding_dir() / f"{profile_id}_{reference_audio_sha256[:16]}.pth"
-
-
-def reference_audio_content_hash_from_paths(reference_paths: list[Path]) -> str:
-    digests = sorted(_sha256_path(path) for path in reference_paths)
-    return hashlib.sha256("||".join(digests).encode("utf-8")).hexdigest()
 
 
 def update_voice_profile_preparation_metadata(
@@ -1412,14 +1412,6 @@ def resolve_character_portrait_path(preset: dict[str, Any] | None) -> Path | Non
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
-
-
-def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _copy_with_sha256(source_path: Path, destination_path: Path) -> tuple[int, str]:

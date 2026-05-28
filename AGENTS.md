@@ -62,6 +62,9 @@ If any file is missing, create a minimal version before proceeding and mention t
 `docs/CODEX_WORKFLOW.md`
 - Requires audit, implementation, verification, and documentation workflow.
 
+`docs/AGENT_HANDOFF.md`
+- Protocol for switching work between Codex, Claude Code, and other coding agents without losing scope, evidence, or safety invariants.
+
 ## Global Rules
 
 ### Evidence Rules
@@ -86,6 +89,10 @@ If any file is missing, create a minimal version before proceeding and mention t
 - Never run destructive cleanup commands against the repository root.
 - Never commit large generated media, model checkpoints, or dependency caches.
 - Do not add generated videos, large background clips, OpenVoice checkpoints, virtual environments, `node_modules`, Docker volumes, or local storage outputs to git.
+- Search for an existing owner before creating new source files.
+- Do not create duplicate/copy files such as `* 2.py`, `* copy.py`, `*.bak`, or `*.old`.
+- Keep runtime outputs out of source directories; generated media, local DBs, voice datasets, checkpoints, render cache, and frontend build/test output must stay ignored.
+- Update `docs/REPO_STRUCTURE.md` when adding permanent directories or changing source/runtime ownership.
 
 ### Product Safety
 
@@ -113,6 +120,7 @@ Living project memory files:
 - `docs/ARCHITECTURE_DECISIONS.md`
 - `docs/MVP_CHECKLIST.md`
 - `docs/CODEX_WORKFLOW.md`
+- `docs/AGENT_HANDOFF.md`
 
 Update docs only when necessary and only with small, factual, evidence-based changes.
 

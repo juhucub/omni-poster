@@ -149,6 +149,7 @@ Inspect:
 Read:
 
 - `docs/CODEX_WORKFLOW.md`
+- `docs/REPO_STRUCTURE.md` when changing permanent directories, repo hygiene, or source/runtime ownership
 - `docs/CURRENT_STATUS.md`
 - `docs/MVP_CHECKLIST.md`
 - `docs/ARCHITECTURE_DECISIONS.md` if read strategy or memory architecture changes

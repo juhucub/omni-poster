@@ -1300,7 +1300,7 @@ const VoiceLabPage: React.FC = () => {
                     <div>
                       <div className="font-medium">Stewie selected recipe</div>
                       <div className="mt-1 text-xs opacity-80">
-                        {recipeReady ? 'Golden preview selected · Ready for test render' : `Missing files · ${recipeError?.message || 'Recipe validation failed'}`}
+                        {recipeReady ? 'Golden preview selected · Ready for test render' : `Needs setup · ${recipeError?.message || 'Recipe validation failed'}`}
                       </div>
                       {!Boolean(selectedRecipeStatus['render_verified']) && (
                         <div className="mt-1 text-xs opacity-80">Recipe not render verified</div>

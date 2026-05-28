@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -29,6 +30,8 @@ class Settings(BaseSettings):
     MEDIA_DIR: str = "backend/storage"
     BUNDLED_MEDIA_DIR: str = "backend/storage"
     COOKIE_SECURE: bool = False
+    CORS_ALLOWED_METHODS: str = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+    CORS_ALLOWED_HEADERS: str = "Authorization,Content-Type"
     TTS_SPEECH_RATE: int = 175
     TTS_ESPEAK_RATE: int = 155
     TTS_ESPEAK_PITCH: int = 45
@@ -46,6 +49,11 @@ class Settings(BaseSettings):
     RENDER_EXPORT_HEIGHT: int = 1920
     RENDER_EXPORT_FPS_CAP: int = 30
     RENDER_FFMPEG_THREAD_CAP: int = 8
+    RENDER_DRAFT_WIDTH: int = 540
+    RENDER_DRAFT_HEIGHT: int = 960
+    RENDER_DRAFT_FPS_CAP: int = 12
+    RENDER_DRAFT_ENCODE_PRESET: str = "ultrafast"
+    RENDER_DRAFT_CRF: int = 30
     RENDER_PREVIEW_ENCODE_PRESET: str = "veryfast"
     RENDER_PREVIEW_CRF: int = 24
     RENDER_EXPORT_ENCODE_PRESET: str = "faster"
@@ -80,6 +88,7 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.1"
     OLLAMA_TIMEOUT_SECONDS: float = 120.0
+    OLLAMA_DRAFT_TIMEOUT_SECONDS: float = 35.0
     OLLAMA_TEMPERATURE: float = 0.7
     OLLAMA_SCRIPT_TEMPERATURE: float = 0.2
     OLLAMA_NUM_PREDICT: int = 800
@@ -112,6 +121,19 @@ class Settings(BaseSettings):
     AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 60
     HEAVY_ENDPOINT_RATE_LIMIT_COUNT: int = 10
     HEAVY_ENDPOINT_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    RATE_LIMIT_BACKEND: str = "redis"
+    TRUST_PROXY_HEADERS: bool = False
+    MAX_ACTIVE_GENERATION_JOBS_PER_USER: int = 2
+    MAX_QUEUED_GENERATION_JOBS_TOTAL: int = 50
+    MAX_ACTIVE_GENERATION_JOBS_TOTAL: int = 20
+    BACKGROUND_UPLOAD_MAX_SIZE_BYTES: int = 100 * 1024 * 1024
+    BACKGROUND_VIDEO_MAX_DURATION_SECONDS: float = 600.0
+    PROJECT_STORAGE_QUOTA_BYTES: int = 2 * 1024 * 1024 * 1024
+    SCRIPT_IMPORT_MAX_SIZE_BYTES: int = 256 * 1024
+    SCRIPT_IMPORT_ALLOWED_TYPES: str = "text/plain,text/markdown,application/octet-stream"
+    SCRIPT_IMPORT_ALLOWED_SUFFIXES: str = ".txt,.md,.markdown"
+    CELERY_GENERATION_TASK_SOFT_TIME_LIMIT_SECONDS: int = 840
+    CELERY_GENERATION_TASK_HARD_TIME_LIMIT_SECONDS: int = 900
 
     @property
     def is_dev(self) -> bool:
@@ -122,6 +144,13 @@ class Settings(BaseSettings):
             raise RuntimeError("SECRET_KEY must be set to a non-default value outside dev.")
         if not self.is_dev and not self.OAUTH_TOKEN_ENCRYPTION_KEY:
             raise RuntimeError("OAUTH_TOKEN_ENCRYPTION_KEY is required outside dev.")
+        if not self.is_dev and not self.COOKIE_SECURE:
+            raise RuntimeError("COOKIE_SECURE must be true outside dev.")
+        if not self.is_dev and self.RATE_LIMIT_BACKEND.lower() != "redis":
+            raise RuntimeError("RATE_LIMIT_BACKEND must be redis outside dev.")
+        frontend_url = urlparse(self.FRONTEND_URL)
+        if not self.is_dev and frontend_url.hostname in {"localhost", "127.0.0.1"}:
+            raise RuntimeError("FRONTEND_URL must not point at localhost outside dev.")
         if self.YOUTUBE_CONNECT_ENABLED:
             missing = [
                 name

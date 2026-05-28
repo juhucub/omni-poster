@@ -16,12 +16,15 @@ import type {
   Asset,
   BackgroundPreset,
   CharacterPreset,
+  ContentFormatPreset,
   GenerationJob,
   GeneratedScript,
   OutputVideo,
   PlatformTarget,
   PlatformMetadata,
   Project,
+  RenderReadinessEstimate,
+  ProjectScriptGenerationSettings,
   PublishJob,
   PublishedPost,
   ReviewQueueItem,
@@ -35,26 +38,39 @@ import type {
   ScriptGenerationResponse,
 } from '../api/models';
 import StudioShell from '../components/studio/StudioShell';
+import RenderDiagnosticsPanel from '../components/RenderDiagnosticsPanel';
+import FormatBrowser from '../components/script-generation/FormatBrowser';
+import ProductionReadinessPanel, {
+  computeProductionReadiness,
+} from '../components/production/ProductionReadinessPanel';
+import ProductionPreviewFrame from '../components/production/ProductionPreviewFrame';
+import {
+  FALLBACK_CONTENT_FORMATS,
+  durationLabel,
+  findFormat,
+  speakerCountLabel,
+} from '../components/script-generation/formatBrowserData';
 
-const STAGES = ['Assets', 'Script', 'Generate', 'Review', 'Metadata', 'Routing', 'Publish', 'History'] as const;
+const STAGES = ['Idea', 'Script', 'Cast & Voices', 'Scene', 'Preview', 'Render', 'Release'] as const;
 type Stage = (typeof STAGES)[number];
 
 const defaultScript = '<Host> Welcome to Omni-poster.\n<Guest> We can keep revising this conversation before it ships.';
-const contentFormats = [
-  { id: 'reddit_story', label: 'Reddit Story' },
-  { id: 'character_dialogue', label: 'Character Dialogue' },
-  { id: 'podcast_clip', label: 'Podcast Clip' },
-  { id: 'debate_format', label: 'Debate Format' },
-  { id: 'meme_news_reaction', label: 'Meme News Reaction' },
-  { id: 'educational_short', label: 'Educational Short' },
-  { id: 'multi_speaker_skit', label: 'Multi-Speaker Skit' },
-];
 
 const platformTargets: Array<{ id: PlatformTarget; label: string }> = [
   { id: 'tiktok', label: 'TikTok' },
   { id: 'youtube_shorts', label: 'YouTube Shorts' },
   { id: 'instagram_reels', label: 'Instagram Reels' },
 ];
+
+const formatMidpoint = (format: ContentFormatPreset) =>
+  Math.round((format.ideal_duration_range_sec[0] + format.ideal_duration_range_sec[1]) / 2);
+
+const speakerNamesForFormat = (format: ContentFormatPreset) => format.default_speaker_roles.join(', ');
+
+const titleCase = (value: string | null | undefined) =>
+  String(value || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 
 const parseDraftToLines = (value: string): ScriptLine[] =>
   value
@@ -75,7 +91,7 @@ const linesToDraft = (lines: ScriptLine[]) =>
   lines.map((line) => `<${line.speaker}> ${line.text}`).join('\n');
 
 const normalizeDraft = (value: string) => value.trim().replace(/\r\n/g, '\n');
-const hardScriptWarnings = ['has no spoken lines', 'references missing speaker', 'has no caption text', 'Speaker count'];
+const hardScriptWarnings = ['Hard quality failure', 'has no spoken lines', 'references missing speaker', 'has no caption text', 'Speaker count'];
 
 const defaultPreviewSettings: ProjectPreviewSettings = {
   background_asset_id: null,
@@ -141,12 +157,124 @@ const generationStageLabel = (job: GenerationJob | null) => {
   return 'Starting render';
 };
 
+type ProductionStageState = 'Missing' | 'Ready' | 'Warning' | 'Failed' | 'Verified';
+
+type RenderChangeItem = {
+  label: string;
+  state: ProductionStageState;
+  detail: string;
+  cacheKeys?: string[];
+};
+
+const stateBadgeClass = (state: ProductionStageState) => {
+  if (state === 'Verified' || state === 'Ready') return 'op-badge-success';
+  if (state === 'Failed') return 'op-badge-error';
+  if (state === 'Warning') return 'op-badge-warning';
+  return 'op-badge-muted';
+};
+
+const stableJson = (value: unknown) => JSON.stringify(value ?? null);
+
+const changedSpeakerVoices = (
+  current: ProjectPreviewSettings,
+  previous?: ProjectPreviewSettings | null
+) => {
+  if (!previous) return [];
+  const previousBySpeaker = new Map((previous.speaker_mappings || []).map((mapping) => [mapping.speaker_name, mapping]));
+  return (current.speaker_mappings || []).filter((mapping) => {
+    const prior = previousBySpeaker.get(mapping.speaker_name);
+    return prior && prior.voice_profile_id !== mapping.voice_profile_id;
+  });
+};
+
+const buildRenderChangeSummary = ({
+  scriptIsDirty,
+  generationJob,
+  previewSettings,
+  renderReadiness,
+}: {
+  scriptIsDirty: boolean;
+  generationJob: GenerationJob | null;
+  previewSettings: ProjectPreviewSettings;
+  renderReadiness: RenderReadinessEstimate | null;
+}): RenderChangeItem[] => {
+  const warmth = (renderReadiness?.cache_warmth || {}) as any;
+  const ttsSegments = Array.isArray(warmth.tts_segments) ? warmth.tts_segments : [];
+  const missedSegments = ttsSegments.filter((segment: any) => !segment.cached);
+  const missedKeys = missedSegments.map((segment: any) => String(segment.cache_key_prefix || '')).filter(Boolean).slice(0, 6);
+  const previousPreview = generationJob?.preview_settings || null;
+  const voiceChanges = changedSpeakerVoices(previewSettings, previousPreview);
+  const backgroundChanged = Boolean(
+    previousPreview &&
+      (
+        previousPreview.background_asset_id !== previewSettings.background_asset_id ||
+        previousPreview.background_preset_id !== previewSettings.background_preset_id ||
+        previousPreview.background_source_type !== previewSettings.background_source_type ||
+        previousPreview.background_url !== previewSettings.background_url
+      )
+  );
+  const layoutChanged = Boolean(
+    previousPreview &&
+      (
+        stableJson(previousPreview.layout) !== stableJson(previewSettings.layout) ||
+        previousPreview.layout_preset !== previewSettings.layout_preset ||
+        previousPreview.caption_style !== previewSettings.caption_style ||
+        previousPreview.speaker_png_size !== previewSettings.speaker_png_size ||
+        previousPreview.render_preset !== previewSettings.render_preset
+      )
+  );
+
+  return [
+    {
+      label: 'Script lines',
+      state: scriptIsDirty || missedSegments.length ? 'Warning' : ttsSegments.length ? 'Verified' : 'Missing',
+      detail: scriptIsDirty
+        ? 'Unsaved dialogue will be saved first; voice cache keys may change.'
+        : missedSegments.length
+          ? `${missedSegments.length} line(s) need fresh voice WAVs.`
+          : ttsSegments.length
+            ? 'All current voice segment cache keys are warm.'
+            : 'No script segment cache keys available yet.',
+      cacheKeys: missedKeys,
+    },
+    {
+      label: 'Voice profiles',
+      state: voiceChanges.length ? 'Warning' : previousPreview ? 'Verified' : 'Missing',
+      detail: voiceChanges.length
+        ? `${voiceChanges.map((mapping) => mapping.speaker_name).slice(0, 3).join(', ')} changed voice profile assignment.`
+        : previousPreview
+          ? 'Voice profile assignments match the latest render snapshot.'
+          : 'No previous render snapshot to compare voice assignments.',
+    },
+    {
+      label: 'Background',
+      state: backgroundChanged ? 'Warning' : previousPreview ? 'Verified' : 'Missing',
+      detail: backgroundChanged
+        ? 'Selected background changed; background normalization cache may invalidate.'
+        : previousPreview
+          ? 'Background selection matches the latest render snapshot.'
+          : 'No previous render snapshot to compare background selection.',
+      cacheKeys: backgroundChanged ? ['background layer'] : [],
+    },
+    {
+      label: 'Layout and overlays',
+      state: layoutChanged ? 'Warning' : previousPreview ? 'Verified' : 'Missing',
+      detail: layoutChanged
+        ? 'Layout, caption, speaker PNG size, or render preset changed; overlay/final MP4 cache may invalidate.'
+        : previousPreview
+          ? 'Layout and overlay settings match the latest render snapshot.'
+          : 'No previous render snapshot to compare layout settings.',
+      cacheKeys: layoutChanged ? ['overlay layer', 'final mp4'] : [],
+    },
+  ];
+};
+
 const ProjectEditorPage: React.FC = () => {
   const { projectId } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const id = Number(projectId);
 
-  const [stage, setStage] = useState<Stage>('Assets');
+  const [stage, setStage] = useState<Stage>('Idea');
   const [project, setProject] = useState<Project | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [presets, setPresets] = useState<BackgroundPreset[]>([]);
@@ -156,6 +284,7 @@ const ProjectEditorPage: React.FC = () => {
   const [scriptDraft, setScriptDraft] = useState(defaultScript);
   const [scriptLines, setScriptLines] = useState<ScriptLine[]>(parseDraftToLines(defaultScript));
   const [scriptPrompt, setScriptPrompt] = useState('an explainer about why short-form distribution pipelines need review');
+  const [contentFormats, setContentFormats] = useState<ContentFormatPreset[]>(FALLBACK_CONTENT_FORMATS);
   const [scriptFormatId, setScriptFormatId] = useState('educational_short');
   const [scriptPlatform, setScriptPlatform] = useState<PlatformTarget>('tiktok');
   const [scriptTargetDuration, setScriptTargetDuration] = useState(45);
@@ -176,6 +305,7 @@ const ProjectEditorPage: React.FC = () => {
   const [previewSettings, setPreviewSettings] = useState<ProjectPreviewSettings>(defaultPreviewSettings);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
+  const [renderReadiness, setRenderReadiness] = useState<RenderReadinessEstimate | null>(null);
   const [publishJob, setPublishJob] = useState<PublishJob | null>(null);
   const [publishMode, setPublishMode] = useState<'now' | 'schedule'>('now');
   const [scheduledFor, setScheduledFor] = useState('');
@@ -189,18 +319,22 @@ const ProjectEditorPage: React.FC = () => {
   useEffect(() => {
     const tab = searchParams.get('tab');
     const tabToStage: Record<string, Stage> = {
-      assets: 'Assets',
-      scenes: 'Assets',
+      idea: 'Idea',
+      assets: 'Scene',
+      scenes: 'Scene',
+      scene: 'Scene',
       script: 'Script',
-      generate: 'Generate',
-      voices: 'Generate',
-      preview: 'Generate',
-      render: 'Generate',
-      review: 'Review',
-      metadata: 'Metadata',
-      routing: 'Routing',
-      release: 'Publish',
-      history: 'History',
+      cast: 'Cast & Voices',
+      voices: 'Cast & Voices',
+      generate: 'Render',
+      preview: 'Preview',
+      render: 'Render',
+      review: 'Preview',
+      metadata: 'Release',
+      routing: 'Release',
+      release: 'Release',
+      publish: 'Release',
+      history: 'Release',
     };
     if (tab && tabToStage[tab] && tabToStage[tab] !== stage) {
       setStage(tabToStage[tab]);
@@ -237,6 +371,7 @@ const ProjectEditorPage: React.FC = () => {
   const generationTtsError = (generationJob?.tts_result as any)?.error || null;
   const savedDraft = useMemo(() => normalizeDraft(script?.raw_text || defaultScript), [script?.raw_text]);
   const scriptIsDirty = useMemo(() => normalizeDraft(scriptDraft) !== savedDraft, [scriptDraft, savedDraft]);
+  const selectedFormat = useMemo(() => findFormat(contentFormats, scriptFormatId), [contentFormats, scriptFormatId]);
   const detectedSpeakers = useMemo(() => {
     const names = (scriptLines.length ? scriptLines : script?.parsed_lines || []).map((line) => line.speaker.trim()).filter(Boolean);
     return Array.from(new Set(names));
@@ -253,41 +388,81 @@ const ProjectEditorPage: React.FC = () => {
       if (scriptProviderStatus.failure_type === 'ollama_timeout') {
         return 'Timed out · fallback';
       }
-      if (scriptProviderStatus.failure_type === 'invalid_json') {
+      if (scriptProviderStatus.failure_type === 'invalid_json' || scriptProviderStatus.failure_type === 'invalid_json_after_repair') {
         return 'Invalid JSON · fallback';
+      }
+      if (scriptProviderStatus.failure_type?.includes('quality_validation')) {
+        return 'Quality fallback';
       }
       return 'Fallback';
     }
     return scriptProviderStatus.provider_name === 'ollama' ? 'Ollama' : scriptProviderStatus.provider_name;
   }, [scriptProviderStatus]);
-  const selectedBackgroundUrl = useMemo(
-    () => backgroundAsset?.content_url || previewSettings.background_url || null,
-    [backgroundAsset?.content_url, previewSettings.background_url]
+  const scriptDiagnostics = useMemo(() => {
+    const diagnostics = (scriptProviderStatus?.diagnostics || {}) as Record<string, unknown>;
+    const targetDuration = Number(generatedScript?.target_duration_sec || diagnostics.target_duration_sec || scriptTargetDuration || 0);
+    const estimatedDuration = Number(generatedScript?.total_estimated_duration_sec || diagnostics.estimated_duration_sec || 0);
+    const speakerCount = Number(generatedScript?.speakers.length || diagnostics.speaker_count || 0);
+    const fallbackReason = scriptProviderStatus?.fallback_reason || scriptProviderStatus?.failure_type || null;
+    const ready = Boolean(generatedScript && !generatedScriptHasHardWarnings && generatedScript.lines.length > 0);
+    return {
+      targetDuration,
+      estimatedDuration,
+      speakerCount,
+      fallbackReason,
+      ready,
+      repaired: Boolean(scriptProviderStatus?.repair_attempted),
+      normalized: scriptGenerationWarnings.length > 0,
+      cacheHit: Boolean((diagnostics.cache as any)?.hit),
+    };
+  }, [generatedScript, generatedScriptHasHardWarnings, scriptGenerationWarnings.length, scriptProviderStatus, scriptTargetDuration]);
+  const readinessProject = useMemo(
+    () => project ? { ...project, latest_output: latestOutput } : null,
+    [project, latestOutput]
   );
-  const selectedBackgroundMimeType = useMemo(
-    () => backgroundAsset?.mime_type || String(previewSettings.background_metadata?.mime_type || ''),
-    [backgroundAsset?.mime_type, previewSettings.background_metadata]
+  const productionReadiness = useMemo(
+    () => computeProductionReadiness({
+      project: readinessProject,
+      script,
+      latestJob: generationJob,
+      metadata,
+      draftEstimate: renderReadiness,
+      linkMode: 'anchor',
+    }),
+    [readinessProject, script, generationJob, metadata, renderReadiness]
   );
-  const previewSpeakerMappings = useMemo(
-    () =>
-      detectedSpeakers.map((speakerName) => {
-        // Script speakers own the preview order; bindings attach the reusable character and voice profile.
-        const binding = speakerBindings.find((item) => item.speaker_name === speakerName);
-        const preset = binding
-          ? characterPresets.find((item) => item.id === binding.character_preset_id)
-          : null;
-        const sample = scriptLines.find((line) => line.speaker.trim() === speakerName && line.text.trim());
-        return {
-          speaker_name: speakerName,
-          character_display_name: binding?.character_display_name || preset?.display_name || null,
-          character_portrait_url: binding?.character_portrait_url || preset?.portrait_url || null,
-          voice_profile_id: binding?.voice_profile_id || preset?.voice_profile_id || null,
-          provider: binding?.provider || preset?.tts_provider || null,
-          sample_text: sample?.text || 'Dialogue text will appear here.',
-        };
-      }),
-    [characterPresets, detectedSpeakers, scriptLines, speakerBindings]
+  const renderChangeSummary = useMemo(
+    () => buildRenderChangeSummary({ scriptIsDirty, generationJob, previewSettings, renderReadiness }),
+    [generationJob, previewSettings, renderReadiness, scriptIsDirty]
   );
+  const renderCacheWarmth = useMemo(() => {
+    const warmth = (renderReadiness?.cache_warmth || {}) as any;
+    const hits = Number(warmth.tts_segment_hits || 0);
+    const misses = Number(warmth.tts_segment_misses || 0);
+    const total = hits + misses;
+    return {
+      hits,
+      misses,
+      total,
+      cloneMisses: Number(warmth.clone_provider_misses || 0),
+      percent: total ? Math.round((hits / total) * 100) : 0,
+    };
+  }, [renderReadiness]);
+  const stepSummaries = useMemo(() => {
+    const rowById = new Map(productionReadiness.rows.map((row) => [row.id, row]));
+    const readyLike = (state?: string) => state === 'ready' || state === 'verified';
+    return {
+      Idea: project ? `${titleCase(project.status)} production` : 'Needs setup',
+      Script: readyLike(rowById.get('script')?.state) ? `${scriptLines.length} lines ready` : 'Missing',
+      'Cast & Voices': readyLike(rowById.get('voice-assignments')?.state) && readyLike(rowById.get('character-images')?.state)
+        ? `${productionReadiness.speakers.length} speakers assigned`
+        : 'Missing',
+      Scene: readyLike(rowById.get('scene')?.state) ? 'Ready' : 'Missing',
+      Preview: rowById.get('preview')?.state === 'verified' ? 'Verified' : rowById.get('preview')?.state === 'warning' ? 'Warning' : 'Missing',
+      Render: generationJob?.status === 'failed' ? 'Failed' : generationJob?.status ? titleCase(generationJob.status) : latestOutput ? 'Ready' : 'Missing',
+      Release: readyLike(rowById.get('release')?.state) ? 'Ready' : 'Missing',
+    } as Record<Stage, string>;
+  }, [generationJob?.status, latestOutput, productionReadiness, project, scriptLines.length]);
 
   const toUtcIso = (value: string) => (value ? new Date(value).toISOString() : null);
   const apiBase = apiBaseUrl;
@@ -345,11 +520,61 @@ const ProjectEditorPage: React.FC = () => {
     setGeneratedScript(revision?.generated_script || null);
   };
 
+  const hydrateScriptGenerationSettings = (settings: ProjectScriptGenerationSettings | null | undefined) => {
+    if (!settings) {
+      return;
+    }
+    setScriptFormatId(settings.content_format_id || 'educational_short');
+    setScriptPlatform(settings.platform || 'tiktok');
+    setScriptTargetDuration(settings.target_duration_sec || 45);
+    setScriptTone(settings.tone || 'explanatory');
+    setScriptAudience(settings.audience || 'general short-form viewers');
+    setScriptSpeakerNames((settings.speaker_names || []).join(', '));
+  };
+
+  const persistScriptGenerationSettings = async (patch: Partial<ProjectScriptGenerationSettings>) => {
+    if (!id || Number.isNaN(id)) {
+      return null;
+    }
+    const response = await apiClient.patch<ProjectScriptGenerationSettings>(`/projects/${id}/script-generation-settings`, patch);
+    setProject((current) =>
+      current
+        ? {
+            ...current,
+            script_generation_settings: response.data,
+          }
+        : current
+    );
+    return response.data;
+  };
+
+  const selectScriptFormat = (format: ContentFormatPreset) => {
+    const nextDuration =
+      scriptTargetDuration < format.ideal_duration_range_sec[0] || scriptTargetDuration > format.ideal_duration_range_sec[1]
+        ? formatMidpoint(format)
+        : scriptTargetDuration;
+    const nextTone = format.tone_options.includes(scriptTone) ? scriptTone : format.tone_options[0] || scriptTone;
+    const nextSpeakerNames = speakerNamesForFormat(format);
+    setScriptFormatId(format.id);
+    setScriptTargetDuration(nextDuration);
+    setScriptTone(nextTone);
+    setScriptSpeakerNames(nextSpeakerNames);
+    void persistScriptGenerationSettings({
+      content_format_id: format.id,
+      platform: scriptPlatform,
+      target_duration_sec: nextDuration,
+      tone: nextTone,
+      audience: scriptAudience,
+      speaker_names: format.default_speaker_roles,
+    });
+  };
+
   const loadAll = async () => {
     try {
       setLoading(true);
       const [
         projectResponse,
+        formatsResponse,
         assetsResponse,
         presetsResponse,
         characterPresetsResponse,
@@ -362,8 +587,12 @@ const ProjectEditorPage: React.FC = () => {
         historyResponse,
         speakerBindingsResponse,
         generationJobsResponse,
+        renderReadinessResponse,
       ] = await Promise.all([
         apiClient.get<Project>(`/projects/${id}`),
+        apiClient
+          .get<{ items: ContentFormatPreset[] }>('/script-generation/formats')
+          .catch(() => ({ data: { items: FALLBACK_CONTENT_FORMATS } })),
         apiClient.get<Asset[]>(`/projects/${id}/assets`),
         apiClient.get<BackgroundPreset[]>('/background-presets'),
         apiClient.get<{ items: CharacterPreset[] }>('/character-presets'),
@@ -375,10 +604,13 @@ const ProjectEditorPage: React.FC = () => {
         apiClient.get<{ items: SocialAccount[] }>('/social-accounts'),
         apiClient.get<{ jobs: PublishJob[]; posts: PublishedPost[] }>(`/projects/${id}/publish-history`),
         apiClient.get<{ items: SpeakerBinding[] }>(`/projects/${id}/speaker-bindings`),
-        apiClient.get<{ items: GenerationJob[] }>(`/projects/${id}/generation-jobs`),
+        apiClient.get<{ items: GenerationJob[] }>(`/projects/${id}/generation-jobs?limit=1`),
+        apiClient.get<RenderReadinessEstimate>(`/projects/${id}/render-readiness?output_kind=draft`).catch(() => ({ data: null as RenderReadinessEstimate | null })),
       ]);
 
       setProject(projectResponse.data);
+      setContentFormats(formatsResponse.data.items?.length ? formatsResponse.data.items : FALLBACK_CONTENT_FORMATS);
+      hydrateScriptGenerationSettings(projectResponse.data.script_generation_settings);
       setPreviewSettings(clampPreviewLayout(projectResponse.data.preview_settings || defaultPreviewSettings));
       setAssets(assetsResponse.data);
       setPresets(presetsResponse.data);
@@ -391,24 +623,30 @@ const ProjectEditorPage: React.FC = () => {
       setAccounts(accountsResponse.data.items);
       setHistory(historyResponse.data);
       setSpeakerBindings(speakerBindingsResponse.data.items);
-      const latestGenerationJob = generationJobsResponse.data.items[0] || null;
-      try {
-        const activeGenerationResponse = await apiClient.get<GenerationJob>(`/projects/${id}/generation-jobs/active`);
-        setGenerationJob(activeGenerationResponse.data);
-      } catch (activeErr: any) {
-        if (activeErr.response?.status === 404) {
-          // Keep completed render diagnostics visible after refresh when there is no active worker job.
-          setGenerationJob(latestGenerationJob);
-        } else {
-          throw activeErr;
-        }
-      }
+      setGenerationJob(generationJobsResponse.data.items[0] || null);
+      setRenderReadiness(renderReadinessResponse.data);
       setError(null);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to load project workspace.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const refreshRenderState = async () => {
+    const [projectResponse, outputsResponse, reviewsResponse, latestJobResponse, renderReadinessResponse] = await Promise.all([
+      apiClient.get<Project>(`/projects/${id}`),
+      apiClient.get<{ items: OutputVideo[] }>(`/projects/${id}/outputs`),
+      apiClient.get<{ items: ReviewQueueItem[] }>(`/projects/${id}/reviews`),
+      apiClient.get<GenerationJob>(`/projects/${id}/generation-jobs/latest`).catch(() => ({ data: null as GenerationJob | null })),
+      apiClient.get<RenderReadinessEstimate>(`/projects/${id}/render-readiness?output_kind=draft`).catch(() => ({ data: null as RenderReadinessEstimate | null })),
+    ]);
+    setProject(projectResponse.data);
+    setPreviewSettings(clampPreviewLayout(projectResponse.data.preview_settings || defaultPreviewSettings));
+    setOutputs(outputsResponse.data.items);
+    setReviews(reviewsResponse.data.items);
+    setGenerationJob(latestJobResponse.data);
+    setRenderReadiness(renderReadinessResponse.data);
   };
 
   useEffect(() => {
@@ -427,13 +665,13 @@ const ProjectEditorPage: React.FC = () => {
         const response = await apiClient.get<GenerationJob>(`/generation-jobs/${generationJob.id}`);
         setGenerationJob(response.data);
         if (['completed', 'failed', 'canceled'].includes(response.data.status)) {
-          await loadAll();
-          setStage('Review');
+          await refreshRenderState();
+          setStage('Preview');
         }
       } catch {
         window.clearInterval(timer);
       }
-    }, 1500);
+    }, generationJob.status === 'queued' ? 1800 : 1200);
 
     return () => window.clearInterval(timer);
   }, [generationJob]);
@@ -527,7 +765,7 @@ const ProjectEditorPage: React.FC = () => {
       );
       await loadAll();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Background preset selection failed.');
+      setError(err.response?.data?.detail || 'Scene selection failed.');
     } finally {
       setBusy(null);
     }
@@ -568,14 +806,32 @@ const ProjectEditorPage: React.FC = () => {
         .split(',')
         .map((name) => name.trim())
         .filter(Boolean);
-      const response = await apiClient.post<ScriptGenerationResponse>('/script-generation/generate', {
-        idea: scriptPrompt,
+      await persistScriptGenerationSettings({
         content_format_id: scriptFormatId,
         platform: scriptPlatform,
         target_duration_sec: scriptTargetDuration,
         tone: scriptTone,
         audience: scriptAudience,
-        speaker_names: requestedSpeakerNames.length ? requestedSpeakerNames : detectedSpeakers,
+        speaker_names: requestedSpeakerNames.length ? requestedSpeakerNames : selectedFormat?.default_speaker_roles || [],
+      });
+      const response = await apiClient.post<ScriptGenerationResponse>('/script-generation/generate', {
+        idea: scriptPrompt,
+        content_format_id: scriptFormatId,
+        format_id: scriptFormatId,
+        platform: scriptPlatform,
+        platform_targets: [scriptPlatform],
+        target_duration_sec: scriptTargetDuration,
+        timing_target: {
+          target_duration_sec: scriptTargetDuration,
+        },
+        tone: scriptTone,
+        audience: scriptAudience,
+        speaker_names: requestedSpeakerNames.length ? requestedSpeakerNames : selectedFormat?.default_speaker_roles || detectedSpeakers,
+        speaker_roles: selectedFormat?.default_speaker_roles || [],
+        quality_hints: {
+          specificity: 'specific',
+          retention_style: selectedFormat?.pacing_rules?.[0] || 'hook-driven',
+        },
         debug: showScriptDebug,
       });
       setGeneratedScript(response.data.generated_script);
@@ -786,7 +1042,7 @@ const ProjectEditorPage: React.FC = () => {
         summary: decisionNote,
       });
       await loadAll();
-      setStage('Publish');
+      setStage('Release');
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to approve review.');
     } finally {
@@ -870,122 +1126,7 @@ const ProjectEditorPage: React.FC = () => {
   };
 
   const renderGenerationJobPanel = () => {
-    if (!generationJob) {
-      return null;
-    }
-    const cacheStats = (generationJob.cache_statistics || {}) as any;
-    const artifactUrls = (generationJob.artifact_urls || {}) as any;
-    return (
-      <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4 text-sm text-slate-300">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <span>
-            Render job #{generationJob.id}: {generationJob.status} ({generationJob.progress}%)
-          </span>
-          <span className="text-cyan-200">{generationJob.current_phase || generationStage}</span>
-        </div>
-        <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
-          <div className="h-full rounded-full bg-cyan-300 transition-[width] duration-500" style={{ width: `${generationJob.progress}%` }} />
-        </div>
-        {generationJob.error_message && <div className="mt-2 text-rose-300">{generationJob.error_message}</div>}
-        {generationVoiceEntries.length > 0 && (
-          <div className="mt-3 grid gap-2 md:grid-cols-2">
-            {generationVoiceEntries.map((entry: any) => (
-              <div key={entry.speaker} className="rounded-xl border border-white/10 bg-black/20 p-3">
-                <div className="font-medium text-slate-100">{entry.speaker}</div>
-                <div className="mt-1 text-xs text-slate-400">
-                  {entry.character_display_name || 'Unmapped'} · {entry.provider || 'tts'}
-                </div>
-                <div className="mt-1 text-xs text-cyan-200">{entry.voice_profile_id || 'ephemeral voice profile'}</div>
-                {entry.voice_profile_id && (
-                  <Link
-                    to={`/voice-lab?profileId=${encodeURIComponent(entry.voice_profile_id)}&productionId=${id}&speakerId=${encodeURIComponent(entry.speaker)}`}
-                    className="mt-2 inline-flex text-xs text-cyan-200 hover:text-cyan-100"
-                  >
-                    Edit in Voice Lab
-                  </Link>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-        {generationTtsError && (
-          <div className="mt-3 rounded-xl border border-rose-300/30 bg-rose-950/30 p-3 text-sm text-rose-100">
-            <div className="font-medium">{generationTtsError.message || generationTtsError.code || 'TTS provider failed.'}</div>
-            {generationTtsError.suggested_action && <div className="mt-1 text-rose-200/80">{generationTtsError.suggested_action}</div>}
-          </div>
-        )}
-        {(artifactUrls.render_plan || artifactUrls.cache_report || artifactUrls.render_profile || cacheStats.total_events) && (
-          <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                Cache: {Number(cacheStats.hits || 0)} hits · {Number(cacheStats.misses || 0)} misses
-              </div>
-              <div className="flex flex-wrap gap-3">
-                {artifactUrls.render_plan && (
-                  <a href={toApiHref(String(artifactUrls.render_plan))} className="text-cyan-200 hover:text-cyan-100">
-                    Render plan
-                  </a>
-                )}
-                {artifactUrls.cache_report && (
-                  <a href={toApiHref(String(artifactUrls.cache_report))} className="text-cyan-200 hover:text-cyan-100">
-                    Cache report
-                  </a>
-                )}
-                {artifactUrls.render_profile && (
-                  <a href={toApiHref(String(artifactUrls.render_profile))} className="text-cyan-200 hover:text-cyan-100">
-                    Timing profile
-                  </a>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-        {generationSegments.length > 0 && (
-          <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3">
-            <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Render segment WAVs</div>
-            <div className="mt-2 flex flex-wrap gap-3 text-xs">
-              {generationAssembly.composite_audio_artifact_url && (
-                <a href={toApiHref(generationAssembly.composite_audio_artifact_url)} className="text-cyan-200 hover:text-cyan-100">
-                  Dialogue composite WAV
-                </a>
-              )}
-              {generationAssembly.final_video_audio_artifact_url && (
-                <a href={toApiHref(generationAssembly.final_video_audio_artifact_url)} className="text-cyan-200 hover:text-cyan-100">
-                  Final video audio WAV
-                </a>
-              )}
-              {latestOutput?.asset?.content_url && (
-                <a href={toApiHref(latestOutput.asset.content_url)} className="text-cyan-200 hover:text-cyan-100">
-                  Final MP4
-                </a>
-              )}
-            </div>
-            <div className="mt-2 grid gap-2 md:grid-cols-2">
-              {generationSegments.map((segment: any) => (
-                <a
-                  key={segment.segment_id || `${segment.segment_index}-${segment.speaker}`}
-                  href={toApiHref(segment.artifact_url)}
-                  className="rounded-lg border border-white/10 px-3 py-2 text-xs text-slate-300 hover:bg-white/10"
-                >
-                  <div className="font-medium text-slate-100">
-                    #{segment.segment_index} {segment.speaker} · {segment.provider_used}
-                  </div>
-                  <div className="mt-1 text-cyan-200">{segment.voice_profile_id}</div>
-                  <div className="mt-1 text-slate-500">
-                    {segment.duration_seconds ? `${Number(segment.duration_seconds).toFixed(2)}s` : 'duration unknown'}
-                    {segment.fallback_used ? ' · fallback used' : ''}
-                    {segment.tts_cache_hit ? ' · TTS cache' : ''}
-                  </div>
-                  {segment.normalized_audio_artifact_url && (
-                    <div className="mt-1 text-cyan-200">Normalized WAV available</div>
-                  )}
-                </a>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    );
+    return <RenderDiagnosticsPanel job={generationJob} output={latestOutput} projectId={id || project?.id} />;
   };
 
   if (loading) {
@@ -1025,7 +1166,7 @@ const ProjectEditorPage: React.FC = () => {
 
           {error && <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-rose-200">{error}</div>}
 
-          {stage !== 'Generate' && generationJob && (
+          {stage !== 'Render' && generationJob && (
             <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -1033,7 +1174,7 @@ const ProjectEditorPage: React.FC = () => {
                   <div className="mt-1 text-sm text-slate-400">Segment WAV links stay available after completion for render debugging.</div>
                 </div>
                 <button
-                  onClick={() => setStage('Generate')}
+                  onClick={() => setStage('Render')}
                   className="rounded-full border border-white/10 px-4 py-2 text-sm hover:bg-white/10"
                 >
                   Open Render Controls
@@ -1044,19 +1185,20 @@ const ProjectEditorPage: React.FC = () => {
           )}
 
           <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
-            <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-8">
+            <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-7">
               {STAGES.map((item) => (
                 <button
                   key={item}
                   onClick={() => {
                     setStage(item);
-                    setSearchParams({ tab: item.toLowerCase() });
+                    setSearchParams({ tab: item === 'Cast & Voices' ? 'cast' : item.toLowerCase() });
                   }}
-                  className={`rounded-2xl px-4 py-3 text-sm font-medium transition ${
+                  className={`rounded-2xl px-4 py-3 text-left text-sm font-medium transition ${
                     stage === item ? 'bg-cyan-300 text-slate-950' : 'bg-slate-950/50 text-slate-300 hover:bg-white/10'
                   }`}
                 >
-                  {item}
+                  <span className="block">{item}</span>
+                  <span className={`mt-1 block text-xs ${stage === item ? 'text-slate-800' : 'text-slate-500'}`}>{stepSummaries[item]}</span>
                 </button>
               ))}
             </div>
@@ -1064,14 +1206,36 @@ const ProjectEditorPage: React.FC = () => {
 
           <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
             <section className="space-y-6">
-              {stage === 'Assets' && (
-                <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-                  <h2 className="text-xl font-semibold">Background Source</h2>
-                  <p className="mt-2 text-sm text-slate-400">Upload a background video or pick a curated preset for the current project.</p>
+              {stage === 'Idea' && (
+                <div id="step-idea" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                  <h2 className="text-xl font-semibold">Idea</h2>
+                  <p className="mt-2 text-sm text-slate-400">Set the production direction before moving into script, cast, scene, preview, render, and release.</p>
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                      <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Production</div>
+                      <div className="mt-2 text-lg font-semibold">{project?.name}</div>
+                      <div className="mt-1 text-sm text-slate-400">{titleCase(project?.target_platform)} · {titleCase(project?.status)}</div>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                      <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Format</div>
+                      <div className="mt-2 text-lg font-semibold">{selectedFormat?.display_name || titleCase(script?.generated_script?.content_format_id || 'Not selected')}</div>
+                      <div className="mt-1 text-sm text-slate-400">{selectedFormat ? durationLabel(selectedFormat) : 'Choose a reusable format in Script.'}</div>
+                    </div>
+                  </div>
+                  <div className="mt-4">
+                    <ProductionReadinessPanel readiness={productionReadiness} />
+                  </div>
+                </div>
+              )}
+
+              {stage === 'Scene' && (
+                <div id="step-scene" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                  <h2 className="text-xl font-semibold">Scene</h2>
+                  <p className="mt-2 text-sm text-slate-400">Upload a scene video or image, or pick a curated scene for this production.</p>
                   <div className="mt-4 flex flex-col gap-3 md:flex-row">
                     <input
                       type="file"
-                      accept="video/mp4,video/webm,video/mpeg"
+                      accept="video/mp4,video/webm,video/mpeg,image/png,image/jpeg,image/webp"
                       onChange={(event) => setSelectedFile(event.target.files?.[0] || null)}
                       className="block w-full rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-4 text-sm"
                     />
@@ -1081,14 +1245,14 @@ const ProjectEditorPage: React.FC = () => {
                       className="inline-flex items-center justify-center gap-2 rounded-2xl bg-cyan-300 px-5 py-4 font-medium text-slate-950 disabled:opacity-60"
                     >
                       <Upload size={18} />
-                      {busy === 'upload' ? 'Uploading...' : 'Upload Background'}
+                      {busy === 'upload' ? 'Uploading...' : 'Upload Scene'}
                     </button>
                   </div>
 
                   <div className="mt-6 grid gap-3 md:grid-cols-2">
                     {presets.length === 0 && (
                       <div className="rounded-2xl border border-dashed border-white/15 bg-slate-950/30 p-4 text-sm text-slate-400">
-                        No bundled presets are available yet. Add `.mp4` files under `backend/storage/presets`, then rebuild the Docker containers to refresh the gallery.
+                        No bundled scenes are available yet. Add media under `backend/storage/presets`, then rebuild the Docker containers to refresh the gallery.
                       </div>
                     )}
                     {presets.map((preset) => (
@@ -1100,7 +1264,7 @@ const ProjectEditorPage: React.FC = () => {
                           disabled={busy === `preset-${preset.key}`}
                           className="mt-4 rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10 disabled:opacity-60"
                         >
-                          {busy === `preset-${preset.key}` ? 'Selecting...' : 'Use Preset'}
+                          {busy === `preset-${preset.key}` ? 'Selecting...' : 'Use Scene'}
                         </button>
                       </div>
                     ))}
@@ -1108,14 +1272,14 @@ const ProjectEditorPage: React.FC = () => {
 
                   {backgroundAsset && (
                     <div className="mt-6 rounded-2xl border border-emerald-300/20 bg-emerald-400/10 p-4 text-sm text-emerald-100">
-                      Selected background: {backgroundAsset.original_filename} ({project?.background_source_type})
+                      Selected scene: {backgroundAsset.original_filename} ({project?.background_source_type})
                     </div>
                   )}
                 </div>
               )}
 
               {stage === 'Script' && (
-                <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div id="step-script" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                   <div className="flex items-center justify-between gap-4">
                     <div>
                       <h2 className="text-xl font-semibold">Dialogue Script</h2>
@@ -1138,21 +1302,38 @@ const ProjectEditorPage: React.FC = () => {
                   )}
 
                   <div className="mt-4 space-y-3 rounded-2xl border border-white/10 bg-slate-950/30 p-4">
+                    <FormatBrowser formats={contentFormats} selectedFormatId={scriptFormatId} onSelect={selectScriptFormat} />
                     <textarea
                       value={scriptPrompt}
                       onChange={(event) => setScriptPrompt(event.target.value)}
-                      placeholder="Idea for structured script generation"
+                      placeholder={selectedFormat ? `Idea for a ${selectedFormat.display_name.toLowerCase()}...` : 'Idea for structured script generation'}
                       rows={3}
                       className="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
                     />
+                    {selectedFormat && (
+                      <div className="rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-3 text-sm text-cyan-50">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-medium text-slate-950">{selectedFormat.display_name}</span>
+                          <span>Ideal {durationLabel(selectedFormat)}</span>
+                          <span>· {speakerCountLabel(selectedFormat)}</span>
+                          <span>· {selectedFormat.section_structure.join(' -> ')}</span>
+                        </div>
+                        <div className="mt-2 text-xs text-cyan-100/80">{selectedFormat.best_use_case}</div>
+                      </div>
+                    )}
                     <div className="grid gap-3 lg:grid-cols-[0.9fr_0.8fr_1fr]">
                     <select
                       value={scriptFormatId}
-                      onChange={(event) => setScriptFormatId(event.target.value)}
+                      onChange={(event) => {
+                        const format = findFormat(contentFormats, event.target.value);
+                        if (format) {
+                          selectScriptFormat(format);
+                        }
+                      }}
                       className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
                     >
                       {contentFormats.map((format) => (
-                        <option key={format.id} value={format.id}>{format.label}</option>
+                        <option key={format.id} value={format.id}>{format.display_name}</option>
                       ))}
                     </select>
                     <select
@@ -1196,7 +1377,7 @@ const ProjectEditorPage: React.FC = () => {
                       <input
                         value={scriptSpeakerNames}
                         onChange={(event) => setScriptSpeakerNames(event.target.value)}
-                        placeholder="Optional speakers, comma-separated"
+                        placeholder={selectedFormat ? `${selectedFormat.default_speaker_roles.join(', ')}` : 'Optional speakers, comma-separated'}
                         className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
                       />
                     </div>
@@ -1233,11 +1414,20 @@ const ProjectEditorPage: React.FC = () => {
                           </span>
                           <span>
                             {scriptProviderStatus?.fallback_used
-                              ? 'Fallback script generated — Ollama failed or timed out'
+                              ? `Fallback script generated${scriptDiagnostics.fallbackReason ? `: ${scriptDiagnostics.fallbackReason}` : ''}`
                               : 'Generated with Ollama'}
                           </span>
-                          {generatedScript ? <span>· {generatedScript.total_estimated_duration_sec.toFixed(1)}s estimated</span> : null}
-                          {scriptGenerationWarnings.length > 0 ? <span>· Cleaned generated script for render compatibility</span> : null}
+                          {generatedScript ? <span>· {titleCase(generatedScript.format_id || generatedScript.content_format_id)}</span> : null}
+                          {generatedScript ? <span>· {scriptDiagnostics.estimatedDuration.toFixed(1)}s / {scriptDiagnostics.targetDuration}s</span> : null}
+                          {generatedScript ? <span>· {scriptDiagnostics.speakerCount} speaker{scriptDiagnostics.speakerCount === 1 ? '' : 's'}</span> : null}
+                          {scriptDiagnostics.cacheHit ? <span>· cache hit</span> : null}
+                          {scriptDiagnostics.repaired ? <span>· repaired</span> : null}
+                          {scriptDiagnostics.normalized ? <span>· normalized</span> : null}
+                          {generatedScript ? (
+                            <span className={scriptDiagnostics.ready ? 'text-emerald-100' : 'text-amber-100'}>
+                              · {scriptDiagnostics.ready ? 'ready to accept' : 'needs review'}
+                            </span>
+                          ) : null}
                         </div>
                         <div className="flex flex-wrap gap-2">
                           {generatedScript && (
@@ -1363,18 +1553,18 @@ const ProjectEditorPage: React.FC = () => {
                 </div>
               )}
 
-              {stage === 'Generate' && (
-                <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-                  <h2 className="text-xl font-semibold">Render Outputs</h2>
-                  <p className="mt-2 text-sm text-slate-400">Queue a preview render for review or a higher-confidence final output once the draft is stable.</p>
+              {stage === 'Cast & Voices' && (
+                <div id="step-cast" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                  <h2 className="text-xl font-semibold">Cast & Voices</h2>
+                  <p className="mt-2 text-sm text-slate-400">Assign each script speaker to a reusable character image and voice profile before rendering.</p>
                   <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-4 text-sm text-cyan-100">
                     Detected cast: {(script?.characters || scriptLines.map((line) => line.speaker)).slice(0, 2).join(' vs ') || 'Add two dialogue speakers first'}.
-                    The local renderer now voices each line and pops the active speaker portrait. It checks bundled character PNGs in <code>backend/storage/characters</code> first using <code>&lt;speaker&gt;.png</code> or <code>speaker_1.png</code> and <code>speaker_2.png</code>, then falls back to runtime overrides and finally generated portraits.
+                    The renderer uses these assignments to keep voices, captions, and active character images aligned.
                   </div>
                   <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <div className="text-sm font-medium text-slate-100">Speaker Voice Bindings</div>
+                        <div className="text-sm font-medium text-slate-100">Speaker assignments</div>
                         <div className="mt-1 text-sm text-slate-400">
                           Final generation uses these explicit preset bindings so Voice Lab previews and renders stay consistent.
                         </div>
@@ -1442,35 +1632,107 @@ const ProjectEditorPage: React.FC = () => {
                       )}
                     </div>
                   </div>
+                </div>
+              )}
+
+              {stage === 'Render' && (
+                <div id="step-render" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                  <h2 className="text-xl font-semibold">Render</h2>
+                  <p className="mt-2 text-sm text-slate-400">Queue a draft, preview, final, or debug render after the script, cast, and scene are ready.</p>
+                  {renderReadiness && (
+                    <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${renderReadiness.draft_ready ? 'border-emerald-300/30 bg-emerald-400/10 text-emerald-100' : 'border-amber-300/30 bg-amber-400/10 text-amber-100'}`}>
+                      <div className="font-medium">
+                        60-second draft SLA: {renderReadiness.draft_ready ? 'Ready' : 'Warning'}
+                      </div>
+                      <div className="mt-1 opacity-90">
+                        Estimate {Math.round(renderReadiness.estimated_seconds_low)}-{Math.round(renderReadiness.estimated_seconds_high)}s · cache dependency {renderReadiness.expected_cache_dependency}
+                      </div>
+                      {(renderReadiness.blocking_reasons[0] || renderReadiness.optimization_hints[0]) && (
+                        <div className="mt-1 opacity-90">{renderReadiness.blocking_reasons[0] || renderReadiness.optimization_hints[0]}</div>
+                      )}
+                    </div>
+                  )}
+                  {renderReadiness && (
+                    <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 p-4 text-sm text-cyan-50">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="font-medium">Render Cache Warmth</div>
+                          <div className="mt-1 text-cyan-100/80">
+                            {renderCacheWarmth.total
+                              ? `${renderCacheWarmth.percent}% warm · ${renderCacheWarmth.hits} cached voice segment(s), ${renderCacheWarmth.misses} to regenerate`
+                              : 'No voice segment cache keys available yet'}
+                            {renderCacheWarmth.cloneMisses ? ` · ${renderCacheWarmth.cloneMisses} clone-provider miss(es)` : ''}
+                          </div>
+                        </div>
+                        <span className={`op-badge ${renderCacheWarmth.misses ? 'op-badge-warning' : renderCacheWarmth.total ? 'op-badge-success' : 'op-badge-muted'}`}>
+                          {renderCacheWarmth.misses ? 'Warning' : renderCacheWarmth.total ? 'Verified' : 'Missing'}
+                        </span>
+                      </div>
+                      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+                        <div className="h-full rounded-full bg-cyan-300" style={{ width: `${renderCacheWarmth.total ? renderCacheWarmth.percent : 0}%` }} />
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium text-slate-100">What Changed?</div>
+                        <div className="mt-1 text-xs text-slate-400">Cache invalidation summary before queuing the next render.</div>
+                      </div>
+                      <span className={`op-badge ${renderChangeSummary.some((item) => item.state === 'Warning') ? 'op-badge-warning' : renderChangeSummary.some((item) => item.state === 'Missing') ? 'op-badge-muted' : 'op-badge-success'}`}>
+                        {renderChangeSummary.some((item) => item.state === 'Warning') ? 'Warning' : renderChangeSummary.some((item) => item.state === 'Missing') ? 'Missing' : 'Verified'}
+                      </span>
+                    </div>
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      {renderChangeSummary.map((item) => (
+                        <div key={item.label} className="rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="font-medium text-slate-100">{item.label}</span>
+                            <span className={`op-badge ${stateBadgeClass(item.state)}`}>{item.state}</span>
+                          </div>
+                          <div className="mt-2 text-slate-400">{item.detail}</div>
+                          {item.cacheKeys?.length ? (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {item.cacheKeys.map((cacheKey) => (
+                                <span key={cacheKey} className="rounded-md border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 font-mono text-[10px] text-cyan-100">
+                                  {cacheKey}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                   {scriptIsDirty && (
                     <div className="mt-4 rounded-2xl border border-amber-300/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
-                      The script editor has unsaved character names or dialogue. Generate will save this draft first so preset matching uses the latest speaker names.
+                      The script has unsaved speaker names or dialogue. Rendering will save this draft first.
                     </div>
                   )}
                   <div className="mt-4 flex flex-wrap gap-3">
                     <button
-                      onClick={() => generatePreview('preview')}
+                      onClick={() => generatePreview('draft')}
                       disabled={busy === 'generation' || !backgroundAsset || !script || activeGeneration}
                       className="inline-flex items-center gap-2 rounded-2xl bg-cyan-300 px-4 py-3 font-medium text-slate-950 disabled:opacity-60"
                     >
                       <PlayCircle size={18} />
-                      {activeGeneration ? 'Render In Progress' : busy === 'generation' ? 'Saving + Queueing...' : scriptIsDirty ? 'Save + Generate Preview' : 'Generate Preview'}
+                      {activeGeneration ? 'Render In Progress' : scriptIsDirty ? 'Save + Render Draft' : 'Render Draft'}
                     </button>
                     <button
-                      onClick={() => generatePreview('draft')}
+                      onClick={() => generatePreview('preview')}
                       disabled={busy === 'generation' || !backgroundAsset || !script || activeGeneration}
                       className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10 disabled:opacity-60"
                     >
                       <PlayCircle size={18} />
-                      {activeGeneration ? 'Await Active Render' : scriptIsDirty ? 'Save + Generate Draft' : 'Generate Draft'}
+                      {activeGeneration ? 'Await Active Render' : scriptIsDirty ? 'Save + Render Preview' : 'Render Preview'}
                     </button>
                     <button
                       onClick={() => generatePreview('final')}
-                      disabled={busy === 'generation' || !backgroundAsset || !script || activeGeneration}
+                      disabled={busy === 'generation' || !backgroundAsset || !script || activeGeneration || !project?.approved_at}
                       className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10 disabled:opacity-60"
                     >
                       <Wand2 size={18} />
-                      {activeGeneration ? 'Await Active Render' : scriptIsDirty ? 'Save + Generate Final Pass' : 'Generate Final Pass'}
+                      {activeGeneration ? 'Await Active Render' : scriptIsDirty ? 'Save + Final Render' : 'Final Render'}
                     </button>
                     <button
                       onClick={() => generatePreview('debug')}
@@ -1478,7 +1740,7 @@ const ProjectEditorPage: React.FC = () => {
                       className="inline-flex items-center gap-2 rounded-2xl border border-cyan-300/30 px-4 py-3 text-sm text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-60"
                     >
                       <CircleDashed size={18} />
-                      {activeGeneration ? 'Await Active Render' : 'Generate Debug Pass'}
+                      {activeGeneration ? 'Await Active Render' : 'Debug Render'}
                     </button>
                   </div>
 
@@ -1493,18 +1755,52 @@ const ProjectEditorPage: React.FC = () => {
                             <div className="mt-2 font-medium">{output.asset.original_filename}</div>
                             <div className="mt-1 text-sm text-slate-400">{output.provider_name}</div>
                           </div>
-                          <div className="text-sm text-slate-400">{output.duration_ms ? `${Math.round(output.duration_ms / 1000)}s` : 'Unknown duration'}</div>
+                          <div className="text-sm text-slate-400">{output.duration_ms ? `${Math.round(output.duration_ms / 1000)}s` : 'Duration pending'}</div>
                         </div>
                       </div>
                     ))}
+                    {!outputs.length && (
+                      <div className="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-slate-500">
+                        No renders yet. Render a draft to create the first preview.
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
 
-              {stage === 'Review' && (
-                <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-                  <h2 className="text-xl font-semibold">Human Review Queue</h2>
-                  <p className="mt-2 text-sm text-slate-400">Submit the latest output for human review, discuss changes, and explicitly approve or request revisions.</p>
+              {stage === 'Preview' && (
+                <div id="step-preview" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                  <h2 className="text-xl font-semibold">Preview</h2>
+                  <p className="mt-2 text-sm text-slate-400">Review the 9:16 production frame, then approve the preview before final render and release.</p>
+
+                  <div className="op-lab-preview-layout mt-5">
+                    <ProductionPreviewFrame
+                      previewSettings={previewSettings}
+                      scriptLines={scriptLines}
+                      outputUrl={latestOutput?.asset.content_url || null}
+                      outputKind={latestOutput?.output_kind || null}
+                      ariaLabel="approved production preview frame"
+                    />
+                    <div>
+                      <ProductionReadinessPanel readiness={productionReadiness} compact />
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        <button
+                          onClick={() => setStage('Render')}
+                          className="rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10"
+                        >
+                          Open Render
+                        </button>
+                        <button
+                          onClick={approveReview}
+                          disabled={!latestReview || busy === 'review-approve'}
+                          className="inline-flex items-center gap-2 rounded-2xl bg-emerald-300 px-4 py-3 font-medium text-slate-950 disabled:opacity-60"
+                        >
+                          <CheckCircle2 size={18} />
+                          Approve preview
+                        </button>
+                      </div>
+                    </div>
+                  </div>
 
                   <div className="mt-4 flex flex-wrap gap-3">
                     <button
@@ -1582,8 +1878,8 @@ const ProjectEditorPage: React.FC = () => {
                 </div>
               )}
 
-              {stage === 'Metadata' && (
-                <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+              {stage === 'Release' && (
+                <div id="step-release" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <h2 className="text-xl font-semibold">Platform Metadata</h2>
@@ -1685,7 +1981,7 @@ const ProjectEditorPage: React.FC = () => {
                 </div>
               )}
 
-              {stage === 'Routing' && (
+              {stage === 'Release' && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                   <h2 className="text-xl font-semibold">Destination Routing</h2>
                   <p className="mt-2 text-sm text-slate-400">Recommend the best destination account from project policy, account health, and metadata readiness.</p>
@@ -1720,7 +2016,7 @@ const ProjectEditorPage: React.FC = () => {
                 </div>
               )}
 
-              {stage === 'Publish' && (
+              {stage === 'Release' && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                   <h2 className="text-xl font-semibold">Publish</h2>
                   <p className="mt-2 text-sm text-slate-400">Choose assisted publish or let the platform auto-route using your saved project policy.</p>
@@ -1792,7 +2088,7 @@ const ProjectEditorPage: React.FC = () => {
                 </div>
               )}
 
-              {stage === 'History' && (
+              {stage === 'Release' && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                   <h2 className="text-xl font-semibold">Project History</h2>
                   <div className="mt-6 grid gap-6 lg:grid-cols-2">
@@ -1829,7 +2125,7 @@ const ProjectEditorPage: React.FC = () => {
               <div id="pre-render-preview" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                 <div className="flex items-center justify-between gap-4">
                   <div>
-                    <h2 className="text-xl font-semibold">Pre-Render Preview</h2>
+                    <h2 className="text-xl font-semibold">Preview Frame</h2>
                     <p className="mt-2 text-sm text-slate-400">Selections update here before any render job is queued.</p>
                   </div>
                   <div className="text-right text-xs uppercase tracking-[0.2em] text-slate-500">
@@ -1838,72 +2134,11 @@ const ProjectEditorPage: React.FC = () => {
                 </div>
 
                 <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_13rem]">
-                  <div className="relative mx-auto aspect-[9/16] w-full max-w-[22rem] overflow-hidden rounded-[2rem] border border-white/10 bg-slate-950 shadow-[0_24px_70px_rgba(2,6,23,0.45)]">
-                    {selectedBackgroundUrl && selectedBackgroundMimeType.startsWith('image/') ? (
-                      <img
-                        src={toApiHref(selectedBackgroundUrl)}
-                        alt="Selected background"
-                        className="absolute inset-0 h-full w-full object-cover opacity-75"
-                      />
-                    ) : selectedBackgroundUrl ? (
-                      <video
-                        src={toApiHref(selectedBackgroundUrl)}
-                        muted
-                        loop
-                        playsInline
-                        autoPlay
-                        preload="metadata"
-                        className="absolute inset-0 h-full w-full object-cover opacity-75"
-                      />
-                    ) : (
-                      <div className="absolute inset-0 grid place-items-center bg-slate-950 text-sm text-slate-500">
-                        Select a background
-                      </div>
-                    )}
-                    <div className="absolute inset-x-0 bottom-[18%] flex items-end justify-between px-4">
-                      {previewSpeakerMappings.slice(0, 2).map((mapping, index) => (
-                        <div key={mapping.speaker_name} className="flex max-w-[42%] flex-col items-center gap-2">
-                          <div
-                            className="grid place-items-center overflow-hidden rounded-2xl border border-white/15 bg-slate-950/65"
-                            style={{
-                              width: `${96 * previewSettings.layout.character_scale}px`,
-                              height: `${150 * previewSettings.layout.character_scale}px`,
-                            }}
-                          >
-                            {mapping.character_portrait_url ? (
-                              <img
-                                src={toApiHref(mapping.character_portrait_url)}
-                                alt={mapping.character_display_name || mapping.speaker_name}
-                                className="h-full w-full object-contain"
-                              />
-                            ) : (
-                              <span className="px-2 text-center text-xs text-slate-400">
-                                {mapping.speaker_name}
-                              </span>
-                            )}
-                          </div>
-                          <div className="max-w-full rounded-full bg-black/60 px-3 py-1 text-center text-xs text-slate-100">
-                            {mapping.character_display_name || mapping.speaker_name}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="absolute inset-x-5 bottom-6 space-y-2">
-                      {(previewSpeakerMappings.length ? previewSpeakerMappings : [{ speaker_name: 'Speaker', sample_text: 'Dialogue text will appear here.' }]).slice(0, 2).map((mapping) => (
-                        <div key={mapping.speaker_name} className="rounded-2xl border border-white/10 bg-black/70 px-4 py-3 shadow-lg">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-200">
-                            {mapping.speaker_name}
-                          </div>
-                          <div
-                            className="mt-1 leading-snug text-slate-100"
-                            style={{ fontSize: `${previewSettings.layout.chat_font_size_px}px` }}
-                          >
-                            {mapping.sample_text || 'Dialogue text will appear here.'}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+                  <ProductionPreviewFrame
+                    previewSettings={previewSettings}
+                    scriptLines={scriptLines}
+                    ariaLabel="pre-render settings preview frame"
+                  />
 
                   <div className="space-y-4">
                     <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">

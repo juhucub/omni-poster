@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
-  Clock,
   Play,
   Radio,
   RefreshCw,
@@ -15,12 +14,15 @@ import apiClient, { apiBaseUrl } from '../../api/client';
 import type {
   BackgroundPreset,
   CharacterPreset,
+  ContentFormatPreset,
   GenerationJob,
   GeneratedScript,
+  PlatformMetadata,
   PlatformTarget,
   Project,
   ProjectPreviewSettings,
   ProjectPreviewSpeakerMapping,
+  RenderReadinessEstimate,
   PublishJob,
   PublishedPost,
   ScriptLine,
@@ -29,7 +31,19 @@ import type {
   VoiceProfile,
 } from '../../api/models';
 import { useAuth } from '../../context/AuthContext';
+import RenderDiagnosticsPanel from '../RenderDiagnosticsPanel';
 import { StudioShell } from '../studio/StudioShell';
+import FormatBrowser from '../script-generation/FormatBrowser';
+import ProductionReadinessPanel, {
+  computeProductionReadiness,
+  type ProductionReadiness,
+} from '../production/ProductionReadinessPanel';
+import {
+  FALLBACK_CONTENT_FORMATS,
+  durationLabel,
+  findFormat,
+  speakerCountLabel,
+} from '../script-generation/formatBrowserData';
 
 type StudioSyncState = 'local' | 'paused' | 'active';
 
@@ -41,18 +55,13 @@ type CommandRoomData = {
   outputs: any[];
   accounts: SocialAccount[];
   history: { jobs: PublishJob[]; posts: PublishedPost[] };
+  metadata: PlatformMetadata | null;
   characterPresets: CharacterPreset[];
   voiceProfiles: VoiceProfile[];
   backgroundPresets: BackgroundPreset[];
+  contentFormats: ContentFormatPreset[];
+  renderReadiness: RenderReadinessEstimate | null;
 };
-
-const contentFormats = [
-  { id: 'character_dialogue', label: 'Character Dialogue' },
-  { id: 'reddit_story', label: 'Reddit Story' },
-  { id: 'podcast_clip', label: 'Podcast Clip' },
-  { id: 'debate_format', label: 'Debate Format' },
-  { id: 'meme_news_reaction', label: 'Meme News Reaction' },
-];
 
 const platformTargets: Array<{ id: PlatformTarget; label: string }> = [
   { id: 'youtube_shorts', label: 'YouTube Shorts' },
@@ -99,6 +108,14 @@ const localDraftProject: Project = {
   latest_notifications: [],
   speaker_bindings: [],
   preview_settings: defaultPreviewSettings,
+  script_generation_settings: {
+    content_format_id: 'debate_format',
+    platform: 'youtube_shorts',
+    target_duration_sec: 45,
+    tone: 'sharp',
+    audience: 'general short-form viewers',
+    speaker_names: ['Moderator', 'Speaker A', 'Speaker B'],
+  },
 };
 
 const toApiHref = (url: string | null | undefined) => {
@@ -116,6 +133,9 @@ const titleCase = (value: string | null | undefined) =>
     .replace(/[_-]+/g, ' ')
     .replace(/\b\w/g, (char) => char.toUpperCase());
 
+const formatMidpoint = (format: ContentFormatPreset) =>
+  Math.round((format.ideal_duration_range_sec[0] + format.ideal_duration_range_sec[1]) / 2);
+
 const initials = (value: string | null | undefined) =>
   String(value || 'OP')
     .split(/\s+/)
@@ -127,7 +147,7 @@ const initials = (value: string | null | undefined) =>
 const currentStep = (project: Project | null, job: GenerationJob | null, readiness: string[]) => {
   if (!project) return 'Create Production';
   if (job && ['queued', 'processing', 'running'].includes(job.status)) return 'Render Running';
-  if (readiness.length) return 'Blocked';
+  if (readiness.length) return 'Needs setup';
   if (!project.approved_at && project.current_output_video_id) return 'Preview Review';
   if (project.current_output_video_id) return 'Release Ready';
   return project.current_script ? 'Preview Setup' : 'Script';
@@ -162,13 +182,65 @@ const speakersFor = (script: ScriptRevision | null, preview: ProjectPreviewSetti
   return Array.from(new Set([...fromScript, ...fromPreview]));
 };
 
-const voiceById = (profiles: VoiceProfile[]) => new Map(profiles.map((profile) => [profile.id, profile]));
-
 const badgeClassForStatus = (status: string) => {
   if (['completed', 'published', 'approved'].includes(status)) return 'op-badge-success';
   if (['failed', 'blocked'].includes(status)) return 'op-badge-error';
   if (['queued', 'processing', 'running', 'render_queued'].includes(status)) return 'op-badge-warning';
   return 'op-badge-muted';
+};
+
+const getPipelineStages = (project: Project | null, syncState: StudioSyncState) => {
+  const preview = normalizePreview(project?.preview_settings);
+  const done = {
+    idea: Boolean(project),
+    script: Boolean(project?.current_script),
+    cast: Boolean(preview.speaker_mappings.length && preview.speaker_mappings.every((item) => item.voice_profile_id)),
+    scene: Boolean(preview.background_url),
+    preview: Boolean(project?.current_output_video_id),
+    render: Boolean(project?.latest_output),
+  };
+  return [
+    ['Idea', 'Concept locked', done.idea],
+    ['Script', 'Speaker-separated', done.script],
+    ['Cast', 'Profiles assigned', done.cast],
+    ['Scene', 'Preset loaded', done.scene],
+    ['Preview', project?.approved_at ? 'Approved' : 'Awaiting approval', done.preview],
+    ['Render', project?.latest_output ? 'Final available' : 'Pending approval', done.render],
+    ['Release', syncState === 'local' ? 'Local draft only' : syncState === 'paused' ? 'Automation paused' : 'Ready when approved', syncState === 'active' && Boolean(project?.approved_at)],
+  ] as const;
+};
+
+const PipelineRail: React.FC<{
+  project: Project | null;
+  readinessReasons: string[];
+  syncState: StudioSyncState;
+  compact?: boolean;
+}> = ({ project, readinessReasons, syncState, compact = false }) => {
+  const stages = getPipelineStages(project, syncState);
+  const pendingIndex = stages.findIndex((stage) => !stage[2]);
+  const activeIndex = pendingIndex === -1 ? stages.length - 1 : pendingIndex;
+  return (
+    <div className={compact ? 'op-production-status-pipeline' : undefined}>
+      <div className="op-section-header">
+        <h2 className="op-section-title" id="pipeline-title">Production Pipeline</h2>
+        <span className={`op-badge ${readinessReasons.length ? 'op-badge-error' : 'op-badge-warning'}`}>
+          {readinessReasons.length ? 'Needs setup' : `Step ${activeIndex + 1}`}
+        </span>
+      </div>
+      <div className="op-pipeline-rail" role="list" aria-label="Production pipeline stages">
+        {stages.map((stage, index) => {
+          const state = stage[2] ? 'done' : index === activeIndex ? 'active' : stage[0] === 'Release' ? syncState : 'pending';
+          return (
+            <div key={stage[0]} className={`op-pipeline-stage op-ps-${state}`} role="listitem">
+              <div className="op-pipeline-stage-number">{stage[2] ? '✓' : index + 1}</div>
+              <div className="op-pipeline-stage-name">{stage[0]}</div>
+              <div className="op-pipeline-stage-status">{stage[1]}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 };
 
 export const CommandRoomHero: React.FC<{
@@ -181,7 +253,7 @@ export const CommandRoomHero: React.FC<{
   const isLocal = syncState === 'local';
   const isPaused = syncState === 'paused';
   return (
-    <section className="op-hero" id="command-room" aria-label="Control Room status" style={{ '--hero-glow': isPaused ? 'rgba(251,146,60,0.04)' : 'rgba(0,220,200,0.04)' } as React.CSSProperties}>
+    <section className="op-hero" id="command-room" aria-label="Control Room status" style={{ '--hero-glow': isPaused ? 'var(--paused-dim)' : 'var(--cyan-glow)' } as React.CSSProperties}>
       <div className="op-hero-eyebrow">OmniPoster Control Room</div>
       <div className="op-hero-top">
         <div>
@@ -298,15 +370,15 @@ export const CurrentProductionCard: React.FC<{
   latestJob: GenerationJob | null;
   syncState: StudioSyncState;
   readinessReasons: string[];
+  readiness: ProductionReadiness;
   onApprovePreview: () => void;
-  onRender: () => void;
   onResumeSync: () => void;
-}> = ({ project, script, latestJob, syncState, readinessReasons, onApprovePreview, onRender, onResumeSync }) => {
+}> = ({ project, script, latestJob, syncState, readinessReasons, readiness, onApprovePreview, onResumeSync }) => {
   const step = currentStep(project, latestJob, readinessReasons);
   const speakerMappings = normalizePreview(project?.preview_settings).speaker_mappings;
   const cast = speakerMappings.slice(0, 2);
   return (
-    <section className="op-current-production" aria-labelledby="current-prod-title" style={{ '--state-line': syncState === 'paused' ? 'rgba(251,146,60,0.25)' : 'rgba(167,139,250,0.3)', '--next-color': syncState === 'paused' ? 'var(--paused)' : 'var(--warning)' } as React.CSSProperties}>
+    <section className="op-current-production" aria-labelledby="current-prod-title" style={{ '--state-line': syncState === 'paused' ? 'var(--paused-dim)' : 'var(--border-cyan)', '--next-color': syncState === 'paused' ? 'var(--paused)' : 'var(--warning)' } as React.CSSProperties}>
       <div className="op-prod-top">
         <div>
           <div className="op-prod-meta">
@@ -318,15 +390,6 @@ export const CurrentProductionCard: React.FC<{
           </div>
           <h2 className="op-prod-title-main" id="current-prod-title">{project?.name || 'Start a Production'}</h2>
         </div>
-      </div>
-      <div className="op-prod-next-action">
-        <span className="op-prod-next-label">Next Step</span>
-        <span className="op-prod-next-text">
-          {readinessReasons.length ? readinessReasons[0] : syncState === 'local' ? 'Approve local preview / Connect account to publish' : syncState === 'paused' ? 'Resume Sync to activate release - or approve preview locally' : 'Render final cut or prepare release'}
-        </span>
-        <span style={{ marginLeft: 'auto' }}>
-          <span className={`op-badge ${readinessReasons.length ? 'op-badge-error' : 'op-badge-warning'}`}>{step}</span>
-        </span>
       </div>
       <div className="op-prod-details-grid">
         <div className="op-prod-detail"><span className="op-prod-detail-label">Format</span><span className="op-prod-detail-value">{titleCase(script?.generated_script?.content_format_id || 'Not selected')}</span></div>
@@ -340,18 +403,30 @@ export const CurrentProductionCard: React.FC<{
           </div>
         ))}
       </div>
+      <div className="op-prod-next-action">
+        <span className="op-prod-next-label">Next Best Action</span>
+        <span className="op-prod-next-text">{readiness.nextAction.label}</span>
+        <span className="op-prod-next-badge">
+          <span className={`op-badge ${readiness.nextAction.complete ? 'op-badge-success' : 'op-badge-warning'}`}>{step}</span>
+        </span>
+      </div>
       <div className="op-prod-actions">
         <button className="op-btn op-btn-primary" type="button" onClick={onApprovePreview} disabled={!project || !project.current_output_video_id}>
           Approve Preview
         </button>
-        <button className="op-btn op-btn-secondary" type="button" onClick={onRender} disabled={!project || readinessReasons.length > 0}>
-          Render Cut
-        </button>
+        {project && (readiness.nextAction.href.startsWith('/') ? (
+          <Link className="op-btn op-btn-primary" to={readiness.nextAction.href}>Open Next Step</Link>
+        ) : (
+          <a className="op-btn op-btn-primary" href={readiness.nextAction.href}>Open Next Step</a>
+        ))}
         {syncState === 'paused' && <button className="op-btn op-btn-paused" type="button" onClick={onResumeSync}>Resume Sync</button>}
         {project && <Link className="op-btn op-btn-secondary" to={`/projects/${project.id}`}>Edit Production</Link>}
         <button className="op-btn op-btn-ghost" type="button" disabled={syncState !== 'active'}>
           {syncState === 'local' ? 'Connect to Publish' : syncState === 'paused' ? 'Publish Paused' : 'Prepare Release'}
         </button>
+      </div>
+      <div style={{ marginTop: 'var(--space-5)' }}>
+        <ProductionReadinessPanel readiness={readiness} compact linkMode="productionLab" projectId={project?.id} />
       </div>
     </section>
   );
@@ -359,17 +434,25 @@ export const CurrentProductionCard: React.FC<{
 
 export const StartProductionPanel: React.FC<{
   isAuthenticated: boolean;
+  formats: ContentFormatPreset[];
   onCreated: (projectId: number) => void;
   onConnect: () => void;
-}> = ({ isAuthenticated, onCreated, onConnect }) => {
+}> = ({ isAuthenticated, formats, onCreated, onConnect }) => {
   const [name, setName] = useState('New Debate Short');
   const [idea, setIdea] = useState('Two characters debate whether preview settings should drive the final render.');
   const [contentFormat, setContentFormat] = useState('debate_format');
   const [platform, setPlatform] = useState<PlatformTarget>('youtube_shorts');
-  const [castPreset, setCastPreset] = useState('Host, Guest');
+  const [castPreset, setCastPreset] = useState('Moderator, Speaker A, Speaker B');
   const [duration, setDuration] = useState(45);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const selectedFormat = useMemo(() => findFormat(formats, contentFormat), [formats, contentFormat]);
+
+  const selectFormat = (format: ContentFormatPreset) => {
+    setContentFormat(format.id);
+    setDuration(formatMidpoint(format));
+    setCastPreset(format.default_speaker_roles.join(', '));
+  };
 
   const createProduction = async () => {
     if (!isAuthenticated) {
@@ -386,12 +469,24 @@ export const StartProductionPanel: React.FC<{
         allowed_platforms: [platform === 'youtube_shorts' ? 'youtube' : platform],
       });
       const speakers = castPreset.split(',').map((item) => item.trim()).filter(Boolean);
-      const scriptResponse = await apiClient.post<{ generated_script: GeneratedScript; provider_metadata: any; validation_warnings: string[]; fallback_used: boolean }>('/script-generation/generate', {
-        idea,
+      await apiClient.patch(`/projects/${projectResponse.data.id}/script-generation-settings`, {
         content_format_id: contentFormat,
         platform,
         target_duration_sec: duration,
-        speaker_names: speakers,
+        tone: selectedFormat?.tone_options?.[0] || 'direct',
+        audience: 'general short-form viewers',
+        speaker_names: speakers.length ? speakers : selectedFormat?.default_speaker_roles || [],
+      });
+      const scriptResponse = await apiClient.post<{ generated_script: GeneratedScript; provider_metadata: any; validation_warnings: string[]; fallback_used: boolean }>('/script-generation/generate', {
+        idea,
+        content_format_id: contentFormat,
+        format_id: contentFormat,
+        platform,
+        platform_targets: [platform],
+        target_duration_sec: duration,
+        timing_target: { target_duration_sec: duration },
+        speaker_names: speakers.length ? speakers : selectedFormat?.default_speaker_roles || [],
+        speaker_roles: selectedFormat?.default_speaker_roles || [],
       });
       const generated = scriptResponse.data.generated_script;
       await apiClient.put(`/projects/${projectResponse.data.id}/script`, {
@@ -399,6 +494,9 @@ export const StartProductionPanel: React.FC<{
         parsed_lines: generated.lines.map((line, index) => ({
           speaker: line.speaker_label,
           text: line.text,
+          caption_text: line.caption_text,
+          section: line.section,
+          line_id: line.id,
           order: index,
         })),
         generated_script: generated,
@@ -421,15 +519,37 @@ export const StartProductionPanel: React.FC<{
         </div>
         <span className="op-badge op-badge-cyan">Format presets ready</span>
       </div>
-      <div className="op-panel">
+      <div className="op-panel op-panel-connected">
         <div className="op-panel-body op-start-production-grid">
           <form className="op-form-grid" aria-label="Create a new production" onSubmit={(event) => { event.preventDefault(); void createProduction(); }}>
             <div className="op-field"><label htmlFor="production-name">Production Name</label><input className="op-input" id="production-name" value={name} onChange={(event) => setName(event.target.value)} /></div>
-            <div className="op-field"><label htmlFor="content-format">Content Format</label><select className="op-select" id="content-format" value={contentFormat} onChange={(event) => setContentFormat(event.target.value)}>{contentFormats.map((format) => <option key={format.id} value={format.id}>{format.label}</option>)}</select></div>
+            <div className="op-field">
+              <label htmlFor="content-format">Content Format</label>
+              <select
+                className="op-select"
+                id="content-format"
+                value={contentFormat}
+                onChange={(event) => {
+                  const format = findFormat(formats, event.target.value);
+                  if (format) {
+                    selectFormat(format);
+                  }
+                }}
+              >
+                {formats.map((format) => <option key={format.id} value={format.id}>{format.display_name}</option>)}
+              </select>
+            </div>
             <div className="op-field"><label htmlFor="target-platform">Target Platform</label><select className="op-select" id="target-platform" value={platform} onChange={(event) => setPlatform(event.target.value as PlatformTarget)}>{platformTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}</select></div>
             <div className="op-field"><label htmlFor="cast-preset">Cast Preset</label><input className="op-input" id="cast-preset" value={castPreset} onChange={(event) => setCastPreset(event.target.value)} /></div>
-            <div className="op-field" style={{ gridColumn: '1 / -1' }}><label htmlFor="production-idea">Idea / Prompt</label><textarea className="op-textarea" id="production-idea" value={idea} onChange={(event) => setIdea(event.target.value)} /></div>
+            <div className="op-field" style={{ gridColumn: '1 / -1' }}><label htmlFor="production-idea">Idea / Prompt</label><textarea className="op-textarea" id="production-idea" value={idea} onChange={(event) => setIdea(event.target.value)} placeholder={selectedFormat ? `Idea for a ${selectedFormat.display_name.toLowerCase()}...` : undefined} /></div>
             <div className="op-field"><label htmlFor="duration-target">Duration Target</label><input className="op-input" id="duration-target" type="number" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /></div>
+            {selectedFormat && (
+              <div className="op-field" style={{ gridColumn: '1 / -1' }}>
+                <div className="op-panel-subtitle">
+                  {selectedFormat.display_name} · Ideal {durationLabel(selectedFormat)} · {speakerCountLabel(selectedFormat)} · {selectedFormat.section_structure.join(' -> ')}
+                </div>
+              </div>
+            )}
           </form>
           <div>
             <div className="op-panel-section-label">Reusable package includes</div>
@@ -439,7 +559,6 @@ export const StartProductionPanel: React.FC<{
             {error && <div className="op-error" style={{ marginTop: 'var(--space-4)' }}>{error}</div>}
             <div style={{ marginTop: 'var(--space-4)', display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
               <button className="op-btn op-btn-primary" type="button" onClick={createProduction} disabled={busy}>{busy ? 'Creating...' : isAuthenticated ? 'Create Production' : 'Create Local Draft'}</button>
-              <a className="op-btn op-btn-secondary" href="#voice-cast">Browse Formats</a>
             </div>
           </div>
         </div>
@@ -464,9 +583,13 @@ export const PreviewRenderWorkspace: React.FC<{
   const mappings = preview.speaker_mappings.length ? preview.speaker_mappings : [{ speaker_name: 'Speaker', sample_text: 'Dialogue text will appear here.' } as ProjectPreviewSpeakerMapping];
   const activeMapping = mappings[0];
   const bgUrl = toApiHref(preview.background_url);
+  const outputUrl = toApiHref(project?.latest_output?.asset?.content_url);
   const mimeType = String(preview.background_metadata?.mime_type || '');
   const scale = preview.speaker_png_size === 'large' ? 1.18 : preview.speaker_png_size === 'compact' ? 0.82 : 1;
   const isVideo = mimeType.startsWith('video/');
+  const hasPlayableOutput = Boolean(project?.latest_output?.asset?.content_url);
+  const latestJobPerformance = (latestJob?.tts_result as any)?.performance || {};
+  const fastPreviewEnabled = Boolean(latestJobPerformance.fast_preview_enabled || project?.latest_output?.output_kind === 'draft');
   return (
     <section aria-labelledby="preview-workspace-title">
       <div className="op-section-header">
@@ -475,57 +598,114 @@ export const PreviewRenderWorkspace: React.FC<{
           <div className="op-section-title-sub">{project ? `Golden preview for ${project.name}` : 'Local visual shell - connect to render'}</div>
         </div>
         <span className={`op-badge ${readinessReasons.length ? 'op-badge-error' : syncState === 'paused' ? 'op-badge-paused' : 'op-badge-warning'}`}>
-          <span className="op-dot" /> {readinessReasons.length ? 'Render blocked' : syncState === 'paused' ? 'Sync paused' : 'Preview needs approval'}
+          <span className="op-dot" /> {readinessReasons.length ? 'Render needs setup' : syncState === 'paused' ? 'Sync paused' : 'Preview needs approval'}
         </span>
+        {latestJob && (
+          <span className={`op-badge ${fastPreviewEnabled ? 'op-badge-success' : 'op-badge-cyan'}`}>
+            {fastPreviewEnabled ? 'Fast draft path' : titleCase(latestJob.output_kind || 'preview')}
+          </span>
+        )}
       </div>
-      <div className="op-panel">
+      <div className="op-panel op-panel-connected">
         <div className="op-panel-body" style={{ padding: 'var(--space-6)' }}>
           <div className="op-grid-preview-render" style={{ alignItems: 'start' }}>
             <div className="op-video-frame-wrap">
               <div className="op-video-frame-label">9:16 Preview Frame - 1080x1920</div>
-              <div className="op-video-frame" role="img" aria-label="Video preview frame">
-                {bgUrl ? (isVideo ? <video className="op-scene-bg" src={bgUrl} muted playsInline /> : <img className="op-scene-bg" src={bgUrl} alt="" />) : <div className="op-scene-bg" />}
-                <div className="op-scene-split-left" /><div className="op-scene-split-right" />
-                <div className="op-scene-label">{String(preview.background_metadata?.original_filename || preview.background_preset_id || 'Select a Scene')}</div>
-                <div className="op-frame-badge-top">1080x1920</div>
-                {mappings.slice(0, 2).map((mapping, index) => (
-                  <div key={mapping.speaker_name} className={`op-speaker-zone ${index === 0 ? 'left' : 'right'}`}>
-                    <div className="op-speaker-avatar" style={{ width: `${52 * scale * preview.layout.character_scale}px`, height: `${72 * scale * preview.layout.character_scale}px` }}>
-                      {mapping.character_portrait_url ? <img src={toApiHref(mapping.character_portrait_url)} alt={mapping.character_display_name || mapping.speaker_name} /> : <span className="op-speaker-initials">{initials(mapping.character_display_name || mapping.speaker_name)}</span>}
+              <div className="op-video-frame" aria-label="Video preview frame">
+                {hasPlayableOutput ? (
+                  <>
+                    <video
+                      className="op-render-playback"
+                      src={outputUrl}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      aria-label={`${titleCase(project?.latest_output?.output_kind || 'final')} render playback`}
+                    />
+                    <div className="op-render-ready-badge">
+                      <Play size={11} /> Playable {titleCase(project?.latest_output?.output_kind || 'render')}
                     </div>
-                    <div className="op-speaker-label-tag">{mapping.speaker_name.toUpperCase()} · {mapping.voice_profile_id ? 'VOICE' : 'UNASSIGNED'}</div>
-                  </div>
-                ))}
-                <div className="op-caption-overlay">
-                  <div className="op-caption-speaker-tag">{(activeMapping.display_label || activeMapping.speaker_name).toUpperCase()}</div>
-                  <div className="op-caption-text" style={{ fontSize: `${Math.max(7, Math.round(preview.layout.chat_font_size_px / 2.35))}px` }}>
-                    "{activeMapping.sample_text || scriptLinesFor(script)[0]?.text || 'Preview captions will follow the speaker timeline.'}"
-                  </div>
-                </div>
-                {syncState === 'paused' && <div className="op-frame-paused-overlay"><div className="op-frame-paused-tag">SYNC PAUSED</div></div>}
-                <div className="op-frame-timecode">00:00:08:04 · PREVIEW DRAFT</div>
+                  </>
+                ) : (
+                  <>
+                    {bgUrl ? (isVideo ? <video className="op-scene-bg" src={bgUrl} muted playsInline preload="none" /> : <img className="op-scene-bg" src={bgUrl} alt="" />) : <div className="op-scene-bg" />}
+                    <div className="op-scene-split-left" /><div className="op-scene-split-right" />
+                    <div className="op-scene-label">{String(preview.background_metadata?.original_filename || preview.background_preset_id || 'Select a Scene')}</div>
+                    <div className="op-frame-badge-top">1080x1920</div>
+                    {mappings.slice(0, 2).map((mapping, index) => (
+                      <div key={mapping.speaker_name} className={`op-speaker-zone ${index === 0 ? 'left' : 'right'}`}>
+                        <div className="op-speaker-avatar" style={{ width: `${52 * scale * preview.layout.character_scale}px`, height: `${72 * scale * preview.layout.character_scale}px` }}>
+                          {mapping.character_portrait_url ? <img src={toApiHref(mapping.character_portrait_url)} alt={mapping.character_display_name || mapping.speaker_name} /> : <span className="op-speaker-initials">{initials(mapping.character_display_name || mapping.speaker_name)}</span>}
+                        </div>
+                        <div className="op-speaker-label-tag">{mapping.speaker_name.toUpperCase()} · {mapping.voice_profile_id ? 'VOICE' : 'UNASSIGNED'}</div>
+                      </div>
+                    ))}
+                    <div className="op-caption-overlay">
+                      <div className="op-caption-speaker-tag">{(activeMapping.display_label || activeMapping.speaker_name).toUpperCase()}</div>
+                      <div className="op-caption-text" style={{ fontSize: `${Math.max(7, Math.round(preview.layout.chat_font_size_px / 2.35))}px` }}>
+                        "{activeMapping.sample_text || scriptLinesFor(script)[0]?.text || 'Preview captions will follow the speaker timeline.'}"
+                      </div>
+                    </div>
+                    {syncState === 'paused' && <div className="op-frame-paused-overlay"><div className="op-frame-paused-tag">SYNC PAUSED</div></div>}
+                    <div className="op-frame-timecode">00:00:08:04 · PREVIEW DRAFT</div>
+                  </>
+                )}
               </div>
-              <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)', flexWrap: 'wrap', justifyContent: 'center' }}>
-                <span className="op-chip">Speaker PNG: {titleCase(preview.layout_preset)}</span>
-                <span className="op-chip">{titleCase(preview.caption_style)}</span>
+              <div className="op-frame-status-row">
+                <span className="op-chip">
+                  {hasPlayableOutput ? `${titleCase(project?.latest_output?.output_kind || 'Render')} Ready` : `Character image: ${titleCase(preview.layout_preset)}`}
+                </span>
+                <span className="op-chip">
+                  {hasPlayableOutput
+                    ? project?.latest_output?.duration_ms ? `${Math.round(project.latest_output.duration_ms / 1000)}s` : 'Duration pending'
+                    : titleCase(preview.caption_style)}
+                </span>
+                {fastPreviewEnabled && <span className="op-chip">Fast preview</span>}
+                {hasPlayableOutput && (
+                  <a className="op-chip op-chip-link" href={outputUrl}>
+                    Open Render
+                  </a>
+                )}
               </div>
             </div>
             <div>
               <div className="op-panel-section-label">Editable Preview Settings</div>
-              <div className="op-control-grid">
-                <div className="op-control-card"><label className="op-control-label" htmlFor="background-preset">Background</label><select id="background-preset" className="op-select" value={preview.background_preset_id || ''} onChange={(event) => event.target.value && onSelectBackground(event.target.value)}><option value="">Select background</option>{backgroundPresets.map((preset) => <option key={preset.key} value={preset.key}>{preset.name}</option>)}</select></div>
-                <div className="op-control-card"><label className="op-control-label" htmlFor="layout-preset">Layout Preset</label><select id="layout-preset" className="op-select" value={preview.layout_preset} onChange={(event) => onPreviewSettingsChange({ layout_preset: event.target.value } as Partial<ProjectPreviewSettings>)}><option value="left_right_locked">Left / Right speakers locked</option><option value="stacked_reaction">Stacked reaction</option><option value="narrator_only">Narrator only</option></select></div>
-                <div className="op-control-card"><label className="op-control-label" htmlFor="bubble-font">Bubble Font Size</label><input id="bubble-font" className="op-input" type="number" min={12} max={32} value={preview.layout.chat_font_size_px} onChange={(event) => onPreviewSettingsChange({ layout: { ...preview.layout, chat_font_size_px: Number(event.target.value) } } as Partial<ProjectPreviewSettings>)} /></div>
-                <div className="op-control-card"><label className="op-control-label" htmlFor="speaker-png-size">Speaker PNG Size</label><select id="speaker-png-size" className="op-select" value={preview.speaker_png_size} onChange={(event) => onPreviewSettingsChange({ speaker_png_size: event.target.value } as Partial<ProjectPreviewSettings>)}><option value="compact">Compact</option><option value="standard">Standard</option><option value="large">Large</option></select></div>
-                <div className="op-control-card"><label className="op-control-label" htmlFor="caption-style">Caption Style</label><select id="caption-style" className="op-select" value={preview.caption_style} onChange={(event) => onPreviewSettingsChange({ caption_style: event.target.value } as Partial<ProjectPreviewSettings>)}><option value="bold_bubble">Bold bubble captions</option><option value="clean_lower_third">Clean lower-third</option><option value="large_karaoke">Large karaoke captions</option></select></div>
-                <div className="op-control-card"><label className="op-control-label" htmlFor="render-preset">Render Preset</label><select id="render-preset" className="op-select" value={preview.render_preset} onChange={(event) => onPreviewSettingsChange({ render_preset: event.target.value } as Partial<ProjectPreviewSettings>)}><option value="shorts_1080x1920">1080x1920 Shorts</option><option value="reels_1080x1350">1080x1350 Reels</option><option value="draft_720x1280">720x1280 Draft</option></select></div>
+              <div className="op-preview-control-stack">
+                <div className="op-control-card op-preview-background-selector" id="scene-library">
+                  <div className="op-control-card-top">
+                    <div className="op-control-label" id="background-preset-label">Background</div>
+                    <span className="op-badge op-badge-cyan">Selected: {preview.background_preset_id || 'None'}</span>
+                  </div>
+                  <div className="op-scene-preset-grid" role="group" aria-labelledby="background-preset-label">
+                    {backgroundPresets.slice(0, 6).map((preset) => (
+                      <button key={preset.key} className={`op-scene-card ${preview.background_preset_id === preset.key ? 'selected' : ''}`} type="button" onClick={() => onSelectBackground(preset.key)}>
+                        <div className="op-scene-thumb">{preset.mime_type.startsWith('image/') ? <img src={toApiHref(preset.content_url)} alt="" /> : <video src={toApiHref(preset.content_url)} muted playsInline preload="none" />}</div>
+                        <div className="op-scene-name">{preset.name}</div>
+                        <div className="op-scene-meta">{preset.description || 'Background + speaker PNG slots'}</div>
+                      </button>
+                    ))}
+                    {!backgroundPresets.length && <div className="op-panel-subtitle">No scenes found. Upload or select one in the production editor.</div>}
+                  </div>
+                </div>
+                <div className="op-preview-control-row">
+                  <div className="op-control-card"><label className="op-control-label" htmlFor="layout-preset">Layout Preset</label><select id="layout-preset" className="op-select" value={preview.layout_preset} onChange={(event) => onPreviewSettingsChange({ layout_preset: event.target.value } as Partial<ProjectPreviewSettings>)}><option value="left_right_locked">Left / Right speakers locked</option><option value="stacked_reaction">Stacked reaction</option><option value="narrator_only">Narrator only</option></select></div>
+                  <div className="op-control-card"><label className="op-control-label" htmlFor="render-preset">Render Preset</label><select id="render-preset" className="op-select" value={preview.render_preset} onChange={(event) => onPreviewSettingsChange({ render_preset: event.target.value } as Partial<ProjectPreviewSettings>)}><option value="shorts_1080x1920">1080x1920 Shorts</option><option value="reels_1080x1350">1080x1350 Reels</option><option value="draft_720x1280">720x1280 Draft</option></select></div>
+                </div>
+                <div className="op-preview-control-row op-preview-control-row-3">
+                  <div className="op-control-card"><label className="op-control-label" htmlFor="bubble-font">Bubble Font Size</label><input id="bubble-font" className="op-input" type="number" min={12} max={32} value={preview.layout.chat_font_size_px} onChange={(event) => onPreviewSettingsChange({ layout: { ...preview.layout, chat_font_size_px: Number(event.target.value) } } as Partial<ProjectPreviewSettings>)} /></div>
+                  <div className="op-control-card"><label className="op-control-label" htmlFor="speaker-png-size">Character Image Size</label><select id="speaker-png-size" className="op-select" value={preview.speaker_png_size} onChange={(event) => onPreviewSettingsChange({ speaker_png_size: event.target.value } as Partial<ProjectPreviewSettings>)}><option value="compact">Compact</option><option value="standard">Standard</option><option value="large">Large</option></select></div>
+                  <div className="op-control-card"><label className="op-control-label" htmlFor="caption-style">Caption Style</label><select id="caption-style" className="op-select" value={preview.caption_style} onChange={(event) => onPreviewSettingsChange({ caption_style: event.target.value } as Partial<ProjectPreviewSettings>)}><option value="bold_bubble">Bold bubble captions</option><option value="clean_lower_third">Clean lower-third</option><option value="large_karaoke">Large karaoke captions</option></select></div>
+                </div>
               </div>
               <div className="op-divider" />
-              <div className="op-panel-section-label">Audio Mapping</div>
+              <div className="op-audio-map-header">
+                <div className="op-panel-section-label">Audio Mapping</div>
+                <a className="op-btn op-btn-secondary op-btn-sm" href="#voice-mapping">Manage Voice Mapping</a>
+              </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}>
                 {mappings.slice(0, 4).map((mapping) => (
                   <div key={mapping.speaker_name} className="op-audio-map-row">
-                    <span className="op-audio-map-speaker">{mapping.speaker_name}</span><span className="op-audio-map-arrow">→</span><span className="op-audio-map-voice">{mapping.character_display_name || mapping.voice_profile_id || 'Unassigned'}</span><span className="op-audio-map-provider">{mapping.voice_profile_id ? 'Profile' : 'Missing'}</span>
+                    <span className="op-audio-map-speaker">{mapping.speaker_name}</span><span className="op-audio-map-arrow">→</span><span className="op-audio-map-voice">{mapping.character_display_name || mapping.voice_profile_id || 'Needs assignment'}</span><span className="op-audio-map-provider">{mapping.voice_profile_id ? 'Profile' : 'Needs assignment'}</span>
                   </div>
                 ))}
               </div>
@@ -539,9 +719,13 @@ export const PreviewRenderWorkspace: React.FC<{
               ]} />
               <div style={{ display: 'flex', gap: 'var(--space-3)', marginTop: 'var(--space-5)', flexWrap: 'wrap' }}>
                 <button className="op-btn op-btn-primary" type="button" onClick={onApprovePreview} disabled={!project?.current_output_video_id}>Approve Preview</button>
+                <button className="op-btn op-btn-secondary op-btn-sm" type="button" onClick={() => onRender('draft')} disabled={!project || readinessReasons.length > 0}>Fast Draft</button>
                 <button className="op-btn op-btn-secondary op-btn-sm" type="button" onClick={() => onRender('preview')} disabled={!project || readinessReasons.length > 0}>Render Preview</button>
                 <button className="op-btn op-btn-secondary op-btn-sm" type="button" onClick={() => onRender('final')} disabled={!project || readinessReasons.length > 0 || !project.approved_at}>Final Render</button>
                 {latestJob && <a className="op-btn op-btn-ghost op-btn-sm" href="#render-queue">Inspect Artifacts</a>}
+              </div>
+              <div className={`op-action-hint ${readinessReasons.length ? 'warning' : project?.approved_at ? 'success' : ''}`}>
+                {readinessReasons[0] || (project?.approved_at ? 'Preview approved. Final render is available when no job is running.' : 'Render a preview first, then approve it before final render.')}
               </div>
             </div>
           </div>
@@ -551,18 +735,30 @@ export const PreviewRenderWorkspace: React.FC<{
   );
 };
 
-export const ScriptVoiceMappingPanel: React.FC<{ script: ScriptRevision | null; project: Project | null; latestJob: GenerationJob | null }> = ({
+export const ScriptVoiceMappingPanel: React.FC<{
+  script: ScriptRevision | null;
+  project: Project | null;
+  latestJob: GenerationJob | null;
+  characterPresets: CharacterPreset[];
+  busy: string | null;
+  onSpeakerBindingChange: (speakerName: string, characterPresetId: string) => void;
+}> = ({
   script,
   project,
   latestJob,
+  characterPresets,
+  busy,
+  onSpeakerBindingChange,
 }) => {
   const preview = normalizePreview(project?.preview_settings);
   const bindingBySpeaker = new Map(preview.speaker_mappings.map((mapping) => [mapping.speaker_name, mapping]));
   const segments = ((latestJob?.tts_result as any)?.segments || []) as Array<Record<string, any>>;
   const segmentBySpeaker = new Map(segments.map((segment) => [String(segment.speaker), segment]));
   const lines = scriptLinesFor(script).slice(0, 8);
+  const speakers = speakersFor(script, preview);
+  const canEdit = Boolean(project && project.id > 0);
   return (
-    <section aria-labelledby="voice-mapping-title">
+    <section id="voice-mapping" aria-labelledby="voice-mapping-title">
       <div className="op-section-header">
         <div><h2 className="op-section-title" id="voice-mapping-title">Script - Voice Mapping</h2><div className="op-section-title-sub">Speaker-separated dialogue with assigned XTTS / OpenVoice profiles.</div></div>
         <span className={`op-badge ${preview.speaker_mappings.every((item) => item.voice_profile_id) && preview.speaker_mappings.length ? 'op-badge-success' : 'op-badge-warning'}`}>
@@ -571,15 +767,48 @@ export const ScriptVoiceMappingPanel: React.FC<{ script: ScriptRevision | null; 
       </div>
       <div className="op-panel">
         <div style={{ padding: 'var(--space-4)' }}>
+          <div className="op-speaker-binding-grid" aria-label="Assign character and voice presets to script speakers">
+            {speakers.map((speakerName) => {
+              const mapping = bindingBySpeaker.get(speakerName);
+              return (
+                <div key={speakerName} className="op-speaker-binding-card">
+                  <div className="op-speaker-binding-top">
+                    <div>
+                      <div className="op-speaker-binding-name">{speakerName}</div>
+                      <div className="op-speaker-binding-meta">{mapping?.character_display_name || mapping?.voice_profile_id || 'No preset selected'}</div>
+                    </div>
+                    <span className={`op-badge ${mapping?.voice_profile_id ? 'op-badge-success' : 'op-badge-warning'}`}>{mapping?.voice_profile_id ? 'Mapped' : 'Needs assignment'}</span>
+                  </div>
+                  <label className="op-control-label" htmlFor={`speaker-binding-${speakerName}`}>Character / Voice Preset</label>
+                  <select
+                    id={`speaker-binding-${speakerName}`}
+                    className="op-select"
+                    value={mapping?.character_preset_id || ''}
+                    onChange={(event) => event.target.value && onSpeakerBindingChange(speakerName, event.target.value)}
+                    disabled={!canEdit || busy === `binding-${speakerName}` || !characterPresets.length}
+                  >
+                    <option value="">{characterPresets.length ? 'Select preset' : 'No presets available'}</option>
+                    {characterPresets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.display_name} - {preset.tts_provider}</option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })}
+            {!speakers.length && (
+              <div className="op-panel-subtitle">Generate a speaker-separated script before assigning character and voice presets.</div>
+            )}
+          </div>
+          <div className="op-divider" />
           {lines.length ? lines.map((line, index) => {
             const mapping = bindingBySpeaker.get(line.speaker);
             const segment = segmentBySpeaker.get(line.speaker);
             return (
               <div key={`${line.speaker}-${line.order}-${index}`} className="op-mapping-row">
-                <div className="op-mapping-speaker"><span className="op-mapping-speaker-dot" style={{ background: ['#60a5fa', '#a78bfa', '#34d399', '#f5a623'][index % 4] }} /><span className="op-mapping-speaker-name">{line.speaker}</span></div>
+                <div className="op-mapping-speaker"><span className="op-mapping-speaker-dot" style={{ background: ['var(--cyan)', 'var(--local)', 'var(--success)', 'var(--warning)'][index % 4] }} /><span className="op-mapping-speaker-name">{line.speaker}</span></div>
                 <div className="op-mapping-script">"{line.text}"</div>
                 <div className="op-mapping-voice"><span className="op-mapping-voice-name">{mapping?.character_display_name || mapping?.voice_profile_id || 'Unassigned voice'}</span><span className="op-mapping-voice-provider">{segment?.provider_used || 'pending'} · {segment?.artifact_url ? String(segment.artifact_url).split('/').pop() : 'segment pending'}</span></div>
-                <div className="op-mapping-status"><span className={`op-badge ${mapping?.voice_profile_id ? 'op-badge-success' : 'op-badge-error'}`}>{mapping?.voice_profile_id ? 'Mapped' : 'Missing'}</span>{segment?.artifact_url && <a className="op-badge op-badge-cyan" href={toApiHref(String(segment.artifact_url))}>WAV</a>}</div>
+                <div className="op-mapping-status"><span className={`op-badge ${mapping?.voice_profile_id ? 'op-badge-success' : 'op-badge-warning'}`}>{mapping?.voice_profile_id ? 'Mapped' : 'Needs assignment'}</span>{segment?.artifact_url && <a className="op-badge op-badge-cyan" href={toApiHref(String(segment.artifact_url))}>WAV</a>}</div>
               </div>
             );
           }) : (
@@ -596,7 +825,6 @@ export const VoiceCastProfilesPanel: React.FC<{ profiles: VoiceProfile[]; charac
   characterPresets,
   project,
 }) => {
-  const profileMap = voiceById(profiles);
   const selectedIds = new Set(normalizePreview(project?.preview_settings).speaker_mappings.map((mapping) => mapping.voice_profile_id).filter(Boolean) as string[]);
   const cards = profiles.filter((profile) => selectedIds.has(profile.id)).concat(profiles.filter((profile) => !selectedIds.has(profile.id)).slice(0, Math.max(0, 4 - selectedIds.size))).slice(0, 4);
   return (
@@ -619,7 +847,7 @@ export const VoiceCastProfilesPanel: React.FC<{ profiles: VoiceProfile[]; charac
             </article>
           );
         })}
-        {cards.length < 4 && <article className="op-voice-profile-card missing"><div className="op-voice-head"><div className="op-voice-avatar">+</div><div><div className="op-voice-name">New Character</div><div className="op-voice-sub">Missing references and image</div></div></div><div className="op-voice-facts"><span className="op-chip">Provider: unassigned</span><span className="op-chip">Refs: 0</span><span className="op-badge op-badge-error">Blocked</span></div></article>}
+        {cards.length < 4 && <article className="op-voice-profile-card missing"><div className="op-voice-head"><div className="op-voice-avatar">+</div><div><div className="op-voice-name">New Character</div><div className="op-voice-sub">Needs references and character image</div></div></div><div className="op-voice-facts"><span className="op-chip">Provider: unassigned</span><span className="op-chip">Refs: 0</span><span className="op-badge op-badge-warning">Needs setup</span></div></article>}
       </div>
     </section>
   );
@@ -637,12 +865,12 @@ export const SceneLibraryPanel: React.FC<{ presets: BackgroundPreset[]; project:
       <div className="op-scene-preset-grid">
         {presets.slice(0, 6).map((preset) => (
           <button key={preset.key} className={`op-scene-card ${preview.background_preset_id === preset.key ? 'selected' : ''}`} type="button" onClick={() => onSelect(preset.key)}>
-            <div className="op-scene-thumb">{preset.mime_type.startsWith('image/') ? <img src={toApiHref(preset.content_url)} alt="" /> : <video src={toApiHref(preset.content_url)} muted playsInline />}</div>
+            <div className="op-scene-thumb">{preset.mime_type.startsWith('image/') ? <img src={toApiHref(preset.content_url)} alt="" /> : <video src={toApiHref(preset.content_url)} muted playsInline preload="none" />}</div>
             <div className="op-scene-name">{preset.name}</div>
             <div className="op-scene-meta">{preset.description || 'Background + speaker PNG slots'}</div>
           </button>
         ))}
-        {!presets.length && <div className="op-panel-subtitle">No background presets found. Upload/select one in the production editor.</div>}
+        {!presets.length && <div className="op-panel-subtitle">No scenes found. Upload or select one in the production editor.</div>}
       </div>
     </section>
   );
@@ -652,38 +880,15 @@ export const PipelineStatusPanel: React.FC<{ project: Project | null; readinessR
   project,
   readinessReasons,
   syncState,
-}) => {
-  const preview = normalizePreview(project?.preview_settings);
-  const done = {
-    idea: Boolean(project),
-    script: Boolean(project?.current_script),
-    cast: Boolean(preview.speaker_mappings.length && preview.speaker_mappings.every((item) => item.voice_profile_id)),
-    scene: Boolean(preview.background_url),
-    preview: Boolean(project?.current_output_video_id),
-    render: Boolean(project?.latest_output),
-  };
-  const stages = [
-    ['Idea', 'Concept locked', done.idea],
-    ['Script', 'Speaker-separated', done.script],
-    ['Cast', 'Profiles assigned', done.cast],
-    ['Scene', 'Preset loaded', done.scene],
-    ['Preview', project?.approved_at ? 'Approved' : 'Awaiting approval', done.preview],
-    ['Render', project?.latest_output ? 'Final available' : 'Pending approval', done.render],
-    ['Release', syncState === 'local' ? 'Local draft only' : syncState === 'paused' ? 'Automation paused' : 'Ready when approved', syncState === 'active' && Boolean(project?.approved_at)],
-  ] as const;
-  const activeIndex = Math.max(0, stages.findIndex((stage) => !stage[2]));
-  return (
-    <section aria-labelledby="pipeline-title">
-      <div className="op-section-header"><h2 className="op-section-title" id="pipeline-title">Production Pipeline</h2><span className={`op-badge ${readinessReasons.length ? 'op-badge-error' : 'op-badge-warning'}`}>{readinessReasons.length ? 'Blocked' : `Step ${activeIndex + 1}`}</span></div>
-      <div className="op-panel"><div className="op-panel-body" style={{ padding: 'var(--space-4) var(--space-2)' }}><div className="op-pipeline-rail" role="list" aria-label="Production pipeline stages">
-        {stages.map((stage, index) => {
-          const state = stage[2] ? 'done' : index === activeIndex ? 'active' : stage[0] === 'Release' ? syncState : 'pending';
-          return <div key={stage[0]} className={`op-pipeline-stage op-ps-${state}`} role="listitem"><div className="op-pipeline-stage-number">{stage[2] ? '✓' : index + 1}</div><div className="op-pipeline-stage-name">{stage[0]}</div><div className="op-pipeline-stage-status">{stage[1]}</div></div>;
-        })}
-      </div></div></div>
-    </section>
-  );
-};
+}) => (
+  <section aria-labelledby="pipeline-title">
+    <div className="op-panel">
+      <div className="op-panel-body" style={{ padding: 'var(--space-4) var(--space-2)' }}>
+        <PipelineRail project={project} readinessReasons={readinessReasons} syncState={syncState} />
+      </div>
+    </div>
+  </section>
+);
 
 export const StudioHealthPanel: React.FC<{ latestJob: GenerationJob | null; syncState: StudioSyncState; profiles: VoiceProfile[] }> = ({
   latestJob,
@@ -701,11 +906,21 @@ export const StudioHealthPanel: React.FC<{ latestJob: GenerationJob | null; sync
     ['Studio Sync', syncState === 'local' ? 'Offline' : syncState === 'paused' ? 'Paused' : 'Active', syncState === 'active' ? 'Automation enabled' : 'Connect or resume to release', syncState === 'active' ? 'success' : syncState],
   ];
   return (
-    <section aria-labelledby="studio-health-title">
-      <div className="op-section-header"><h2 className="op-section-title" id="studio-health-title">Studio Health</h2></div>
-      <div className="op-health-grid">
-        {cards.map(([name, value, sub, state]) => <div key={name} className="op-health-card"><div className="op-health-card-header"><span className="op-health-card-name">{name}</span><span className={`op-badge op-badge-${state === 'local' ? 'local' : state === 'paused' ? 'paused' : state}` as string}><span className="op-dot" /> {titleCase(String(state))}</span></div><div className="op-health-card-value" style={{ color: state === 'paused' ? 'var(--paused)' : state === 'local' ? 'var(--local)' : undefined }}>{value}</div><div className="op-health-card-sub">{sub}</div></div>)}
-      </div>
+    <section aria-labelledby="system-status-title">
+      <details className="op-panel op-system-details">
+        <summary className="op-panel-header">
+          <div>
+            <div className="op-panel-title" id="system-status-title">System status / diagnostics</div>
+            <div className="op-panel-subtitle">Collapsed by default so production work stays focused.</div>
+          </div>
+          <span className="op-badge op-badge-muted">Open diagnostics</span>
+        </summary>
+        <div className="op-panel-body">
+          <div className="op-health-grid">
+            {cards.map(([name, value, sub, state]) => <div key={name} className="op-health-card"><div className="op-health-card-header"><span className="op-health-card-name">{name}</span><span className={`op-badge op-badge-${state === 'local' ? 'local' : state === 'paused' ? 'paused' : state}` as string}><span className="op-dot" /> {titleCase(String(state))}</span></div><div className="op-health-card-value" style={{ color: state === 'paused' ? 'var(--paused)' : state === 'local' ? 'var(--local)' : undefined }}>{value}</div><div className="op-health-card-sub">{sub}</div></div>)}
+          </div>
+        </div>
+      </details>
     </section>
   );
 };
@@ -737,21 +952,34 @@ export const RenderQueuePanel: React.FC<{ jobs: GenerationJob[]; readinessReason
       {jobs.slice(0, 4).map((job) => {
         const artifactUrls = job.artifact_urls || {};
         const progressClass = job.status === 'completed' ? 'op-pb-done' : job.status === 'failed' ? 'op-pb-blocked' : 'op-pb-running';
+        const artifacts = [
+          ['final audio', artifactUrls.composite_audio],
+          ['render plan', artifactUrls.render_plan],
+          ['cache report', artifactUrls.cache_report],
+          ['render log', artifactUrls.render_profile],
+        ] as const;
         return (
           <div key={job.id} className="op-queue-item">
             <div className="op-queue-item-top"><span className="op-queue-item-name">{job.output_kind}_{job.id}.mp4</span><span className={`op-badge ${badgeClassForStatus(job.status)}`}><span className="op-dot" /> {titleCase(job.status)}</span></div>
             <div className="op-queue-item-meta">{job.current_phase || 'Queued'} · {job.provider_name}</div>
             <div className="op-progress-bar-wrap"><div className={`op-progress-bar-fill ${progressClass}`} style={{ width: `${Math.max(5, job.progress || 0)}%` }} /></div>
             <div className="op-artifact-grid">
-              <a className="op-artifact-pill" href={toApiHref(String(artifactUrls.composite_audio || ''))}><span>final audio</span><strong>{artifactUrls.composite_audio ? 'saved' : 'pending'}</strong></a>
-              <a className="op-artifact-pill" href={toApiHref(String(artifactUrls.render_plan || ''))}><span>render plan</span><strong>{artifactUrls.render_plan ? 'saved' : 'pending'}</strong></a>
-              <a className="op-artifact-pill" href={toApiHref(String(artifactUrls.cache_report || ''))}><span>cache report</span><strong>{artifactUrls.cache_report ? 'saved' : 'pending'}</strong></a>
-              <a className="op-artifact-pill" href={toApiHref(String(artifactUrls.render_profile || ''))}><span>render log</span><strong>{artifactUrls.render_profile ? 'saved' : 'live'}</strong></a>
+              {artifacts.map(([label, url]) => {
+                const body = <><span>{label}</span><strong>{url ? 'saved' : label === 'render log' ? 'live' : 'pending'}</strong></>;
+                return url ? (
+                  <a key={label} className="op-artifact-pill" href={toApiHref(String(url))}>{body}</a>
+                ) : (
+                  <span key={label} className="op-artifact-pill pending" aria-disabled="true">{body}</span>
+                );
+              })}
+            </div>
+            <div style={{ marginTop: 'var(--space-3)' }}>
+              <RenderDiagnosticsPanel job={job} compact />
             </div>
           </div>
         );
       })}
-      {!jobs.length && <div className="op-queue-item"><div className="op-queue-item-top"><span className="op-queue-item-name">No render jobs yet</span><span className={`op-badge ${readinessReasons.length ? 'op-badge-error' : 'op-badge-muted'}`}>{readinessReasons.length ? 'Blocked' : 'Idle'}</span></div><div className="op-queue-item-meta">{readinessReasons[0] || 'Render a preview to populate artifacts.'}</div></div>}
+      {!jobs.length && <div className="op-queue-item"><div className="op-queue-item-top"><span className="op-queue-item-name">No render jobs yet</span><span className={`op-badge ${readinessReasons.length ? 'op-badge-warning' : 'op-badge-muted'}`}>{readinessReasons.length ? 'Needs setup' : 'Idle'}</span></div><div className="op-queue-item-meta">{readinessReasons[0] || 'Render a preview to populate artifacts.'}</div></div>}
     </div>
   </div>
 );
@@ -802,13 +1030,49 @@ export const ChannelsPanel: React.FC<{ accounts: SocialAccount[]; syncState: Stu
   );
 };
 
+export const BrowseFormatDashboardSection: React.FC<{
+  formats: ContentFormatPreset[];
+  project: Project | null;
+  script: ScriptRevision | null;
+}> = ({ formats, project, script }) => {
+  const selectedFormatId =
+    project?.script_generation_settings?.content_format_id ||
+    script?.generated_script?.content_format_id ||
+    script?.generated_script?.format_id ||
+    formats[0]?.id ||
+    '';
+
+  const openFormat = (format: ContentFormatPreset) => {
+    if (!project || project.id < 1) return;
+    window.location.href = `/projects/${project.id}?tab=script#step-script`;
+  };
+
+  return (
+    <section className="op-panel" id="browse-formats" aria-labelledby="browse-formats-title">
+      <div className="op-panel-header">
+        <div>
+          <div className="op-panel-title" id="browse-formats-title">Browse Formats</div>
+          <div className="op-panel-subtitle">Pick a reusable production shape before writing or regenerating the script.</div>
+        </div>
+        {project && project.id > 0 && <Link className="op-btn op-btn-secondary op-btn-sm" to={`/projects/${project.id}?tab=script#step-script`}>Open Script</Link>}
+      </div>
+      <div className="op-panel-body">
+        <FormatBrowser compact formats={formats} selectedFormatId={selectedFormatId} onSelect={openFormat} />
+      </div>
+    </section>
+  );
+};
+
 const loadCommandRoomData = async (projectId?: number | null): Promise<CommandRoomData> => {
-  const [projectsResponse, accountsResponse, characterResponse, voicesResponse, backgroundsResponse] = await Promise.all([
+  const [projectsResponse, accountsResponse, characterResponse, voicesResponse, backgroundsResponse, formatsResponse] = await Promise.all([
     apiClient.get<{ items: Project[] }>('/projects'),
     apiClient.get<{ items: SocialAccount[] }>('/social-accounts'),
     apiClient.get<{ items: CharacterPreset[] }>('/character-presets'),
     apiClient.get<{ items: VoiceProfile[] }>('/voice-profiles'),
     apiClient.get<BackgroundPreset[]>('/background-presets'),
+    apiClient
+      .get<{ items: ContentFormatPreset[] }>('/script-generation/formats')
+      .catch(() => ({ data: { items: FALLBACK_CONTENT_FORMATS } })),
   ]);
   const projects = projectsResponse.data.items || [];
   const currentProject = projectId ? projects.find((item) => item.id === projectId) || projects[0] || null : projects[0] || null;
@@ -821,17 +1085,22 @@ const loadCommandRoomData = async (projectId?: number | null): Promise<CommandRo
       outputs: [],
       accounts: accountsResponse.data.items || [],
       history: { jobs: [], posts: [] },
+      metadata: null,
       characterPresets: characterResponse.data.items || [],
       voiceProfiles: voicesResponse.data.items || [],
       backgroundPresets: backgroundsResponse.data || [],
+      contentFormats: formatsResponse.data.items?.length ? formatsResponse.data.items : FALLBACK_CONTENT_FORMATS,
+      renderReadiness: null,
     };
   }
-  const [projectResponse, scriptResponse, jobsResponse, outputsResponse, historyResponse] = await Promise.all([
+  const [projectResponse, scriptResponse, jobsResponse, outputsResponse, historyResponse, metadataResponse, renderReadinessResponse] = await Promise.all([
     apiClient.get<Project>(`/projects/${currentProject.id}`),
     apiClient.get<{ current_revision: ScriptRevision | null }>(`/projects/${currentProject.id}/script`),
-    apiClient.get<{ items: GenerationJob[] }>(`/projects/${currentProject.id}/generation-jobs`),
+    apiClient.get<{ items: GenerationJob[] }>(`/projects/${currentProject.id}/generation-jobs?limit=1`),
     apiClient.get<{ items: any[] }>(`/projects/${currentProject.id}/outputs`),
     apiClient.get<{ jobs: PublishJob[]; posts: PublishedPost[] }>(`/projects/${currentProject.id}/publish-history`),
+    apiClient.get<PlatformMetadata | null>(`/projects/${currentProject.id}/metadata/youtube`).catch(() => ({ data: null as PlatformMetadata | null })),
+    apiClient.get<RenderReadinessEstimate>(`/projects/${currentProject.id}/render-readiness?output_kind=draft`).catch(() => ({ data: null as RenderReadinessEstimate | null })),
   ]);
   return {
     projects,
@@ -841,9 +1110,12 @@ const loadCommandRoomData = async (projectId?: number | null): Promise<CommandRo
     outputs: outputsResponse.data.items || [],
     accounts: accountsResponse.data.items || [],
     history: historyResponse.data,
+    metadata: metadataResponse.data,
     characterPresets: characterResponse.data.items || [],
     voiceProfiles: voicesResponse.data.items || [],
     backgroundPresets: backgroundsResponse.data || [],
+    contentFormats: formatsResponse.data.items?.length ? formatsResponse.data.items : FALLBACK_CONTENT_FORMATS,
+    renderReadiness: renderReadinessResponse.data,
   };
 };
 
@@ -852,11 +1124,11 @@ const computeReadiness = (project: Project | null, script: ScriptRevision | null
   const preview = normalizePreview(project.preview_settings);
   const reasons: string[] = [];
   const speakers = speakersFor(script, preview);
-  if (!script || !script.parsed_lines?.length) reasons.push('Add or generate a speaker-separated script.');
+  if (!script || !script.parsed_lines?.length) reasons.push('Write or generate a speaker-separated script.');
   if (!preview.background_url && !project.background_asset_id) reasons.push('Select a background or scene before rendering.');
   if (!speakers.length) reasons.push('Add named dialogue lines so speakers can be mapped.');
   const missingVoice = speakers.filter((speaker) => !preview.speaker_mappings.find((mapping) => mapping.speaker_name === speaker && mapping.voice_profile_id));
-  if (missingVoice.length) reasons.push(`Assign voice profiles for ${missingVoice.join(', ')}.`);
+  if (missingVoice.length) reasons.push(`Assign a voice profile to ${missingVoice[0]}.`);
   if (jobs.some((job) => ['queued', 'processing', 'running'].includes(job.status))) reasons.push('A render job is already running.');
   return reasons;
 };
@@ -873,16 +1145,29 @@ export const CommandRoomPage: React.FC = () => {
     outputs: [],
     accounts: [],
     history: { jobs: [], posts: [] },
+    metadata: null,
     characterPresets: [],
     voiceProfiles: [],
     backgroundPresets: [],
+    contentFormats: FALLBACK_CONTENT_FORMATS,
+    renderReadiness: null,
   });
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
 
   const latestJob = data.jobs[0] || null;
   const readinessReasons = useMemo(() => computeReadiness(data.currentProject, data.script, data.jobs), [data.currentProject, data.script, data.jobs]);
+  const productionReadiness = useMemo(
+    () => computeProductionReadiness({
+      project: data.currentProject,
+      script: data.script,
+      latestJob,
+      metadata: data.metadata,
+      draftEstimate: data.renderReadiness,
+      linkMode: 'productionLab',
+    }),
+    [data.currentProject, data.script, latestJob, data.metadata, data.renderReadiness]
+  );
 
   const load = async (projectId = selectedProjectId) => {
     if (!isAuthenticated) {
@@ -904,6 +1189,33 @@ export const CommandRoomPage: React.FC = () => {
     void load(selectedProjectId);
   }, [isAuthenticated, selectedProjectId]);
 
+  useEffect(() => {
+    if (!isAuthenticated || !data.currentProject || data.currentProject.id < 0 || !latestJob || !['queued', 'processing', 'retrying'].includes(latestJob.status)) {
+      return undefined;
+    }
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await apiClient.get<GenerationJob>(`/generation-jobs/${latestJob.id}`);
+        setData((current) => ({ ...current, jobs: [response.data, ...current.jobs.filter((job) => job.id !== response.data.id)] }));
+        if (['completed', 'failed', 'canceled'].includes(response.data.status)) {
+          const [projectResponse, outputsResponse] = await Promise.all([
+            apiClient.get<Project>(`/projects/${data.currentProject!.id}`),
+            apiClient.get<{ items: any[] }>(`/projects/${data.currentProject!.id}/outputs`),
+          ]);
+          setData((current) => ({
+            ...current,
+            currentProject: projectResponse.data,
+            outputs: outputsResponse.data.items || [],
+            jobs: [response.data, ...current.jobs.filter((job) => job.id !== response.data.id)],
+          }));
+        }
+      } catch {
+        window.clearInterval(timer);
+      }
+    }, latestJob.status === 'queued' ? 1800 : 1200);
+    return () => window.clearInterval(timer);
+  }, [isAuthenticated, data.currentProject?.id, latestJob?.id, latestJob?.status]);
+
   const setSync = (next: StudioSyncState) => {
     if (next === 'active') {
       window.localStorage.setItem('omniposter.studioSync', 'active');
@@ -915,26 +1227,6 @@ export const CommandRoomPage: React.FC = () => {
 
   const connect = () => navigate('/login');
 
-  const patchPreviewSettings = async (patch: Partial<ProjectPreviewSettings>) => {
-    if (!isAuthenticated || !data.currentProject || data.currentProject.id < 0) return;
-    try {
-      const response = await apiClient.patch<ProjectPreviewSettings>(`/projects/${data.currentProject.id}/preview-settings`, patch);
-      setData((current) => current.currentProject ? { ...current, currentProject: { ...current.currentProject, preview_settings: response.data } } : current);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to save preview settings.');
-    }
-  };
-
-  const selectBackground = async (presetKey: string) => {
-    if (!isAuthenticated || !data.currentProject || data.currentProject.id < 0) return;
-    try {
-      await apiClient.post(`/projects/${data.currentProject.id}/assets/background/preset/${presetKey}`);
-      await load(data.currentProject.id);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to select scene.');
-    }
-  };
-
   const approvePreview = async () => {
     if (!data.currentProject || !isAuthenticated) return;
     try {
@@ -945,25 +1237,9 @@ export const CommandRoomPage: React.FC = () => {
     }
   };
 
-  const render = async (outputKind: 'preview' | 'draft' | 'final' | 'debug' = 'preview') => {
-    if (!data.currentProject || !isAuthenticated || readinessReasons.length) return;
-    try {
-      setBusy(`render-${outputKind}`);
-      await apiClient.post<GenerationJob>(`/projects/${data.currentProject.id}/renders`, {
-        background_style: data.currentProject.background_style || 'none',
-        output_kind: outputKind,
-        provider_name: 'local-compositor',
-      });
-      await load(data.currentProject.id);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to queue render.');
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const currentProject = data.currentProject;
   const projects = isAuthenticated ? data.projects : [localDraftProject];
+  const hasProduction = Boolean(currentProject && currentProject.id > 0);
 
   return (
     <StudioShell currentProject={currentProject} syncState={syncState}>
@@ -976,14 +1252,32 @@ export const CommandRoomPage: React.FC = () => {
       />
       <AuthStatusBanner syncState={syncState} onConnect={connect} onResumeSync={() => setSync('active')} />
       {error && <div className="op-error">{error}</div>}
-      {busy && <div className="op-badge op-badge-warning"><Clock size={14} /> {titleCase(busy)}</div>}
-      <CurrentProductionCard project={currentProject} script={data.script} latestJob={latestJob} syncState={syncState} readinessReasons={readinessReasons} onApprovePreview={approvePreview} onRender={() => render('preview')} onResumeSync={() => setSync('active')} />
-      <StartProductionPanel isAuthenticated={isAuthenticated} onCreated={(projectId) => setSelectedProjectId(projectId)} onConnect={connect} />
-      <PreviewRenderWorkspace project={currentProject} script={data.script} latestJob={latestJob} syncState={syncState} backgroundPresets={data.backgroundPresets} readinessReasons={readinessReasons} onPreviewSettingsChange={patchPreviewSettings} onSelectBackground={selectBackground} onApprovePreview={approvePreview} onRender={render} />
-      <ScriptVoiceMappingPanel script={data.script} project={currentProject} latestJob={latestJob} />
-      <VoiceCastProfilesPanel profiles={data.voiceProfiles} characterPresets={data.characterPresets} project={currentProject} />
-      <SceneLibraryPanel presets={data.backgroundPresets} project={currentProject} onSelect={selectBackground} />
-      <PipelineStatusPanel project={currentProject} readinessReasons={readinessReasons} syncState={syncState} />
+      <div className="op-command-dashboard-grid">
+        <div className="op-production-builder-stack">
+          {!hasProduction && (
+            <StartProductionPanel isAuthenticated={isAuthenticated} formats={data.contentFormats} onCreated={(projectId) => setSelectedProjectId(projectId)} onConnect={connect} />
+          )}
+          <CurrentProductionCard
+            project={currentProject}
+            script={data.script}
+            latestJob={latestJob}
+            syncState={syncState}
+            readinessReasons={readinessReasons}
+            readiness={productionReadiness}
+            onApprovePreview={approvePreview}
+            onResumeSync={() => setSync('active')}
+          />
+        </div>
+        <section className="op-production-builder-stack" aria-labelledby="readiness-dashboard-title">
+          <ProductionReadinessPanel
+            title="Creator workflow readiness"
+            readiness={productionReadiness}
+            linkMode="productionLab"
+            projectId={currentProject?.id}
+          />
+          <BrowseFormatDashboardSection formats={data.contentFormats} project={currentProject} script={data.script} />
+        </section>
+      </div>
       <StudioHealthPanel latestJob={latestJob} syncState={syncState} profiles={data.voiceProfiles} />
       <section id="active-productions" aria-labelledby="productions-queues-title">
         <div className="op-section-header"><h2 className="op-section-title" id="productions-queues-title">Active Productions & Queues</h2></div>

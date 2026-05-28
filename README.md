@@ -20,7 +20,7 @@ It is a production command room for reusable projects, scripts, characters, voic
 
 ## Stack
 
-- Frontend: React, TypeScript, Tailwind, CRACO
+- Frontend: React, TypeScript, Tailwind, Vite, CRACO/Jest
 - Backend: FastAPI, SQLAlchemy, Alembic
 - Jobs: Celery workers for generation, publishing, and voice operations
 - Queue/cache: Redis
@@ -59,6 +59,8 @@ Default local URLs:
 - Postgres: `localhost:5432`
 - Redis: `localhost:6379`
 
+The frontend dev server binds to `127.0.0.1:3000`. Browser API, artifact, and media requests should stay on the frontend origin and are forwarded to the backend through the Vite dev proxy.
+
 ## Docker Services
 
 The compose stack includes:
@@ -77,7 +79,7 @@ After first startup, pull the default local generation model:
 docker compose -f deploy/compose/docker-compose.yml exec ollama ollama pull llama3.1
 ```
 
-To shit the Docker stack down:
+To shut the Docker stack down:
 ```bash
 docker compose -f deploy/compose/docker-compose.yml --profile ollama down
 ```
@@ -133,6 +135,13 @@ Frontend build:
 ```bash
 cd frontend
 npm run build
+```
+
+Frontend browser smoke:
+
+```bash
+cd frontend
+npm run test:e2e
 ```
 
 Backend regression suites:
@@ -195,6 +204,17 @@ Not in scope yet:
 - billing/team management
 - full timeline editor
 - in-app end-to-end model training orchestration
+
+## Repo Structure
+
+backend/app/domains/    Product behavior
+backend/app/infra/      Technical adapters
+backend/app/api/        API routes
+backend/app/workers/    Background workers
+frontend/src/features/  Frontend product features
+runtime/                Ignored generated artifacts
+seed_assets/            Platform-provided presets
+docs/                   Architecture and operating docs
 
 ## Project Memory
 

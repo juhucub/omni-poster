@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models import ScriptRevision, User
 from app.routers.projects import get_owned_project
@@ -18,11 +19,49 @@ from app.schemas import (
 from app.services.audit import record_audit
 from app.services.notifications import create_notification
 from app.services.project_state import sync_project_state, to_script_summary
-from app.services.script_generation import ScriptGenerationService
-from app.services.script_generation.service import generated_script_to_dialogue_lines
+from app.domains.script_generation import ScriptGenerationService
+from app.domains.script_generation.service import generated_script_to_dialogue_lines
 from app.services.scripts import generate_script_draft, save_script_revision
 
 router = APIRouter(tags=["scripts"])
+
+SCRIPT_UPLOAD_CHUNK_SIZE = 64 * 1024
+
+
+def _csv_set(value: str) -> set[str]:
+    return {item.strip().lower() for item in value.split(",") if item.strip()}
+
+
+async def _read_script_upload(file: UploadFile) -> tuple[str, str]:
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    if not filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
+    if suffix not in _csv_set(settings.SCRIPT_IMPORT_ALLOWED_SUFFIXES):
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported script file type")
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type not in _csv_set(settings.SCRIPT_IMPORT_ALLOWED_TYPES):
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported script file type")
+
+    size = 0
+    chunks: list[bytes] = []
+    max_size = int(settings.SCRIPT_IMPORT_MAX_SIZE_BYTES or 0)
+    try:
+        await file.seek(0)
+        while chunk := await file.read(SCRIPT_UPLOAD_CHUNK_SIZE):
+            size += len(chunk)
+            if max_size > 0 and size > max_size:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="Script upload exceeds size limit",
+                )
+            chunks.append(chunk)
+        try:
+            return b"".join(chunks).decode("utf-8"), suffix
+        except UnicodeDecodeError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Script upload must be UTF-8 text") from exc
+    finally:
+        await file.close()
 
 
 @router.get("/projects/{project_id}/script", response_model=ScriptResponse)
@@ -151,7 +190,8 @@ def generate_project_script(
             audience=payload.audience,
             speaker_names=payload.character_names,
             debug=payload.debug,
-        )
+        ),
+        user_scope=str(current_user.id),
     )
     generated_script = generation_response.generated_script
     provider = generation_response.provider_metadata.provider_name
@@ -197,8 +237,8 @@ async def import_project_script(
     db: Session = Depends(get_db),
 ):
     project = get_owned_project(db, current_user.id, project_id)
-    raw_text = (await file.read()).decode("utf-8")
-    source = f"upload:{Path(file.filename or 'script.txt').suffix or '.txt'}"
+    raw_text, suffix = await _read_script_upload(file)
+    source = f"upload:{suffix or '.txt'}"
     revision = save_script_revision(
         db,
         project_id=project.id,

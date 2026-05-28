@@ -2,14 +2,10 @@ import axios from 'axios';
 
 const getApiBaseUrl = () => {
   if (process.env.REACT_APP_API_URL) {
-    return process.env.REACT_APP_API_URL;
+    return process.env.REACT_APP_API_URL.replace(/\/+$/, '');
   }
 
-  if (typeof window !== 'undefined') {
-    return `${window.location.protocol}//${window.location.hostname}:8000`;
-  }
-
-  return 'http://localhost:8000';
+  return '';
 };
 
 export const apiBaseUrl = getApiBaseUrl();

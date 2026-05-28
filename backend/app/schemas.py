@@ -601,6 +601,24 @@ class ProjectPreviewSettingsUpdate(BaseModel):
     render_preset: str | None = Field(default=None, max_length=64)
 
 
+class ProjectScriptGenerationSettings(BaseModel):
+    content_format_id: str = Field(default="educational_short", max_length=64)
+    platform: PlatformTarget = "tiktok"
+    target_duration_sec: int = Field(default=45, ge=10, le=180)
+    tone: str = Field(default="engaging", max_length=128)
+    audience: str = Field(default="general short-form viewers", max_length=256)
+    speaker_names: list[str] = Field(default_factory=list)
+
+
+class ProjectScriptGenerationSettingsUpdate(BaseModel):
+    content_format_id: str | None = Field(default=None, max_length=64)
+    platform: PlatformTarget | None = None
+    target_duration_sec: int | None = Field(default=None, ge=10, le=180)
+    tone: str | None = Field(default=None, max_length=128)
+    audience: str | None = Field(default=None, max_length=256)
+    speaker_names: list[str] | None = None
+
+
 class DialogueScriptLine(BaseModel):
     id: int | None = None
     speaker: str
@@ -608,8 +626,86 @@ class DialogueScriptLine(BaseModel):
     order: int
 
 
-ScriptSection = Literal["hook", "body", "payoff", "cta"]
+ContentFormatId = Literal[
+    "reddit_story",
+    "character_dialogue",
+    "podcast_clip",
+    "debate_format",
+    "meme_news_reaction",
+    "educational_short",
+    "multi_speaker_skit",
+]
+ScriptSection = str
 PlatformTarget = Literal["tiktok", "youtube_shorts", "instagram_reels"]
+
+
+class TimingTarget(BaseModel):
+    target_duration_sec: int | None = Field(default=None, ge=10, le=180)
+    min_duration_sec: int | None = Field(default=None, ge=5, le=180)
+    max_duration_sec: int | None = Field(default=None, ge=10, le=240)
+
+
+class GenerationQualityHints(BaseModel):
+    desired_tone: str | None = Field(default=None, max_length=128)
+    specificity: str | None = Field(default=None, max_length=128)
+    retention_priority: str | None = Field(default=None, max_length=128)
+    avoid: list[str] = Field(default_factory=list, max_length=12)
+
+
+class ScriptMetadataSuggestions(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    hashtags: list[str] = Field(default_factory=list)
+    cta: str | None = None
+
+
+class ScriptMetadataHints(BaseModel):
+    title_style: str | None = Field(default=None, max_length=128)
+    description_style: str | None = Field(default=None, max_length=128)
+    hashtags: list[str] = Field(default_factory=list, max_length=16)
+    cta_style: str | None = Field(default=None, max_length=128)
+
+
+class ContentFormatGenerationBudget(BaseModel):
+    max_speakers_for_draft: int = Field(ge=1, le=5)
+    max_lines_for_60s_draft: int = Field(ge=1, le=20)
+    max_words_per_line: int = Field(ge=3, le=30)
+    max_total_words: int = Field(ge=10, le=250)
+    target_segment_count: int = Field(ge=1, le=20)
+    recommended_tts_mode: str
+    draft_duration_range_sec: list[int] = Field(min_length=2, max_length=2)
+    final_duration_range_sec: list[int] = Field(min_length=2, max_length=2)
+    section_line_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class ContentFormatPreset(BaseModel):
+    id: ContentFormatId
+    display_name: str
+    short_description: str
+    best_use_case: str
+    purpose: str
+    ideal_duration_range_sec: list[int] = Field(min_length=2, max_length=2)
+    supported_speaker_count: list[int] = Field(min_length=2, max_length=2)
+    default_speaker_roles: list[str]
+    tone_options: list[str]
+    pacing_rules: list[str]
+    section_structure: list[str]
+    caption_style_hints: list[str]
+    default_metadata_hints: ScriptMetadataSuggestions = Field(default_factory=ScriptMetadataSuggestions)
+    prompt_guidance: list[str]
+    validation_rules: list[str]
+    speaker_model: str
+    generation_budget: ContentFormatGenerationBudget
+
+
+class ContentFormatListResponse(BaseModel):
+    items: list[ContentFormatPreset]
+    count: int = 0
+
+    @model_validator(mode="after")
+    def populate_count(self) -> "ContentFormatListResponse":
+        self.count = len(self.items)
+        return self
 
 
 class ScriptVisualCue(BaseModel):
@@ -620,7 +716,7 @@ class ScriptVisualCue(BaseModel):
 
 class ScriptLine(BaseModel):
     id: str
-    section: ScriptSection
+    section: ScriptSection = Field(max_length=64)
     speaker_id: str
     speaker_label: str
     text: str
@@ -629,6 +725,8 @@ class ScriptLine(BaseModel):
     emotion: str | None = Field(default=None, max_length=64)
     delivery: str | None = Field(default=None, max_length=128)
     visual_cue: ScriptVisualCue | None = None
+    beat_index: int = Field(default=0, ge=0)
+    order: int = Field(default=0, ge=0)
 
 
 class ScriptSpeaker(BaseModel):
@@ -637,6 +735,12 @@ class ScriptSpeaker(BaseModel):
     role: str
     voice_profile_id: str | None = None
     speaker_image_id: str | None = None
+    point_of_view: str | None = Field(default=None, max_length=500)
+    motivation: str | None = Field(default=None, max_length=500)
+    stance: str | None = Field(default=None, max_length=256)
+    conversational_style: str | None = Field(default=None, max_length=256)
+    likely_objection: str | None = Field(default=None, max_length=500)
+    relationship_to_others: str | None = Field(default=None, max_length=500)
 
 
 class CaptionBlock(BaseModel):
@@ -648,13 +752,6 @@ class CaptionBlock(BaseModel):
     end_sec: float | None = None
 
 
-class ScriptMetadataSuggestions(BaseModel):
-    title: str | None = None
-    description: str | None = None
-    hashtags: list[str] = Field(default_factory=list)
-    cta: str | None = None
-
-
 class ScriptGenerationProviderConfig(BaseModel):
     provider: str = "auto"
     model: str | None = None
@@ -662,20 +759,41 @@ class ScriptGenerationProviderConfig(BaseModel):
     timeout_seconds: float | None = Field(default=None, gt=0)
 
 
+class ScriptSpeakerContext(BaseModel):
+    id: str | None = Field(default=None, max_length=128)
+    label: str = Field(min_length=1, max_length=128)
+    role: str | None = Field(default=None, max_length=128)
+    point_of_view: str | None = Field(default=None, max_length=500)
+    motivation: str | None = Field(default=None, max_length=500)
+    stance: str | None = Field(default=None, max_length=256)
+    conversational_style: str | None = Field(default=None, max_length=256)
+    likely_objection: str | None = Field(default=None, max_length=500)
+    relationship_to_others: str | None = Field(default=None, max_length=500)
+
+
 class GeneratedScript(BaseModel):
     id: str
+    script_id: str | None = None
     idea: str
     content_format_id: str
+    format_id: str | None = None
     platform: PlatformTarget
+    platform_targets: list[PlatformTarget] = Field(default_factory=list)
     target_duration_sec: int
     tone: str | None = None
     audience: str | None = None
+    title: str | None = None
+    short_summary: str | None = None
     speakers: list[ScriptSpeaker]
     lines: list[ScriptLine]
     sections: list[ScriptSection] = Field(default_factory=list)
     caption_blocks: list[CaptionBlock] = Field(default_factory=list)
     metadata_suggestions: ScriptMetadataSuggestions = Field(default_factory=ScriptMetadataSuggestions)
     total_estimated_duration_sec: float = 0
+    estimated_total_duration_sec: float | None = None
+    generation_provider: str | None = None
+    generation_model: str | None = None
+    fallback_used: bool = False
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
     validation_warnings: list[str] = Field(default_factory=list)
 
@@ -683,14 +801,44 @@ class GeneratedScript(BaseModel):
 class ScriptGenerationRequest(BaseModel):
     idea: str = Field(min_length=1, max_length=2000)
     content_format_id: str = Field(default="educational_short", max_length=64)
+    format_id: ContentFormatId | None = None
     platform: PlatformTarget = "tiktok"
+    platform_targets: list[PlatformTarget] = Field(default_factory=list)
     target_duration_sec: int | None = Field(default=None, ge=10, le=180)
+    timing_target: TimingTarget | None = None
     tone: str | None = Field(default="engaging", max_length=128)
     audience: str | None = Field(default="general short-form viewers", max_length=256)
     speaker_names: list[str] = Field(default_factory=list)
+    speaker_roles: list[str] = Field(default_factory=list)
+    speaker_contexts: list[ScriptSpeakerContext] = Field(default_factory=list)
+    quality_hints: GenerationQualityHints | None = None
+    metadata_hints: ScriptMetadataHints | None = None
+    previous_context: str | None = Field(default=None, max_length=4000)
     provider: str | None = Field(default=None, max_length=64)
     provider_config: ScriptGenerationProviderConfig | None = None
     debug: bool = False
+
+    @field_validator("previous_context", mode="before")
+    @classmethod
+    def normalize_previous_context(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return "\n".join(str(item).strip() for item in value if str(item).strip())
+        return value
+
+    @model_validator(mode="after")
+    def normalize_generation_inputs(self) -> "ScriptGenerationRequest":
+        if self.format_id and self.content_format_id == "educational_short":
+            self.content_format_id = self.format_id
+        if not self.format_id:
+            try:
+                self.format_id = self.content_format_id  # type: ignore[assignment]
+            except Exception:
+                self.format_id = None
+        if self.timing_target and self.timing_target.target_duration_sec and self.target_duration_sec is None:
+            self.target_duration_sec = self.timing_target.target_duration_sec
+        if self.quality_hints and self.quality_hints.desired_tone and not self.tone:
+            self.tone = self.quality_hints.desired_tone
+        return self
 
 
 class ScriptGenerationProviderMetadata(BaseModel):
@@ -789,12 +937,28 @@ class GenerationJobSummary(BaseModel):
     current_phase: str | None = None
     cache_statistics: dict = Field(default_factory=dict)
     timing_breakdown: dict = Field(default_factory=dict)
+    performance_summary: dict = Field(default_factory=dict)
     artifact_urls: dict = Field(default_factory=dict)
     debug_artifacts: dict = Field(default_factory=dict)
     output_video_id: int | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     created_at: datetime
+
+
+class RenderReadinessEstimate(BaseModel):
+    target_seconds: int = 60
+    estimated_seconds_low: float
+    estimated_seconds_high: float
+    draft_ready: bool
+    blocking_reasons: list[str] = Field(default_factory=list)
+    optimization_hints: list[str] = Field(default_factory=list)
+    recommended_mode: str = "draft"
+    max_recommended_lines: int
+    max_recommended_speakers: int
+    max_recommended_words_per_line: int
+    expected_cache_dependency: str
+    cache_warmth: dict = Field(default_factory=dict)
 
 
 class GenerationJobListResponse(BaseModel):
@@ -814,6 +978,22 @@ class OutputVideoSummary(BaseModel):
 
 class OutputVideoListResponse(BaseModel):
     items: list[OutputVideoSummary]
+
+
+class GeneratedMediaSummary(BaseModel):
+    id: int
+    project_id: int
+    project_name: str
+    project_status: str
+    generation_job: GenerationJobSummary | None = None
+    output: OutputVideoSummary
+    artifact_urls: dict = Field(default_factory=dict)
+    provider_state: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class GeneratedMediaListResponse(BaseModel):
+    items: list[GeneratedMediaSummary]
 
 
 class ReviewCommentCreateRequest(BaseModel):
@@ -975,6 +1155,7 @@ class ProjectSummary(BaseModel):
     latest_notifications: list[NotificationSummary] = Field(default_factory=list)
     speaker_bindings: list[SpeakerBindingSummary] = Field(default_factory=list)
     preview_settings: ProjectPreviewSettings = Field(default_factory=ProjectPreviewSettings)
+    script_generation_settings: ProjectScriptGenerationSettings = Field(default_factory=ProjectScriptGenerationSettings)
 
 
 class ProjectListResponse(BaseModel):

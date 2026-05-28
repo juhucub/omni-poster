@@ -11,6 +11,7 @@ import tempfile
 import textwrap
 import uuid
 import wave
+from functools import lru_cache
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -19,9 +20,85 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 from app.core.config import settings
+from app.domains.render.artifacts import (
+    build_assembly_metadata,
+    build_debug_audio_extraction_metadata,
+    build_render_result_metadata,
+    build_segment_artifact_metadata,
+    build_selected_profile_summary,
+    build_tts_result_metadata,
+)
+from app.domains.render.audio.mixdown import (
+    concat_demuxer_audio_command,
+    ffmpeg_concat_file_contents,
+    multi_input_audio_command,
+)
+from app.domains.render.audio.timeline import build_timed_segments_from_durations, wav_duration_seconds
+from app.domains.render.cache_keys import (
+    background_cache_key,
+    composite_audio_cache_key,
+    dynamic_frame_cache_key,
+    dynamic_overlay_cache_key,
+    final_video_cache_key,
+    normalized_audio_cache_key,
+    static_overlay_cache_key,
+    tts_segment_cache_key,
+    voice_profile_cache_payload,
+)
+from app.domains.render.cache_report import (
+    build_background_cache_transfer_metadata,
+    build_composite_audio_cache_transfer_metadata,
+    build_final_render_cache_transfer_metadata,
+    build_normalized_audio_cache_transfer_metadata,
+    build_overlay_cache_transfer_metadata,
+    build_tts_segment_cache_miss_metadata,
+    build_tts_segment_cache_transfer_metadata,
+)
+from app.domains.render.diagnostics import build_render_profile_metadata
+from app.domains.render.geometry import (
+    ACTIVE_PORTRAIT_HEIGHT,
+    ACTIVE_POSITIONS as RENDER_ACTIVE_POSITIONS,
+    BASE_PORTRAIT_HEIGHT,
+    BASE_POSITIONS as RENDER_BASE_POSITIONS,
+    CAPTION_CARD_POSITION,
+    CAPTION_CARD_SIZE,
+    REFERENCE_CANVAS_HEIGHT,
+    REFERENCE_CANVAS_WIDTH,
+    layout_scaled_height,
+    portrait_resize_dimensions,
+    scale_box,
+)
+from app.domains.render.planning import RenderPlan, RenderPreset, write_render_plan
+from app.domains.render.presets import (
+    background_cache_duration_seconds,
+    normalize_render_layout,
+    render_preset_for_output_kind,
+)
+from app.domains.render.progress import render_progress_payload
+from app.domains.render.video.backgrounds import background_normalization_ffmpeg_command
+from app.domains.render.video.composer import (
+    dynamic_overlay_concat_list_contents,
+    dynamic_overlay_ffmpeg_command,
+    final_video_ffmpeg_command,
+)
+from app.domains.render.video.overlays import (
+    dialogue_card_layout_payload,
+    dynamic_frame_composition_payload,
+    generated_portrait_layout_payload,
+    primary_cast_segments,
+    speaker_palette as render_speaker_palette,
+    speaker_slots_from_lines,
+    static_overlay_cast,
+    static_overlay_portrait_entries,
+)
 from app.services.character_presets import resolve_character_portrait_path, resolve_character_preset_for_speaker
-from app.services.render_cache import RENDER_CACHE_SCHEMA_VERSION, RenderCache, RenderCacheReport, file_sha256, stable_hash
-from app.services.render_planning import RenderPlan, RenderPreset, write_render_plan
+from app.services.render_cache import (
+    RENDER_CACHE_SCHEMA_VERSION,
+    RenderCache,
+    RenderCacheReport,
+    cached_file_sha256,
+    file_sha256,
+)
 from app.services.render_profiling import RenderProfiler
 from app.services.storage import generated_job_artifact_dir, generated_job_artifact_url, generated_job_segment_dir
 from app.services.tts import LocalSpeechService, SpeechSegment, TTSProviderError
@@ -31,12 +108,12 @@ logger = logging.getLogger(__name__)
 
 
 class ProjectRenderService:
-    CANVAS_WIDTH = 1080
-    CANVAS_HEIGHT = 1920
-    BASE_POSITIONS = ((56, 1080), (584, 1080))
-    ACTIVE_POSITIONS = ((4, 930), (472, 930))
-    BASE_HEIGHT = 620
-    ACTIVE_HEIGHT = 780
+    CANVAS_WIDTH = REFERENCE_CANVAS_WIDTH
+    CANVAS_HEIGHT = REFERENCE_CANVAS_HEIGHT
+    BASE_POSITIONS = RENDER_BASE_POSITIONS
+    ACTIVE_POSITIONS = RENDER_ACTIVE_POSITIONS
+    BASE_HEIGHT = BASE_PORTRAIT_HEIGHT
+    ACTIVE_HEIGHT = ACTIVE_PORTRAIT_HEIGHT
 
     def __init__(self, *, db=None, project_id: int | None = None) -> None:
         self.db = db
@@ -141,8 +218,8 @@ class ProjectRenderService:
         try:
             render_layout = self._render_layout(render_settings)
             character_scale = render_layout["character_scale"]
-            base_height = int(round(self.BASE_HEIGHT * character_scale))
-            active_height = int(round(self.ACTIVE_HEIGHT * character_scale))
+            base_height = layout_scaled_height(self.BASE_HEIGHT, character_scale)
+            active_height = layout_scaled_height(self.ACTIVE_HEIGHT, character_scale)
             chat_font_size_px = render_layout["chat_font_size_px"]
             profiler.add_context(
                 background_video_path=clean_video_path,
@@ -161,7 +238,7 @@ class ProjectRenderService:
             speech_dir = self._speech_output_dir(job_id, work_dir)
             with profiler.stage("tts.dialogue_synthesis", segment_count=len(parsed_lines), speech_dir=speech_dir):
                 segments = self.speech_service.synthesize_dialogue(parsed_lines, speech_dir)
-            self._emit_progress(progress_callback, "tts_ready", 46)
+            self._emit_progress(progress_callback, *render_progress_payload("tts_ready", engine="moviepy"))
 
             with profiler.stage("moviepy.background_load", background_video_path=clean_video_path):
                 background_clip = VideoFileClip(clean_video_path).without_audio()
@@ -169,7 +246,7 @@ class ProjectRenderService:
                 background_clip = self.video_service._apply_background_style(background_clip, style_preset)
             with profiler.stage("moviepy.background_fit", output_kind=output_kind):
                 background_clip = self._fit_to_canvas(background_clip, output_kind)
-            self._emit_progress(progress_callback, "background_ready", 58)
+            self._emit_progress(progress_callback, *render_progress_payload("background_ready", engine="moviepy"))
 
             with profiler.stage("render.segment_wav_validation", segment_count=len(segments)):
                 timed_segments = self._build_timed_segments(segments)
@@ -248,7 +325,7 @@ class ProjectRenderService:
                     clips_to_close.extend([active_clip, caption_clip])
                     cursor += item["duration_seconds"]
 
-            self._emit_progress(progress_callback, "timeline_ready", 68)
+            self._emit_progress(progress_callback, *render_progress_payload("timeline_ready", engine="moviepy"))
 
             with profiler.stage("moviepy.composite_audio_load", composite_audio_path=composite_audio_path):
                 composite_audio = AudioFileClip(str(composite_audio_path))
@@ -294,7 +371,7 @@ class ProjectRenderService:
                 len(segments),
                 total_duration,
             )
-            self._emit_progress(progress_callback, "encoding", 80)
+            self._emit_progress(progress_callback, *render_progress_payload("encoding", engine="moviepy"))
             with profiler.stage(
                 "moviepy.ffmpeg_encode_and_mp4_write",
                 output_path=output_path,
@@ -324,7 +401,7 @@ class ProjectRenderService:
                     threads=render_config["threads"],
                     logger=None,
                 )
-            self._emit_progress(progress_callback, "encoded", 88)
+            self._emit_progress(progress_callback, *render_progress_payload("encoded", engine="moviepy"))
             with profiler.stage("ffmpeg.final_audio_extract", final_mp4_path=output_path):
                 final_video_audio_path = self._extract_final_video_audio(
                     final_mp4_path=output_path,
@@ -351,22 +428,13 @@ class ProjectRenderService:
                 final_mp4_path=output_path,
                 final_video_audio_path=final_video_audio_path,
             )
-            tts_result = {
-                "status": "completed",
-                "provider_state": (segments[-1].provider_state or {}) if segments else {},
-                "segments": segment_metadata,
-                "assembly": assembly_metadata,
-                "render_settings": {"layout": render_layout},
-            }
-            selected_profiles = {
-                segment.speaker: {
-                    "provider_used": segment.provider_used,
-                    "voice_profile_id": segment.voice_profile_id,
-                    "voice": segment.voice,
-                    "fallback_used": segment.fallback_used,
-                }
-                for segment in segments
-            }
+            tts_result = build_tts_result_metadata(
+                provider_state=(segments[-1].provider_state or {}) if segments else {},
+                segment_metadata=segment_metadata,
+                assembly_metadata=assembly_metadata,
+                render_layout=render_layout,
+            )
+            selected_profiles = build_selected_profile_summary(segments)
             profiler.add_context(
                 segment_count=len(segments),
                 video_duration_seconds=total_duration,
@@ -398,11 +466,11 @@ class ProjectRenderService:
                     profile_summary.get("top_stages"),
                     profile_artifact_url,
                 )
-            render_profile_metadata = {
-                "artifact_url": profile_artifact_url,
-                "summary": profile_summary,
-                "profile_path": str(generated_job_artifact_dir(job_id) / "generation_profile.json") if profile_artifact_url else None,
-            }
+            render_profile_metadata = build_render_profile_metadata(
+                artifact_url=profile_artifact_url,
+                summary=profile_summary,
+                profile_path=generated_job_artifact_dir(job_id) / "generation_profile.json" if job_id is not None else None,
+            )
             tts_result["render_profile"] = render_profile_metadata
 
             return {
@@ -413,46 +481,24 @@ class ProjectRenderService:
                 "status": "completed",
                 "created_at": datetime.now().isoformat(),
                 "processing_time_seconds": None,
-                "metadata": {
-                    "render_mode": "speaker_dialogue",
-                    "voices": {
-                        segment.speaker: {
-                            "voice": segment.voice,
-                            "provider_used": segment.provider_used,
-                            "voice_profile_id": segment.voice_profile_id,
-                            "fallback_used": segment.fallback_used,
-                            "reference_audio_count": segment.reference_audio_count,
-                        }
-                        for segment in segments
-                    },
-                    "tts_result": tts_result,
-                    "render_settings": {"layout": render_layout},
-                    "preview_layout": render_layout,
-                    "render_profile": render_profile_metadata,
-                    "render_profile_artifact_url": profile_artifact_url,
-                    "render_assembly": assembly_metadata,
-                    "line_timing_seconds": [
-                        {
-                            "speaker": item["segment"].speaker,
-                            "text": item["segment"].text,
-                            "duration_seconds": item["duration_seconds"],
-                            "audio_path": item["segment"].audio_path,
-                            "audio_path_used_for_final_assembly": item["segment"].audio_path,
-                            "artifact_url": segment_metadata[index].get("artifact_url"),
-                            "provider_used": item["segment"].provider_used,
-                            "voice_profile_id": item["segment"].voice_profile_id,
-                            "fallback_used": item["segment"].fallback_used,
-                        }
-                        for index, item in enumerate(timed_segments)
-                    ],
-                    "render_fps": render_config["fps"],
-                    "render_resolution": {"width": canvas_width, "height": canvas_height},
-                    "character_scale": character_scale,
-                    "chat_font_size_px": chat_font_size_px,
-                    "ffmpeg_threads": render_config["threads"],
-                    "encode_preset": render_config["preset"],
-                    "portrait_resolution": "backend/storage/characters/<speaker>.png or speaker_<slot>.png",
-                },
+                "metadata": build_render_result_metadata(
+                    render_mode="speaker_dialogue",
+                    segments=segments,
+                    tts_result=tts_result,
+                    render_layout=render_layout,
+                    render_profile_metadata=render_profile_metadata,
+                    render_profile_artifact_url=profile_artifact_url,
+                    assembly_metadata=assembly_metadata,
+                    timed_segments=timed_segments,
+                    segment_metadata=segment_metadata,
+                    render_fps=render_config["fps"],
+                    render_resolution={"width": canvas_width, "height": canvas_height},
+                    character_scale=character_scale,
+                    chat_font_size_px=chat_font_size_px,
+                    ffmpeg_threads=render_config["threads"],
+                    encode_preset=render_config["preset"],
+                    portrait_resolution="backend/storage/characters/<speaker>.png or speaker_<slot>.png",
+                ),
             }
         finally:
             if not full_profile_stage_closed:
@@ -521,12 +567,17 @@ class ProjectRenderService:
             speaker_slots = self._speaker_slots(parsed_lines)
             portrait_paths: dict[str, Path] = {}
             portrait_hashes: dict[str, str] = {}
+            fingerprint_metadata: dict[str, Any] = {}
             for speaker, slot_index in speaker_slots.items():
                 portrait = self._resolve_character_portrait(speaker, slot_index, work_dir)
                 portrait_paths[speaker] = portrait
-                portrait_hashes[speaker] = file_sha256(portrait) if portrait.exists() else ""
+                if portrait.exists():
+                    portrait_hashes[speaker], fingerprint_metadata[f"portrait:{speaker}"] = cached_file_sha256(portrait)
+                else:
+                    portrait_hashes[speaker] = ""
 
-            background_hash = file_sha256(background_path)
+            background_hash, background_fingerprint_metadata = cached_file_sha256(background_path)
+            fingerprint_metadata["background"] = background_fingerprint_metadata
             background_mime_type = self._guess_mime_type(background_path)
             expected_artifacts = {
                 "render_plan": str(generated_job_artifact_dir(job_id) / "render_plan.json") if job_id is not None else str(work_dir / "render_plan.json"),
@@ -563,6 +614,7 @@ class ProjectRenderService:
                 preview_layout=render_layout,
                 render_engine="ffmpeg",
                 render_cache_schema_version=RENDER_CACHE_SCHEMA_VERSION,
+                asset_fingerprints=fingerprint_metadata,
             )
 
             with profiler.stage("tts.dialogue_synthesis_or_cache", segment_count=len(parsed_lines), speech_dir=speech_dir):
@@ -575,7 +627,7 @@ class ProjectRenderService:
                     profiler=profiler,
                     output_kind=output_kind,
                 )
-            self._emit_progress(progress_callback, "tts_ready", 46)
+            self._emit_progress(progress_callback, *render_progress_payload("tts_ready"))
 
             with profiler.stage("ffmpeg.wav_normalization", segment_count=len(segments)):
                 normalized_paths, normalized_keys = self._normalize_segment_wavs(
@@ -599,7 +651,7 @@ class ProjectRenderService:
                     job_id=job_id,
                     project_id=project_id,
                 )
-            self._emit_progress(progress_callback, "audio_ready", 55)
+            self._emit_progress(progress_callback, *render_progress_payload("audio_ready"))
 
             with profiler.stage("ffmpeg.background_normalization", duration_seconds=total_duration):
                 normalized_background_path, background_key = self._normalize_background_layer(
@@ -613,7 +665,7 @@ class ProjectRenderService:
                     cache_report=cache_report,
                     visual_dir=visual_dir,
                 )
-            self._emit_progress(progress_callback, "background_ready", 62)
+            self._emit_progress(progress_callback, *render_progress_payload("background_ready"))
 
             with profiler.stage("render.static_overlay_build", speaker_count=len(portrait_paths)):
                 static_overlay_path, static_overlay_key = self._build_static_overlay_layer(
@@ -637,20 +689,16 @@ class ProjectRenderService:
                     cache_report=cache_report,
                     visual_dir=visual_dir,
                 )
-            self._emit_progress(progress_callback, "timeline_ready", 70)
+            self._emit_progress(progress_callback, *render_progress_payload("timeline_ready"))
 
-            final_video_key = stable_hash(
-                {
-                    "version": RENDER_CACHE_SCHEMA_VERSION,
-                    "type": "final_video",
-                    "background_key": background_key,
-                    "static_overlay_key": static_overlay_key,
-                    "dynamic_overlay_key": dynamic_overlay_key,
-                    "composite_audio_key": composite_audio_key,
-                    "preset": preset.__dict__,
-                    "duration_seconds": round(total_duration, 3),
-                    "audio_bitrate": self.audio_export_bitrate,
-                }
+            final_video_key = final_video_cache_key(
+                background_key=background_key,
+                static_overlay_key=static_overlay_key,
+                dynamic_overlay_key=dynamic_overlay_key,
+                composite_audio_key=composite_audio_key,
+                preset=preset,
+                duration_seconds=total_duration,
+                audio_bitrate=self.audio_export_bitrate,
             )
             final_cache_path = cache.path("final_videos", final_video_key, ".mp4")
             elapsed = cache_report.timed()
@@ -662,6 +710,7 @@ class ProjectRenderService:
                     cache_path=final_cache_path,
                     job_path=final_output_path,
                     duration_seconds=elapsed(),
+                    metadata=build_final_render_cache_transfer_metadata(cache.last_transfer),
                 )
             else:
                 cache_report.record(
@@ -672,7 +721,7 @@ class ProjectRenderService:
                     job_path=final_output_path,
                     duration_seconds=elapsed(),
                 )
-                self._emit_progress(progress_callback, "encoding", 80)
+                self._emit_progress(progress_callback, *render_progress_payload("encoding"))
                 with profiler.stage(
                     "ffmpeg.final_video_render",
                     output_path=final_output_path,
@@ -697,11 +746,12 @@ class ProjectRenderService:
                     status="regenerated",
                     cache_path=final_cache_path,
                     job_path=final_output_path,
+                    metadata=build_final_render_cache_transfer_metadata(cache.last_transfer),
                 )
-            self._emit_progress(progress_callback, "encoded", 88)
+            self._emit_progress(progress_callback, *render_progress_payload("encoded"))
 
             final_video_audio_path: Path | None = None
-            debug_extraction = {"enabled": preset.debug_audio_extract, "skipped": not preset.debug_audio_extract}
+            debug_extraction = build_debug_audio_extraction_metadata(enabled=preset.debug_audio_extract)
             if preset.debug_audio_extract:
                 with profiler.stage("ffmpeg.final_audio_extract", final_mp4_path=final_output_path):
                     final_video_audio_path = self._extract_final_video_audio(
@@ -709,7 +759,11 @@ class ProjectRenderService:
                         job_id=job_id,
                         work_dir=work_dir,
                     )
-                    debug_extraction["artifact_path"] = str(final_video_audio_path) if final_video_audio_path else None
+                    debug_extraction = build_debug_audio_extraction_metadata(
+                        enabled=preset.debug_audio_extract,
+                        artifact_path=final_video_audio_path,
+                        include_artifact_path=True,
+                    )
 
             segment_metadata = [
                 self._segment_artifact_metadata(
@@ -761,33 +815,26 @@ class ProjectRenderService:
             cache_report_payload = cache_report.summary()
             cache_report_path.write_text(json.dumps(cache_report_payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
 
-            tts_result = {
-                "status": "completed",
-                "current_phase": "completed",
-                "provider_state": (segments[-1].provider_state or {}) if segments else {},
-                "segments": segment_metadata,
-                "assembly": assembly_metadata,
-                "render_settings": {"layout": render_layout},
-                "render_plan": {
-                    "path": str(plan_path),
-                    "artifact_url": generated_job_artifact_url(job_id, plan_path) if job_id is not None else None,
-                    "plan_key": plan.plan_key(),
-                },
-                "cache_report": {
-                    "path": str(cache_report_path),
-                    "artifact_url": generated_job_artifact_url(job_id, cache_report_path) if job_id is not None else None,
-                    "summary": cache_report_payload,
-                },
+            render_plan_metadata = {
+                "path": str(plan_path),
+                "artifact_url": generated_job_artifact_url(job_id, plan_path) if job_id is not None else None,
+                "plan_key": plan.plan_key(),
             }
-            selected_profiles = {
-                segment.speaker: {
-                    "provider_used": segment.provider_used,
-                    "voice_profile_id": segment.voice_profile_id,
-                    "voice": segment.voice,
-                    "fallback_used": segment.fallback_used,
-                }
-                for segment in segments
+            cache_report_metadata = {
+                "path": str(cache_report_path),
+                "artifact_url": generated_job_artifact_url(job_id, cache_report_path) if job_id is not None else None,
+                "summary": cache_report_payload,
             }
+            tts_result = build_tts_result_metadata(
+                provider_state=(segments[-1].provider_state or {}) if segments else {},
+                segment_metadata=segment_metadata,
+                assembly_metadata=assembly_metadata,
+                render_layout=render_layout,
+                current_phase="completed",
+                render_plan=render_plan_metadata,
+                cache_report=cache_report_metadata,
+            )
+            selected_profiles = build_selected_profile_summary(segments)
             profiler.add_context(
                 segment_count=len(segments),
                 video_duration_seconds=total_duration,
@@ -801,6 +848,7 @@ class ProjectRenderService:
                 tts_provider_state=tts_result["provider_state"],
                 selected_profiles=selected_profiles,
                 cache_statistics=cache_report_payload,
+                fast_preview_enabled=preset.mode == "draft",
             )
             full_profile_stage.__exit__(None, None, None)
             full_profile_stage_closed = True
@@ -812,11 +860,11 @@ class ProjectRenderService:
                     profiler.write_json(profile_path)
                 profile_artifact_url = generated_job_artifact_url(job_id, profile_path)
                 profile_summary = profiler.summary()
-            render_profile_metadata = {
-                "artifact_url": profile_artifact_url,
-                "summary": profile_summary,
-                "profile_path": str(generated_job_artifact_dir(job_id) / "generation_profile.json") if profile_artifact_url else None,
-            }
+            render_profile_metadata = build_render_profile_metadata(
+                artifact_url=profile_artifact_url,
+                summary=profile_summary,
+                profile_path=generated_job_artifact_dir(job_id) / "generation_profile.json" if job_id is not None else None,
+            )
             tts_result["render_profile"] = render_profile_metadata
 
             return {
@@ -827,53 +875,34 @@ class ProjectRenderService:
                 "status": "completed",
                 "created_at": datetime.now().isoformat(),
                 "processing_time_seconds": None,
-                "metadata": {
-                    "render_mode": "speaker_dialogue_ffmpeg",
-                    "render_engine": "ffmpeg",
-                    "voices": {
-                        segment.speaker: {
-                            "voice": segment.voice,
-                            "provider_used": segment.provider_used,
-                            "voice_profile_id": segment.voice_profile_id,
-                            "fallback_used": segment.fallback_used,
-                            "reference_audio_count": segment.reference_audio_count,
-                        }
-                        for segment in segments
+                "metadata": build_render_result_metadata(
+                    render_mode="speaker_dialogue_ffmpeg",
+                    render_engine="ffmpeg",
+                    segments=segments,
+                    tts_result=tts_result,
+                    render_layout=render_layout,
+                    performance={
+                        "fast_preview_enabled": preset.mode == "draft",
+                        "render_preset": preset.__dict__,
+                        "asset_fingerprints": fingerprint_metadata,
                     },
-                    "tts_result": tts_result,
-                    "render_settings": {"layout": render_layout},
-                    "preview_layout": render_layout,
-                    "render_profile": render_profile_metadata,
-                    "render_profile_artifact_url": profile_artifact_url,
-                    "render_plan_artifact_url": tts_result["render_plan"]["artifact_url"],
-                    "cache_report_artifact_url": tts_result["cache_report"]["artifact_url"],
-                    "cache_statistics": cache_report_payload,
-                    "render_assembly": assembly_metadata,
-                    "line_timing_seconds": [
-                        {
-                            "speaker": item["segment"].speaker,
-                            "text": item["segment"].text,
-                            "duration_seconds": item["duration_seconds"],
-                            "audio_path": item["segment"].audio_path,
-                            "normalized_audio_path": str(item["normalized_audio_path"]),
-                            "audio_path_used_for_final_assembly": str(item["normalized_audio_path"]),
-                            "artifact_url": segment_metadata[index].get("artifact_url"),
-                            "normalized_audio_artifact_url": segment_metadata[index].get("normalized_audio_artifact_url"),
-                            "provider_used": item["segment"].provider_used,
-                            "voice_profile_id": item["segment"].voice_profile_id,
-                            "fallback_used": item["segment"].fallback_used,
-                        }
-                        for index, item in enumerate(timed_segments)
-                    ],
-                    "render_fps": preset.fps,
-                    "render_resolution": {"width": preset.width, "height": preset.height},
-                    "character_scale": render_layout["character_scale"],
-                    "chat_font_size_px": render_layout["chat_font_size_px"],
-                    "ffmpeg_threads": self._ffmpeg_threads(),
-                    "encode_preset": preset.x264_preset,
-                    "crf": preset.crf,
-                    "debug_audio_extraction": debug_extraction,
-                },
+                    render_profile_metadata=render_profile_metadata,
+                    render_profile_artifact_url=profile_artifact_url,
+                    render_plan_artifact_url=tts_result["render_plan"]["artifact_url"],
+                    cache_report_artifact_url=tts_result["cache_report"]["artifact_url"],
+                    cache_statistics=cache_report_payload,
+                    assembly_metadata=assembly_metadata,
+                    timed_segments=timed_segments,
+                    segment_metadata=segment_metadata,
+                    render_fps=preset.fps,
+                    render_resolution={"width": preset.width, "height": preset.height},
+                    character_scale=render_layout["character_scale"],
+                    chat_font_size_px=render_layout["chat_font_size_px"],
+                    ffmpeg_threads=self._ffmpeg_threads(),
+                    encode_preset=preset.x264_preset,
+                    crf=preset.crf,
+                    debug_audio_extraction=debug_extraction,
+                ),
             }
         finally:
             if not full_profile_stage_closed:
@@ -881,43 +910,10 @@ class ProjectRenderService:
             shutil.rmtree(work_dir, ignore_errors=True)
 
     def _render_preset(self, output_kind: str) -> RenderPreset:
-        mode = output_kind if output_kind in {"preview", "draft", "final", "debug"} else "preview"
-        if mode == "draft":
-            return RenderPreset(
-                mode=mode,
-                width=min(settings.RENDER_PREVIEW_WIDTH, 720),
-                height=min(settings.RENDER_PREVIEW_HEIGHT, 1280),
-                fps=min(settings.RENDER_PREVIEW_FPS_CAP, 18),
-                x264_preset="ultrafast",
-                crf=max(settings.RENDER_PREVIEW_CRF, 28),
-            )
-        if mode == "preview":
-            return RenderPreset(
-                mode=mode,
-                width=settings.RENDER_PREVIEW_WIDTH,
-                height=settings.RENDER_PREVIEW_HEIGHT,
-                fps=settings.RENDER_PREVIEW_FPS_CAP,
-                x264_preset=settings.RENDER_PREVIEW_ENCODE_PRESET,
-                crf=settings.RENDER_PREVIEW_CRF,
-            )
-        return RenderPreset(
-            mode=mode,
-            width=settings.RENDER_EXPORT_WIDTH,
-            height=settings.RENDER_EXPORT_HEIGHT,
-            fps=settings.RENDER_EXPORT_FPS_CAP,
-            x264_preset=settings.RENDER_EXPORT_ENCODE_PRESET,
-            crf=settings.RENDER_EXPORT_CRF,
-            debug_audio_extract=mode == "debug",
-        )
+        return render_preset_for_output_kind(output_kind)
 
     def _speaker_slots(self, parsed_lines: list[dict]) -> dict[str, int]:
-        slots: dict[str, int] = {}
-        for index, line in enumerate(parsed_lines):
-            speaker = str(line.get("speaker") or f"Speaker {index + 1}").strip()
-            text = str(line.get("text") or "").strip()
-            if speaker and text and speaker not in slots:
-                slots[speaker] = len(slots)
-        return slots
+        return speaker_slots_from_lines(parsed_lines)
 
     def _guess_mime_type(self, path: Path) -> str:
         suffix = path.suffix.lower()
@@ -948,39 +944,7 @@ class ProjectRenderService:
             raise RuntimeError(exc.stderr or str(exc)) from exc
 
     def _voice_profile_cache_payload(self, voice_profile: dict[str, Any]) -> dict[str, Any]:
-        references = []
-        for item in voice_profile.get("reference_audios") or []:
-            if not isinstance(item, dict):
-                continue
-            references.append(
-                {
-                    "id": item.get("id"),
-                    "processed_sha256": item.get("processed_sha256"),
-                    "sha256": item.get("sha256"),
-                    "processed_storage_path": item.get("processed_storage_path"),
-                    "storage_path": item.get("storage_path"),
-                    "validation_status": item.get("validation_status"),
-                }
-            )
-        return {
-            "id": voice_profile.get("id"),
-            "provider": voice_profile.get("provider"),
-            "requested_provider": voice_profile.get("requested_provider"),
-            "fallback_allowed": voice_profile.get("fallback_allowed"),
-            "fallback_provider": voice_profile.get("fallback_provider"),
-            "voice": voice_profile.get("voice") or voice_profile.get("espeak_voice"),
-            "language": voice_profile.get("language"),
-            "model_id": voice_profile.get("model_id"),
-            "model_checkpoint_path": voice_profile.get("model_checkpoint_path"),
-            "character_slug": voice_profile.get("character_slug"),
-            "reference_dataset_id": voice_profile.get("reference_dataset_id"),
-            "selected_recipe": dict(voice_profile.get("selected_recipe") or {}),
-            "controls": dict(voice_profile.get("controls") or {}),
-            "style": dict(voice_profile.get("style") or {}),
-            "fallback_voice_settings": dict(voice_profile.get("fallback_voice_settings") or {}),
-            "provider_metadata": dict(voice_profile.get("provider_metadata") or {}),
-            "reference_audios": references,
-        }
+        return voice_profile_cache_payload(voice_profile)
 
     def _synthesize_segments_with_render_cache(
         self,
@@ -1001,23 +965,20 @@ class ProjectRenderService:
             speaker = str(line.get("speaker") or f"Speaker {index + 1}").strip()
             text = str(line.get("text") or "").strip()
             caption_text = str(line.get("caption_text") or text).strip()
+            line_id = str(line.get("line_id") or "").strip() or None
             if not text:
                 continue
             slot_index = slot_map.setdefault(speaker, len(slot_map))
             voice_profile = voice_profile_map[speaker]
             requested_provider = voice_profile.get("requested_provider") or voice_profile.get("provider")
             fallback_allowed = bool(voice_profile.get("fallback_allowed", True))
-            cache_key = stable_hash(
-                {
-                    "version": RENDER_CACHE_SCHEMA_VERSION,
-                    "type": "tts_segment",
-                    "speaker": speaker,
-                    "text": text,
-                    "voice_profile": self._voice_profile_cache_payload(voice_profile),
-                    "requested_provider": requested_provider,
-                    "fallback_allowed": fallback_allowed,
-                    "output_kind": output_kind,
-                }
+            cache_key = tts_segment_cache_key(
+                speaker=speaker,
+                text=text,
+                voice_profile=voice_profile,
+                requested_provider=requested_provider,
+                fallback_allowed=fallback_allowed,
+                output_kind=output_kind,
             )
             output_path = output_dir / f"{index:03d}_{self._slugify(speaker)}_{cache_key[:12]}.wav"
             cache_path = cache.path("tts_segments", cache_key, ".wav")
@@ -1031,7 +992,11 @@ class ProjectRenderService:
                     cache_path=cache_path,
                     job_path=output_path,
                     duration_seconds=elapsed(),
-                    metadata={"speaker": speaker, "provider_used": metadata.get("provider_used")},
+                    metadata=build_tts_segment_cache_transfer_metadata(
+                        cache.last_transfer,
+                        speaker=speaker,
+                        provider_used=metadata.get("provider_used"),
+                    ),
                 )
                 segments.append(
                     SpeechSegment(
@@ -1042,6 +1007,7 @@ class ProjectRenderService:
                         audio_path=str(output_path),
                         duration_seconds=float(metadata.get("duration_seconds") or self._wav_duration_seconds(output_path)),
                         caption_text=caption_text,
+                        line_id=line_id,
                         voice_profile_id=str(metadata.get("voice_profile_id") or voice_profile.get("id") or ""),
                         provider_used=str(metadata.get("provider_used") or requested_provider or "espeak"),
                         fallback_used=bool(metadata.get("fallback_used", False)),
@@ -1066,7 +1032,7 @@ class ProjectRenderService:
                 cache_path=cache_path,
                 job_path=output_path,
                 duration_seconds=elapsed(),
-                metadata={"speaker": speaker},
+                metadata=build_tts_segment_cache_miss_metadata(speaker=speaker),
             )
             with profiler.stage(
                 "tts.segment_synthesis",
@@ -1098,6 +1064,7 @@ class ProjectRenderService:
                 "recipe_used": result.recipe_used or {},
                 "golden_preview_wav": result.golden_preview_wav,
                 "caption_text": caption_text,
+                "line_id": line_id,
                 "created_at": datetime.utcnow().isoformat(),
             }
             cache.store(output_path, cache_path, metadata)
@@ -1107,7 +1074,11 @@ class ProjectRenderService:
                 status="regenerated",
                 cache_path=cache_path,
                 job_path=output_path,
-                metadata={"speaker": speaker, "provider_used": result.provider_used},
+                metadata=build_tts_segment_cache_transfer_metadata(
+                    cache.last_transfer,
+                    speaker=speaker,
+                    provider_used=result.provider_used,
+                ),
             )
             segments.append(
                 SpeechSegment(
@@ -1118,6 +1089,7 @@ class ProjectRenderService:
                     audio_path=str(output_path),
                     duration_seconds=result.duration_seconds,
                     caption_text=caption_text,
+                    line_id=line_id,
                     voice_profile_id=result.voice_profile_id,
                     provider_used=result.provider_used,
                     fallback_used=result.fallback_used,
@@ -1156,17 +1128,11 @@ class ProjectRenderService:
         for index, segment in enumerate(segments):
             source_path = Path(segment.audio_path)
             source_identity = segment.cache_key or file_sha256(source_path)
-            cache_key = stable_hash(
-                {
-                    "version": RENDER_CACHE_SCHEMA_VERSION,
-                    "type": "normalized_audio",
-                    "source_identity": source_identity,
-                    "format": {"codec": "pcm_s16le", "sample_rate": self.audio_export_fps, "channels": 2},
-                }
-            )
+            cache_key = normalized_audio_cache_key(source_identity, self.audio_export_fps)
             cache_path = cache.path("normalized_audio", cache_key, ".wav")
             output_path = normalized_dir / f"{index:03d}_{self._slugify(segment.speaker)}_{cache_key[:12]}.wav"
             elapsed = cache_report.timed()
+            metadata = cache.read_metadata(cache_path)
             if cache.materialize(cache_path, output_path):
                 cache_report.record(
                     artifact_type="normalized_audio",
@@ -1175,8 +1141,14 @@ class ProjectRenderService:
                     cache_path=cache_path,
                     job_path=output_path,
                     duration_seconds=elapsed(),
+                    metadata=build_normalized_audio_cache_transfer_metadata(
+                        cache.last_transfer,
+                        duration_seconds=metadata.get("duration_seconds"),
+                        normalization_skipped=metadata.get("normalization_skipped", False),
+                    ),
                 )
                 object.__setattr__(segment, "normalized_cache_hit", True)
+                duration_seconds = float(metadata.get("duration_seconds") or self._wav_duration_seconds(output_path))
             else:
                 cache_report.record(
                     artifact_type="normalized_audio",
@@ -1186,37 +1158,70 @@ class ProjectRenderService:
                     job_path=output_path,
                     duration_seconds=elapsed(),
                 )
-                command = [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    str(source_path),
-                    "-acodec",
-                    "pcm_s16le",
-                    "-ar",
-                    str(self.audio_export_fps),
-                    "-ac",
-                    "2",
-                    str(output_path),
-                ]
-                self._run_ffmpeg(command)
-                cache.store(output_path, cache_path, {"cache_key": cache_key, "source_path": str(source_path)})
+                normalization_skipped = self._wav_matches_render_format(source_path)
+                if normalization_skipped:
+                    duration_seconds = self._wav_duration_seconds(source_path)
+                    cache.store(
+                        source_path,
+                        cache_path,
+                        {
+                            "cache_key": cache_key,
+                            "source_path": str(source_path),
+                            "duration_seconds": duration_seconds,
+                            "normalization_skipped": True,
+                        },
+                    )
+                    cache.materialize(cache_path, output_path)
+                else:
+                    command = [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        str(source_path),
+                        "-acodec",
+                        "pcm_s16le",
+                        "-ar",
+                        str(self.audio_export_fps),
+                        "-ac",
+                        "2",
+                        str(output_path),
+                    ]
+                    self._run_ffmpeg(command)
+                    duration_seconds = self._wav_duration_seconds(output_path)
+                    cache.store(
+                        output_path,
+                        cache_path,
+                        {
+                            "cache_key": cache_key,
+                            "source_path": str(source_path),
+                            "duration_seconds": duration_seconds,
+                            "normalization_skipped": False,
+                        },
+                    )
                 cache_report.record(
                     artifact_type="normalized_audio",
                     cache_key=cache_key,
                     status="regenerated",
                     cache_path=cache_path,
                     job_path=output_path,
+                    metadata=build_normalized_audio_cache_transfer_metadata(
+                        cache.last_transfer,
+                        duration_seconds=duration_seconds,
+                        normalization_skipped=normalization_skipped,
+                    ),
                 )
                 object.__setattr__(segment, "normalized_cache_hit", False)
             object.__setattr__(segment, "normalized_audio_path", str(output_path))
             object.__setattr__(segment, "normalized_cache_key", cache_key)
+            object.__setattr__(segment, "normalized_duration_seconds", duration_seconds)
             normalized_paths.append(output_path)
             normalized_keys.append(cache_key)
         return normalized_paths, normalized_keys
 
     def _build_timed_segments_with_normalized_audio(self, segments: list[SpeechSegment], normalized_paths: list[Path]) -> list[dict]:
-        timed_segments: list[dict] = []
+        validated_segments: list[SpeechSegment] = []
+        validated_paths: list[Path] = []
+        durations: list[float] = []
         for segment, normalized_path in zip(segments, normalized_paths, strict=False):
             if not normalized_path.exists():
                 raise TTSProviderError(
@@ -1226,9 +1231,10 @@ class ProjectRenderService:
                     provider_failures=segment.provider_failures or {},
                     suggested_action="Regenerate the video and inspect normalized segment artifact storage.",
                 )
-            duration = max(self._wav_duration_seconds(normalized_path), segment.duration_seconds, 0.6)
-            timed_segments.append({"segment": segment, "duration_seconds": duration, "normalized_audio_path": normalized_path})
-        return timed_segments
+            validated_segments.append(segment)
+            validated_paths.append(normalized_path)
+            durations.append(float(getattr(segment, "normalized_duration_seconds", 0.0) or 0.0))
+        return build_timed_segments_from_durations(validated_segments, durations, validated_paths)
 
     def _build_composite_audio_track_cached(
         self,
@@ -1243,17 +1249,7 @@ class ProjectRenderService:
     ) -> tuple[Path, str]:
         audio_dir.mkdir(parents=True, exist_ok=True)
         composite_audio_path = audio_dir / "dialogue_composite.wav"
-        cache_key = stable_hash(
-            {
-                "version": RENDER_CACHE_SCHEMA_VERSION,
-                "type": "composite_audio",
-                "segments": [
-                    {"key": key, "duration_seconds": round(item["duration_seconds"], 3)}
-                    for key, item in zip(normalized_keys, timed_segments, strict=False)
-                ],
-                "format": {"codec": "pcm_s16le", "sample_rate": self.audio_export_fps, "channels": 2},
-            }
-        )
+        cache_key = composite_audio_cache_key(normalized_keys, timed_segments, self.audio_export_fps)
         cache_path = cache.path("composite_audio", cache_key, ".wav")
         elapsed = cache_report.timed()
         if cache.materialize(cache_path, composite_audio_path):
@@ -1264,16 +1260,16 @@ class ProjectRenderService:
                 cache_path=cache_path,
                 job_path=composite_audio_path,
                 duration_seconds=elapsed(),
+                metadata=build_composite_audio_cache_transfer_metadata(cache.last_transfer),
             )
             return composite_audio_path, cache_key
 
         concat_list_path = audio_dir / "dialogue_segments.txt"
-        concat_lines = []
+        audio_paths: list[Path] = []
         for item in timed_segments:
             audio_path = Path(item["normalized_audio_path"]).resolve()
-            escaped_audio_path = str(audio_path).replace("'", "'\\''")
-            concat_lines.append(f"file '{escaped_audio_path}'")
-        concat_list_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+            audio_paths.append(audio_path)
+        concat_list_path.write_text(ffmpeg_concat_file_contents(audio_paths), encoding="utf-8")
         cache_report.record(
             artifact_type="composite_audio",
             cache_key=cache_key,
@@ -1290,23 +1286,11 @@ class ProjectRenderService:
             composite_audio_path,
         )
         self._run_ffmpeg(
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_list_path),
-                "-acodec",
-                "pcm_s16le",
-                "-ar",
-                str(self.audio_export_fps),
-                "-ac",
-                "2",
-                str(composite_audio_path),
-            ]
+            concat_demuxer_audio_command(
+                concat_list_path=concat_list_path,
+                output_path=composite_audio_path,
+                sample_rate=self.audio_export_fps,
+            )
         )
         cache.store(composite_audio_path, cache_path, {"cache_key": cache_key, "segment_count": len(timed_segments)})
         cache_report.record(
@@ -1315,6 +1299,7 @@ class ProjectRenderService:
             status="regenerated",
             cache_path=cache_path,
             job_path=composite_audio_path,
+            metadata=build_composite_audio_cache_transfer_metadata(cache.last_transfer),
         )
         return composite_audio_path, cache_key
 
@@ -1331,16 +1316,14 @@ class ProjectRenderService:
         cache_report: RenderCacheReport,
         visual_dir: Path,
     ) -> tuple[Path, str]:
-        cache_key = stable_hash(
-            {
-                "version": RENDER_CACHE_SCHEMA_VERSION,
-                "type": "background",
-                "source_hash": background_hash,
-                "mime_type": background_mime_type,
-                "style_preset": style_preset,
-                "preset": preset.__dict__,
-                "duration_seconds": round(duration_seconds, 3),
-            }
+        cache_duration_seconds = self._background_cache_duration_seconds(duration_seconds, preset)
+        cache_key = background_cache_key(
+            background_hash=background_hash,
+            background_mime_type=background_mime_type,
+            style_preset=style_preset,
+            preset=preset,
+            cache_duration_seconds=cache_duration_seconds,
+            requested_duration_seconds=duration_seconds,
         )
         cache_path = cache.path("backgrounds", cache_key, ".mp4")
         output_path = visual_dir / "background_normalized.mp4"
@@ -1353,47 +1336,63 @@ class ProjectRenderService:
                 cache_path=cache_path,
                 job_path=output_path,
                 duration_seconds=elapsed(),
+                metadata=build_background_cache_transfer_metadata(
+                    cache.last_transfer,
+                    cache_duration_seconds=cache_duration_seconds,
+                ),
             )
             return output_path, cache_key
 
-        scale_crop = f"scale={preset.width}:{preset.height}:force_original_aspect_ratio=increase,crop={preset.width}:{preset.height},fps={preset.fps}"
-        if style_preset == "blur":
-            video_filter = f"{scale_crop},boxblur=20:1,format=yuv420p"
-        elif style_preset == "grayscale":
-            video_filter = f"{scale_crop},hue=s=0,format=yuv420p"
-        else:
-            video_filter = f"{scale_crop},format=yuv420p"
-        command = ["ffmpeg", "-y"]
-        if self._is_image_background(background_mime_type, background_path):
-            command.extend(["-loop", "1", "-i", str(background_path), "-t", f"{duration_seconds:.3f}"])
-        else:
-            command.extend(["-stream_loop", "-1", "-i", str(background_path), "-t", f"{duration_seconds:.3f}"])
-        command.extend(
-            [
-                "-vf",
-                video_filter,
-                "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                preset.x264_preset,
-                "-crf",
-                str(preset.crf),
-                "-pix_fmt",
-                "yuv420p",
-                "-threads",
-                str(self._ffmpeg_threads()),
-                str(output_path),
-            ]
+        command = background_normalization_ffmpeg_command(
+            background_path=background_path,
+            output_path=output_path,
+            style_preset=style_preset,
+            preset=preset,
+            duration_seconds=cache_duration_seconds,
+            is_image_background=self._is_image_background(background_mime_type, background_path),
+            ffmpeg_threads=self._ffmpeg_threads(),
         )
-        cache_report.record(artifact_type="background", cache_key=cache_key, status="miss", cache_path=cache_path, job_path=output_path)
+        cache_report.record(
+            artifact_type="background",
+            cache_key=cache_key,
+            status="miss",
+            cache_path=cache_path,
+            job_path=output_path,
+            metadata={
+                "requested_duration_seconds": duration_seconds,
+                "cache_duration_seconds": cache_duration_seconds,
+                "duration_bucketed": cache_duration_seconds != duration_seconds,
+            },
+        )
         self._run_ffmpeg(command)
-        cache.store(output_path, cache_path, {"cache_key": cache_key, "source_path": str(background_path)})
-        cache_report.record(artifact_type="background", cache_key=cache_key, status="regenerated", cache_path=cache_path, job_path=output_path)
+        cache.store(
+            output_path,
+            cache_path,
+            {
+                "cache_key": cache_key,
+                "source_path": str(background_path),
+                "requested_duration_seconds": duration_seconds,
+                "cache_duration_seconds": cache_duration_seconds,
+            },
+        )
+        cache_report.record(
+            artifact_type="background",
+            cache_key=cache_key,
+            status="regenerated",
+            cache_path=cache_path,
+            job_path=output_path,
+            metadata=build_background_cache_transfer_metadata(
+                cache.last_transfer,
+                cache_duration_seconds=cache_duration_seconds,
+            ),
+        )
         return output_path, cache_key
 
+    def _background_cache_duration_seconds(self, duration_seconds: float, preset: RenderPreset) -> float:
+        return background_cache_duration_seconds(duration_seconds, preset)
+
     def _scaled_box(self, box: tuple[int, int], preset: RenderPreset) -> tuple[int, int]:
-        return (int(round(box[0] * preset.width / self.CANVAS_WIDTH)), int(round(box[1] * preset.height / self.CANVAS_HEIGHT)))
+        return scale_box(box, preset, canvas_width=self.CANVAS_WIDTH, canvas_height=self.CANVAS_HEIGHT)
 
     def _build_static_overlay_layer(
         self,
@@ -1407,39 +1406,48 @@ class ProjectRenderService:
         cache_report: RenderCacheReport,
         visual_dir: Path,
     ) -> tuple[Path, str]:
-        cast = list(speaker_slots.items())[:2]
-        cache_key = stable_hash(
-            {
-                "version": RENDER_CACHE_SCHEMA_VERSION,
-                "type": "static_overlay",
-                "cast": [
-                    {"speaker": speaker, "slot": slot, "portrait_hash": portrait_hashes.get(speaker)}
-                    for speaker, slot in cast
-                ],
-                "layout": render_layout,
-                "preset": preset.__dict__,
-            }
-        )
+        cast = static_overlay_cast(speaker_slots)
+        cache_key = static_overlay_cache_key(cast, portrait_hashes, render_layout, preset)
         cache_path = cache.path("overlays", cache_key, ".png")
         output_path = visual_dir / "static_overlay.png"
         elapsed = cache_report.timed()
         if cache.materialize(cache_path, output_path):
-            cache_report.record(artifact_type="static_overlay", cache_key=cache_key, status="materialized_from_cache", cache_path=cache_path, job_path=output_path, duration_seconds=elapsed())
+            cache_report.record(
+                artifact_type="static_overlay",
+                cache_key=cache_key,
+                status="materialized_from_cache",
+                cache_path=cache_path,
+                job_path=output_path,
+                duration_seconds=elapsed(),
+                metadata=build_overlay_cache_transfer_metadata(cache.last_transfer),
+            )
             return output_path, cache_key
         image = Image.new("RGBA", (preset.width, preset.height), (0, 0, 0, 0))
-        character_scale = float(render_layout["character_scale"])
-        for speaker, slot_index in cast:
-            portrait = self._open_portrait_image(portrait_paths[speaker], speaker, slot_index)
-            base_height = int(round(self.BASE_HEIGHT * character_scale * preset.height / self.CANVAS_HEIGHT))
-            ratio = base_height / max(portrait.height, 1)
-            portrait = portrait.resize((max(1, int(portrait.width * ratio)), base_height))
-            alpha = portrait.getchannel("A").point(lambda value: int(value * 0.26))
+        portrait_image_cache: dict[tuple[str, str, int], Image.Image] = {}
+        for entry in static_overlay_portrait_entries(cast, render_layout, preset):
+            speaker = str(entry["speaker"])
+            slot_index = int(entry["slot_index"])
+            portrait = self._resized_portrait_image(
+                portrait_paths[speaker],
+                speaker,
+                slot_index,
+                portrait_hashes.get(speaker, ""),
+                int(entry["height"]),
+                portrait_image_cache,
+            )
+            alpha = portrait.getchannel("A").point(lambda value: int(value * float(entry["alpha"])))
             portrait.putalpha(alpha)
-            position = self._scaled_box(self.BASE_POSITIONS[min(slot_index, 1)], preset)
-            image.alpha_composite(portrait, position)
+            image.alpha_composite(portrait, entry["position"])
         image.save(output_path)
         cache.store(output_path, cache_path, {"cache_key": cache_key})
-        cache_report.record(artifact_type="static_overlay", cache_key=cache_key, status="regenerated", cache_path=cache_path, job_path=output_path)
+        cache_report.record(
+            artifact_type="static_overlay",
+            cache_key=cache_key,
+            status="regenerated",
+            cache_path=cache_path,
+            job_path=output_path,
+            metadata=build_overlay_cache_transfer_metadata(cache.last_transfer),
+        )
         return output_path, cache_key
 
     def _build_dynamic_frame(
@@ -1453,41 +1461,48 @@ class ProjectRenderService:
         cache: RenderCache,
         cache_report: RenderCacheReport,
         visual_dir: Path,
+        portrait_image_cache: dict[tuple[str, str, int], Image.Image] | None = None,
     ) -> tuple[Path, str]:
-        cache_key = stable_hash(
-            {
-                "version": RENDER_CACHE_SCHEMA_VERSION,
-                "type": "dynamic_frame",
-                "speaker": segment.speaker,
-                "slot": segment.slot_index,
-                "text": segment.text,
-                "portrait_hash": portrait_hash,
-                "layout": render_layout,
-                "preset": preset.__dict__,
-            }
-        )
+        cache_key = dynamic_frame_cache_key(segment, portrait_hash, render_layout, preset)
         cache_path = cache.path("overlays", cache_key, ".png")
         output_path = visual_dir / f"frame_{cache_key[:16]}.png"
         if cache.materialize(cache_path, output_path):
-            cache_report.record(artifact_type="dynamic_frame", cache_key=cache_key, status="materialized_from_cache", cache_path=cache_path, job_path=output_path)
+            cache_report.record(
+                artifact_type="dynamic_frame",
+                cache_key=cache_key,
+                status="materialized_from_cache",
+                cache_path=cache_path,
+                job_path=output_path,
+                metadata=build_overlay_cache_transfer_metadata(cache.last_transfer),
+            )
             return output_path, cache_key
         image = Image.new("RGBA", (preset.width, preset.height), (0, 0, 0, 0))
-        portrait = self._open_portrait_image(portrait_path, segment.speaker, segment.slot_index)
-        active_height = int(round(self.ACTIVE_HEIGHT * float(render_layout["character_scale"]) * preset.height / self.CANVAS_HEIGHT))
-        ratio = active_height / max(portrait.height, 1)
-        portrait = portrait.resize((max(1, int(portrait.width * ratio)), active_height))
-        position = self._scaled_box(self.ACTIVE_POSITIONS[min(segment.slot_index, 1)], preset)
-        image.alpha_composite(portrait, position)
+        composition = dynamic_frame_composition_payload(segment.slot_index, render_layout, preset)
+        portrait_payload = composition["portrait"]
+        portrait = self._resized_portrait_image(
+            portrait_path,
+            segment.speaker,
+            segment.slot_index,
+            portrait_hash,
+            int(portrait_payload["height"]),
+            portrait_image_cache,
+        )
+        image.alpha_composite(portrait, portrait_payload["position"])
 
-        caption = self._dialogue_card_image(segment, chat_font_size_px=int(render_layout["chat_font_size_px"]))
-        caption_width = int(round(900 * preset.width / self.CANVAS_WIDTH))
-        caption_height = int(round(380 * preset.height / self.CANVAS_HEIGHT))
-        caption = caption.resize((caption_width, caption_height))
-        caption_position = self._scaled_box((90, 1320), preset)
-        image.alpha_composite(caption, caption_position)
+        caption_payload = composition["caption"]
+        caption = self._dialogue_card_image(segment, chat_font_size_px=int(caption_payload["font_size_px"]))
+        caption = caption.resize(caption_payload["size"])
+        image.alpha_composite(caption, caption_payload["position"])
         image.save(output_path)
         cache.store(output_path, cache_path, {"cache_key": cache_key})
-        cache_report.record(artifact_type="dynamic_frame", cache_key=cache_key, status="regenerated", cache_path=cache_path, job_path=output_path)
+        cache_report.record(
+            artifact_type="dynamic_frame",
+            cache_key=cache_key,
+            status="regenerated",
+            cache_path=cache_path,
+            job_path=output_path,
+            metadata=build_overlay_cache_transfer_metadata(cache.last_transfer),
+        )
         return output_path, cache_key
 
     def _build_dynamic_overlay_layer(
@@ -1503,6 +1518,7 @@ class ProjectRenderService:
         visual_dir: Path,
     ) -> tuple[Path, str]:
         frame_entries = []
+        portrait_image_cache: dict[tuple[str, str, int], Image.Image] = {}
         for item in timed_segments:
             segment: SpeechSegment = item["segment"]
             frame_path, frame_key = self._build_dynamic_frame(
@@ -1514,51 +1530,42 @@ class ProjectRenderService:
                 cache=cache,
                 cache_report=cache_report,
                 visual_dir=visual_dir,
+                portrait_image_cache=portrait_image_cache,
             )
             frame_entries.append({"path": frame_path, "key": frame_key, "duration_seconds": item["duration_seconds"]})
-        cache_key = stable_hash(
-            {
-                "version": RENDER_CACHE_SCHEMA_VERSION,
-                "type": "dynamic_overlay",
-                "frames": [{"key": item["key"], "duration_seconds": round(item["duration_seconds"], 3)} for item in frame_entries],
-                "preset": preset.__dict__,
-            }
-        )
+        cache_key = dynamic_overlay_cache_key(frame_entries, preset)
         cache_path = cache.path("overlays", cache_key, ".mov")
         output_path = visual_dir / "dynamic_overlay.mov"
         elapsed = cache_report.timed()
         if cache.materialize(cache_path, output_path):
-            cache_report.record(artifact_type="dynamic_overlay", cache_key=cache_key, status="materialized_from_cache", cache_path=cache_path, job_path=output_path, duration_seconds=elapsed())
+            cache_report.record(
+                artifact_type="dynamic_overlay",
+                cache_key=cache_key,
+                status="materialized_from_cache",
+                cache_path=cache_path,
+                job_path=output_path,
+                duration_seconds=elapsed(),
+                metadata=build_overlay_cache_transfer_metadata(cache.last_transfer),
+            )
             return output_path, cache_key
         concat_list = visual_dir / "dynamic_frames.txt"
-        lines: list[str] = []
-        for entry in frame_entries:
-            escaped = str(Path(entry["path"]).resolve()).replace("'", "'\\''")
-            lines.append(f"file '{escaped}'")
-            lines.append(f"duration {float(entry['duration_seconds']):.3f}")
-        if frame_entries:
-            escaped = str(Path(frame_entries[-1]["path"]).resolve()).replace("'", "'\\''")
-            lines.append(f"file '{escaped}'")
-        concat_list.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        concat_list.write_text(dynamic_overlay_concat_list_contents(frame_entries), encoding="utf-8")
         self._run_ffmpeg(
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_list),
-                "-vf",
-                f"fps={preset.fps},format=rgba",
-                "-c:v",
-                "qtrle",
-                str(output_path),
-            ]
+            dynamic_overlay_ffmpeg_command(
+                concat_list_path=concat_list,
+                output_path=output_path,
+                preset=preset,
+            )
         )
         cache.store(output_path, cache_path, {"cache_key": cache_key, "frame_count": len(frame_entries)})
-        cache_report.record(artifact_type="dynamic_overlay", cache_key=cache_key, status="regenerated", cache_path=cache_path, job_path=output_path)
+        cache_report.record(
+            artifact_type="dynamic_overlay",
+            cache_key=cache_key,
+            status="regenerated",
+            cache_path=cache_path,
+            job_path=output_path,
+            metadata=build_overlay_cache_transfer_metadata(cache.last_transfer),
+        )
         return output_path, cache_key
 
     def _build_final_video_ffmpeg(
@@ -1572,46 +1579,17 @@ class ProjectRenderService:
         preset: RenderPreset,
         duration_seconds: float,
     ) -> None:
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(background_path),
-            "-loop",
-            "1",
-            "-i",
-            str(static_overlay_path),
-            "-i",
-            str(dynamic_overlay_path),
-            "-i",
-            str(audio_path),
-            "-filter_complex",
-            "[0:v][1:v]overlay=0:0:format=auto[tmp];[tmp][2:v]overlay=0:0:format=auto[v]",
-            "-map",
-            "[v]",
-            "-map",
-            "3:a",
-            "-t",
-            f"{duration_seconds:.3f}",
-            "-c:v",
-            "libx264",
-            "-preset",
-            preset.x264_preset,
-            "-crf",
-            str(preset.crf),
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            self.audio_export_bitrate,
-            "-movflags",
-            "+faststart",
-            "-threads",
-            str(self._ffmpeg_threads()),
-            "-shortest",
-            str(output_path),
-        ]
+        command = final_video_ffmpeg_command(
+            background_path=background_path,
+            static_overlay_path=static_overlay_path,
+            dynamic_overlay_path=dynamic_overlay_path,
+            audio_path=audio_path,
+            output_path=output_path,
+            preset=preset,
+            duration_seconds=duration_seconds,
+            audio_bitrate=self.audio_export_bitrate,
+            ffmpeg_threads=self._ffmpeg_threads(),
+        )
         self._run_ffmpeg(command)
 
     def _open_portrait_image(self, portrait_path: Path, speaker: str, slot_index: int) -> Image.Image:
@@ -1621,20 +1599,40 @@ class ProjectRenderService:
             logger.warning("Could not open portrait image %s; using generated fallback for %s", portrait_path, speaker)
             return Image.open(self._build_generated_portrait(speaker, slot_index, portrait_path.parent)).convert("RGBA")
 
+    def _resized_portrait_image(
+        self,
+        portrait_path: Path,
+        speaker: str,
+        slot_index: int,
+        portrait_hash: str,
+        target_height: int,
+        cache: dict[tuple[str, str, int], Image.Image] | None,
+    ) -> Image.Image:
+        cache_key = (str(portrait_path), portrait_hash, target_height)
+        if cache is not None and cache_key in cache:
+            return cache[cache_key].copy()
+        portrait = self._open_portrait_image(portrait_path, speaker, slot_index)
+        resized = portrait.resize(portrait_resize_dimensions(portrait.width, portrait.height, target_height))
+        if cache is not None:
+            cache[cache_key] = resized.copy()
+        return resized
+
     def _dialogue_card_image(self, segment: SpeechSegment, *, chat_font_size_px: int = 18) -> Image.Image:
         palette = self._speaker_palette(segment.slot_index)
-        image = Image.new("RGBA", (900, 380), (0, 0, 0, 0))
+        layout = dialogue_card_layout_payload(
+            speaker=segment.speaker,
+            text=segment.caption_text or segment.text,
+            chat_font_size_px=chat_font_size_px,
+        )
+        image = Image.new("RGBA", layout["size"], (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((0, 0, 900, 380), radius=48, fill=(6, 10, 18, 228))
-        draw.rounded_rectangle((0, 0, 900, 22), radius=22, fill=palette["accent"])
-        label_font = self._load_font(max(24, int(chat_font_size_px * 1.45)))
-        body_font = self._load_font(max(28, int(chat_font_size_px * 2)))
-        draw.text((70, 74), segment.speaker.upper(), fill=palette["accent"], font=label_font)
-        wrapped_lines = textwrap.wrap(segment.caption_text or segment.text, width=24)[:4]
-        y = 138
-        for line in wrapped_lines:
-            draw.text((70, y), line, fill=(245, 248, 255, 255), font=body_font)
-            y += 64
+        draw.rounded_rectangle(layout["background"]["box"], radius=layout["background"]["radius"], fill=layout["background"]["fill"])
+        draw.rounded_rectangle(layout["accent_bar"]["box"], radius=layout["accent_bar"]["radius"], fill=palette["accent"])
+        label_font = self._load_font(layout["label"]["font_size"])
+        body_font = self._load_font(layout["body"]["font_size"])
+        draw.text(layout["label"]["position"], layout["label"]["text"], fill=palette["accent"], font=label_font)
+        for line in layout["body"]["lines"]:
+            draw.text(line["position"], line["text"], fill=layout["body"]["fill"], font=body_font)
         return image
 
     def _segment_artifact_metadata(
@@ -1646,68 +1644,15 @@ class ProjectRenderService:
         job_id: int | None,
         audio_path_used_for_final_assembly: str | None = None,
     ) -> dict:
-        segment: SpeechSegment = item["segment"]
-        audio_path = Path(segment.audio_path)
-        manifest_entry = dict(((voice_manifest or {}).get("speakers") or {}).get(segment.speaker) or {})
-        voice_profile = dict(manifest_entry.get("voice_profile") or {})
-        provider_metadata = dict(voice_profile.get("provider_metadata") or {})
-        reference_artifacts = []
-        for reference in voice_profile.get("reference_audios") or []:
-            if not isinstance(reference, dict):
-                continue
-            reference_artifacts.append(
-                {
-                    "id": reference.get("id"),
-                    "original_storage_path": reference.get("original_storage_path"),
-                    "processed_storage_path": reference.get("processed_storage_path") or reference.get("storage_path"),
-                    "processed_sha256": reference.get("processed_sha256"),
-                    "validation_status": reference.get("validation_status"),
-                }
-            )
-        final_audio_path = audio_path_used_for_final_assembly or str(audio_path)
-        payload = {
-            "segment_index": index,
-            "segment_id": f"{index:03d}_{self._slugify(segment.speaker)}",
-            "speaker": segment.speaker,
-            "text": segment.text,
-            "voice_profile_id": segment.voice_profile_id,
-            "voice_profile_name": voice_profile.get("display_name") or manifest_entry.get("character_display_name"),
-            "tts_provider": segment.provider_used,
-            "provider_used": segment.provider_used,
-            "fallback_used": segment.fallback_used,
-            "fallback_reason": segment.fallback_reason,
-            "provider_failures": segment.provider_failures or {},
-            "local_file_path": str(audio_path),
-            "audio_path": str(audio_path),
-            "audio_path_used_for_final_assembly": final_audio_path,
-            "used_for_final_assembly": final_audio_path == str(audio_path),
-            "artifact_url": generated_job_artifact_url(job_id, audio_path) if job_id is not None else None,
-            "duration_seconds": item["duration_seconds"],
-            "reference_audio_count": segment.reference_audio_count,
-            "voice_profile_settings": {
-                "provider": voice_profile.get("provider"),
-                "model_checkpoint_path": voice_profile.get("model_checkpoint_path"),
-                "reference_dataset_id": voice_profile.get("reference_dataset_id"),
-                "selected_recipe": dict(segment.recipe_used or voice_profile.get("selected_recipe") or {}),
-                "calibration_score": voice_profile.get("calibration_score"),
-                "last_verified_render_job_id": voice_profile.get("last_verified_render_job_id"),
-                "base_speaker": voice_profile.get("base_speaker") or dict(voice_profile.get("style") or {}).get("base_speaker"),
-                "style_preset": dict(voice_profile.get("style") or {}).get("style_preset"),
-                "controls": dict(voice_profile.get("controls") or {}),
-                "style": dict(voice_profile.get("style") or {}),
-                "embedding_path": voice_profile.get("embedding_path") or provider_metadata.get("embedding_artifact_path"),
-                "reference_audio_sha256": provider_metadata.get("reference_audio_sha256"),
-                "target_embedding_hash": provider_metadata.get("target_embedding_hash"),
-                "reference_validation_status": provider_metadata.get("reference_validation_status"),
-            },
-            "reference_artifacts": reference_artifacts,
-            "selected_recipe": dict(segment.recipe_used or voice_profile.get("selected_recipe") or {}),
-            "recipe_used": dict(segment.recipe_used or voice_profile.get("selected_recipe") or {}),
-            "golden_preview_wav": segment.golden_preview_wav,
-            "model_checkpoint_path": voice_profile.get("model_checkpoint_path"),
-            "reference_dataset_id": voice_profile.get("reference_dataset_id"),
-        }
-        return payload
+        return build_segment_artifact_metadata(
+            index=index,
+            item=item,
+            voice_manifest=voice_manifest,
+            job_id=job_id,
+            slugify=self._slugify,
+            artifact_url_for_path=generated_job_artifact_url,
+            audio_path_used_for_final_assembly=audio_path_used_for_final_assembly,
+        )
 
     def _speech_output_dir(self, job_id: int | None, work_dir: Path) -> Path:
         return generated_job_segment_dir(job_id) if job_id is not None else work_dir / "speech"
@@ -1740,7 +1685,7 @@ class ProjectRenderService:
         return concatenate_videoclips([clip, still])
 
     def _build_timed_segments(self, segments: list[SpeechSegment]) -> list[dict]:
-        timed_segments: list[dict] = []
+        durations: list[float] = []
         for segment in segments:
             audio_path = Path(segment.audio_path)
             if not audio_path.exists():
@@ -1751,22 +1696,23 @@ class ProjectRenderService:
                     provider_failures=segment.provider_failures or {},
                     suggested_action="Regenerate the video and inspect render segment artifact storage.",
                 )
-            file_duration = self._wav_duration_seconds(audio_path)
-            timed_segments.append(
-                {
-                    "segment": segment,
-                    "duration_seconds": max(file_duration, segment.duration_seconds, 0.6),
-                }
-            )
-        return timed_segments
+            durations.append(self._wav_duration_seconds(audio_path))
+        return build_timed_segments_from_durations(segments, durations)
 
     def _wav_duration_seconds(self, audio_path: Path) -> float:
-        with wave.open(str(audio_path), "rb") as handle:
-            frame_rate = handle.getframerate()
-            frame_count = handle.getnframes()
-        if frame_rate <= 0:
-            return 0.0
-        return float(frame_count) / float(frame_rate)
+        return wav_duration_seconds(audio_path)
+
+    def _wav_matches_render_format(self, audio_path: Path) -> bool:
+        try:
+            with wave.open(str(audio_path), "rb") as handle:
+                return (
+                    handle.getframerate() == self.audio_export_fps
+                    and handle.getnchannels() == 2
+                    and handle.getsampwidth() == 2
+                    and handle.getcomptype() == "NONE"
+                )
+        except Exception:
+            return False
 
     def _build_composite_audio_track(
         self,
@@ -1781,7 +1727,6 @@ class ProjectRenderService:
         composite_audio_path = audio_dir / "dialogue_composite.wav"
         concat_list_path = audio_dir / "dialogue_segments.txt"
         # Build the MP4 audio from persisted segment WAVs, never from a hidden temp copy.
-        concat_lines: list[str] = []
         audio_paths: list[Path] = []
         for item in timed_segments:
             segment: SpeechSegment = item["segment"]
@@ -1794,34 +1739,12 @@ class ProjectRenderService:
                     provider_failures=segment.provider_failures or {},
                     suggested_action="Regenerate the video and inspect render segment artifact storage.",
                 )
-            escaped_audio_path = str(audio_path).replace("'", "'\\''")
-            concat_lines.append(f"file '{escaped_audio_path}'")
             audio_paths.append(audio_path)
-        concat_list_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
-        command = ["ffmpeg", "-y"]
-        for audio_path in audio_paths:
-            command.extend(["-i", str(audio_path)])
-        if len(audio_paths) == 1:
-            filter_complex = f"[0:a]aresample={self.audio_export_fps}[a]"
-        else:
-            filter_complex = (
-                "".join(f"[{index}:a]" for index in range(len(audio_paths)))
-                + f"concat=n={len(audio_paths)}:v=0:a=1,aresample={self.audio_export_fps}[a]"
-            )
-        command.extend(
-            [
-                "-filter_complex",
-                filter_complex,
-                "-map",
-                "[a]",
-                "-acodec",
-                "pcm_s16le",
-                "-ar",
-                str(self.audio_export_fps),
-                "-ac",
-                "2",
-                str(composite_audio_path),
-            ]
+        concat_list_path.write_text(ffmpeg_concat_file_contents(audio_paths), encoding="utf-8")
+        command = multi_input_audio_command(
+            audio_paths=audio_paths,
+            output_path=composite_audio_path,
+            sample_rate=self.audio_export_fps,
         )
         logger.info(
             "Building final dialogue composite audio job_id=%s project_id=%s segment_count=%s composite_audio_path=%s",
@@ -1897,36 +1820,16 @@ class ProjectRenderService:
         final_mp4_path: Path,
         final_video_audio_path: Path | None = None,
     ) -> dict:
-        return {
-            "job_id": job_id,
-            "project_id": project_id,
-            "composite_audio_path": str(composite_audio_path),
-            "composite_audio_artifact_url": (
-                generated_job_artifact_url(job_id, composite_audio_path) if job_id is not None else None
-            ),
-            "final_mp4_path": str(final_mp4_path),
-            "final_video_audio_path": str(final_video_audio_path) if final_video_audio_path else None,
-            "final_video_audio_artifact_url": (
-                generated_job_artifact_url(job_id, final_video_audio_path)
-                if job_id is not None and final_video_audio_path is not None
-                else None
-            ),
-            "segments": [
-                {
-                    "segment_index": metadata["segment_index"],
-                    "speaker": metadata["speaker"],
-                    "provider_used": metadata["provider_used"],
-                    "fallback_used": metadata["fallback_used"],
-                    "artifact_url": metadata.get("artifact_url"),
-                    "segment_audio_path": metadata["audio_path"],
-                    "normalized_audio_path": metadata.get("normalized_audio_path"),
-                    "normalized_audio_artifact_url": metadata.get("normalized_audio_artifact_url"),
-                    "audio_path_used_for_final_assembly": str(item.get("normalized_audio_path") or item["segment"].audio_path),
-                    "segment_wav_exists": Path(item["segment"].audio_path).exists(),
-                }
-                for metadata, item in zip(segment_metadata, timed_segments, strict=False)
-            ],
-        }
+        return build_assembly_metadata(
+            job_id=job_id,
+            project_id=project_id,
+            timed_segments=timed_segments,
+            segment_metadata=segment_metadata,
+            composite_audio_path=composite_audio_path,
+            final_mp4_path=final_mp4_path,
+            artifact_url_for_path=generated_job_artifact_url,
+            final_video_audio_path=final_video_audio_path,
+        )
 
     def _extract_final_video_audio(self, *, final_mp4_path: Path, job_id: int | None, work_dir: Path) -> Path | None:
         audio_dir = generated_job_artifact_dir(job_id) / "audio" if job_id is not None else work_dir / "audio"
@@ -1974,36 +1877,14 @@ class ProjectRenderService:
         }
 
     def _render_layout(self, render_settings: dict | None) -> dict[str, float | int]:
-        payload = dict(render_settings or {})
-        layout = dict(payload.get("layout") or payload)
-        try:
-            character_scale = float(layout.get("character_scale", 1.0))
-        except (TypeError, ValueError):
-            character_scale = 1.0
-        try:
-            chat_font_size_px = int(layout.get("chat_font_size_px", 18))
-        except (TypeError, ValueError):
-            chat_font_size_px = 18
-        return {
-            "character_scale": min(max(character_scale, 0.75), 1.5),
-            "chat_font_size_px": min(max(chat_font_size_px, 12), 32),
-        }
+        return normalize_render_layout(render_settings)
 
     def _emit_progress(self, progress_callback, stage: str, progress: int) -> None:
         if callable(progress_callback):
             progress_callback(stage, progress)
 
     def _primary_cast(self, segments: list[SpeechSegment]) -> list[SpeechSegment]:
-        cast: list[SpeechSegment] = []
-        seen: set[str] = set()
-        for segment in segments:
-            if segment.speaker in seen:
-                continue
-            cast.append(segment)
-            seen.add(segment.speaker)
-            if len(cast) == 2:
-                break
-        return cast
+        return primary_cast_segments(segments)
 
     def _resolve_character_portrait(self, speaker: str, slot_index: int, work_dir: Path) -> Path:
         slug = self._slugify(speaker)
@@ -2062,21 +1943,36 @@ class ProjectRenderService:
         return self._build_generated_portrait(speaker, slot_index, work_dir)
 
     def _build_generated_portrait(self, speaker: str, slot_index: int, work_dir: Path) -> Path:
-        palette = self._speaker_palette(slot_index)
         portrait_path = work_dir / f"portrait_{slot_index}_{self._slugify(speaker)}.png"
-        image = Image.new("RGBA", (760, 1100), (0, 0, 0, 0))
+        layout = generated_portrait_layout_payload(speaker, slot_index)
+        image = Image.new("RGBA", layout["size"], (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
 
-        draw.ellipse((180, 60, 580, 460), fill=palette["accent"])
-        draw.rounded_rectangle((140, 420, 620, 1060), radius=180, fill=palette["body"])
-        draw.rounded_rectangle((120, 780, 640, 1060), radius=140, fill=palette["plate"])
+        draw.ellipse(layout["head"]["box"], fill=layout["head"]["fill"])
+        draw.rounded_rectangle(layout["body"]["box"], radius=layout["body"]["radius"], fill=layout["body"]["fill"])
+        draw.rounded_rectangle(layout["plate"]["box"], radius=layout["plate"]["radius"], fill=layout["plate"]["fill"])
 
-        initials = "".join(part[0] for part in speaker.split()[:2]).upper() or "S"
-        name_font = self._load_font(54)
-        initials_font = self._load_font(176)
-        draw.text((380, 250), initials, anchor="mm", fill=(255, 255, 255, 255), font=initials_font)
-        draw.rounded_rectangle((80, 880, 680, 1030), radius=50, fill=(10, 14, 20, 230))
-        draw.text((380, 956), speaker, anchor="mm", fill=(243, 248, 255, 255), font=name_font)
+        name_font = self._load_font(layout["name"]["font_size"])
+        initials_font = self._load_font(layout["initials"]["font_size"])
+        draw.text(
+            layout["initials"]["position"],
+            layout["initials"]["text"],
+            anchor=layout["initials"]["anchor"],
+            fill=layout["initials"]["fill"],
+            font=initials_font,
+        )
+        draw.rounded_rectangle(
+            layout["name_plate"]["box"],
+            radius=layout["name_plate"]["radius"],
+            fill=layout["name_plate"]["fill"],
+        )
+        draw.text(
+            layout["name"]["position"],
+            layout["name"]["text"],
+            anchor=layout["name"]["anchor"],
+            fill=layout["name"]["fill"],
+            font=name_font,
+        )
 
         image.save(portrait_path)
         return portrait_path
@@ -2084,43 +1980,34 @@ class ProjectRenderService:
     def _build_dialogue_card(self, segment: SpeechSegment, work_dir: Path, *, chat_font_size_px: int = 18) -> Path:
         palette = self._speaker_palette(segment.slot_index)
         caption_path = work_dir / f"caption_{uuid.uuid4().hex}.png"
-        image = Image.new("RGBA", (900, 380), (0, 0, 0, 0))
+        layout = dialogue_card_layout_payload(
+            speaker=segment.speaker,
+            text=segment.text,
+            chat_font_size_px=chat_font_size_px,
+        )
+        image = Image.new("RGBA", layout["size"], (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((0, 0, 900, 380), radius=48, fill=(6, 10, 18, 228))
-        draw.rounded_rectangle((0, 0, 900, 22), radius=22, fill=palette["accent"])
+        draw.rounded_rectangle(layout["background"]["box"], radius=layout["background"]["radius"], fill=layout["background"]["fill"])
+        draw.rounded_rectangle(layout["accent_bar"]["box"], radius=layout["accent_bar"]["radius"], fill=palette["accent"])
 
-        label_font = self._load_font(max(24, int(chat_font_size_px * 1.45)))
-        body_font = self._load_font(max(28, int(chat_font_size_px * 2)))
-        draw.text((70, 74), segment.speaker.upper(), fill=palette["accent"], font=label_font)
+        label_font = self._load_font(layout["label"]["font_size"])
+        body_font = self._load_font(layout["body"]["font_size"])
+        draw.text(layout["label"]["position"], layout["label"]["text"], fill=palette["accent"], font=label_font)
 
-        wrapped_lines = textwrap.wrap(segment.text, width=24)[:4]
-        y = 138
-        for line in wrapped_lines:
-            draw.text((70, y), line, fill=(245, 248, 255, 255), font=body_font)
-            y += 64
+        for line in layout["body"]["lines"]:
+            draw.text(line["position"], line["text"], fill=layout["body"]["fill"], font=body_font)
 
         image.save(caption_path)
         return caption_path
 
     def _speaker_palette(self, slot_index: int) -> dict[str, tuple[int, int, int, int]]:
-        palettes = (
-            {
-                "accent": (105, 224, 255, 255),
-                "body": (19, 84, 122, 238),
-                "plate": (35, 155, 208, 228),
-            },
-            {
-                "accent": (255, 196, 87, 255),
-                "body": (134, 76, 16, 238),
-                "plate": (214, 120, 36, 228),
-            },
-        )
-        return palettes[slot_index % len(palettes)]
+        return render_speaker_palette(slot_index)
 
     def _slugify(self, value: str) -> str:
         slug = "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_")
         return slug or "speaker"
 
+    @lru_cache(maxsize=24)
     def _load_font(self, size: int):
         try:
             return ImageFont.truetype("DejaVuSans-Bold.ttf", size)

@@ -37,7 +37,10 @@ celery.conf.update(
     enable_utc=True,
     timezone="UTC",
     task_annotations={
-        "app.tasks.generation.process_generation_job": {"soft_time_limit": 840, "time_limit": 900},
+        "app.tasks.generation.process_generation_job": {
+            "soft_time_limit": settings.CELERY_GENERATION_TASK_SOFT_TIME_LIMIT_SECONDS,
+            "time_limit": settings.CELERY_GENERATION_TASK_HARD_TIME_LIMIT_SECONDS,
+        },
         "app.tasks.voice_preview.process_voice_lab_preview": {
             "soft_time_limit": 240,
             "time_limit": 300,

@@ -60,6 +60,8 @@ from app.services.voice_profiles import (
     resolve_voice_reference_audio_artifact,
     resolve_character_portrait_path,
     runtime_voice_profile_payload,
+    save_character_preset_portrait_upload,
+    serialize_character_preset,
     update_voice_profile_calibration_recipe,
     upsert_character_preset,
     upsert_voice_profile,
@@ -72,6 +74,7 @@ from app.services.voice_replication import (
     serialize_calibration_batch,
     verify_character_voice_render,
 )
+from app.services.storage import guess_mime_type
 from app.tasks.voice_preview import process_voice_lab_preview
 from app.tasks.voice_operations import process_voice_calibration_batch, process_voice_operation_job
 
@@ -227,7 +230,28 @@ def get_character_preset_portrait(
     portrait_path = resolve_character_portrait_path(preset)
     if not portrait_path:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Portrait not found for character preset.")
-    return FileResponse(portrait_path, media_type="image/png", filename=portrait_path.name)
+    return FileResponse(portrait_path, media_type=guess_mime_type(str(portrait_path)), filename=portrait_path.name)
+
+
+@router.post("/character-presets/{preset_id}/portrait", response_model=CharacterPresetSummary)
+async def upload_character_preset_portrait(
+    preset_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    preset = get_character_preset_model(preset_id, db)
+    if not preset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Character preset not found.")
+    updated = await save_character_preset_portrait_upload(
+        preset,
+        file,
+        current_user_id=current_user.id,
+        db=db,
+    )
+    db.commit()
+    db.refresh(updated)
+    return CharacterPresetSummary(**serialize_character_preset(updated))
 
 
 @router.get("/voice-profiles", response_model=VoiceProfileListResponse)

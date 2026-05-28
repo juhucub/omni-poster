@@ -48,10 +48,50 @@ export interface ScriptLine {
   speaker: string;
   text: string;
   order: number;
+  caption_text?: string | null;
+  section?: string | null;
+  line_id?: string | null;
 }
 
 export type ScriptSection = 'hook' | 'body' | 'payoff' | 'cta';
 export type PlatformTarget = 'tiktok' | 'youtube_shorts' | 'instagram_reels';
+
+export interface ScriptMetadataSuggestions {
+  title: string | null;
+  description: string | null;
+  hashtags: string[];
+  cta: string | null;
+}
+
+export interface ContentFormatPreset {
+  id: string;
+  display_name: string;
+  short_description: string;
+  best_use_case: string;
+  purpose: string;
+  ideal_duration_range_sec: number[];
+  supported_speaker_count: number[];
+  default_speaker_roles: string[];
+  tone_options: string[];
+  pacing_rules: string[];
+  section_structure: string[];
+  caption_style_hints: string[];
+  default_metadata_hints: ScriptMetadataSuggestions;
+  prompt_guidance: string[];
+  validation_rules: string[];
+  speaker_model: string;
+  generation_budget: {
+    max_speakers_for_draft: number;
+    max_lines_for_60s_draft: number;
+    max_words_per_line: number;
+    max_total_words: number;
+    target_segment_count: number;
+    recommended_tts_mode: string;
+    draft_duration_range_sec: number[];
+    final_duration_range_sec: number[];
+    section_line_counts: Record<string, number>;
+  };
+}
 
 export interface ScriptVisualCue {
   cue_type: string;
@@ -61,7 +101,7 @@ export interface ScriptVisualCue {
 
 export interface GeneratedScriptLine {
   id: string;
-  section: ScriptSection;
+  section: string;
   speaker_id: string;
   speaker_label: string;
   text: string;
@@ -70,6 +110,8 @@ export interface GeneratedScriptLine {
   emotion?: string | null;
   delivery?: string | null;
   visual_cue?: ScriptVisualCue | null;
+  beat_index?: number;
+  order?: number;
 }
 
 export interface ScriptSpeaker {
@@ -78,22 +120,37 @@ export interface ScriptSpeaker {
   role: string;
   voice_profile_id: string | null;
   speaker_image_id: string | null;
+  point_of_view?: string | null;
+  motivation?: string | null;
+  stance?: string | null;
+  conversational_style?: string | null;
+  likely_objection?: string | null;
+  relationship_to_others?: string | null;
 }
 
 export interface GeneratedScript {
   id: string;
+  script_id?: string | null;
   idea: string;
   content_format_id: string;
+  format_id?: string | null;
   platform: PlatformTarget;
+  platform_targets?: PlatformTarget[];
   target_duration_sec: number;
   tone: string | null;
   audience: string | null;
+  title?: string | null;
+  short_summary?: string | null;
   speakers: ScriptSpeaker[];
   lines: GeneratedScriptLine[];
-  sections: ScriptSection[];
+  sections: string[];
   caption_blocks: Array<Record<string, unknown>>;
   metadata_suggestions: Record<string, unknown>;
   total_estimated_duration_sec: number;
+  estimated_total_duration_sec?: number | null;
+  generation_provider?: string | null;
+  generation_model?: string | null;
+  fallback_used?: boolean;
   provider_metadata: Record<string, unknown>;
   validation_warnings: string[];
 }
@@ -388,6 +445,15 @@ export interface ProjectPreviewSettings {
   render_preset: string;
 }
 
+export interface ProjectScriptGenerationSettings {
+  content_format_id: string;
+  platform: PlatformTarget;
+  target_duration_sec: number;
+  tone: string;
+  audience: string;
+  speaker_names: string[];
+}
+
 export interface GenerationJob {
   id: number;
   project_id: number;
@@ -404,12 +470,28 @@ export interface GenerationJob {
   current_phase: string | null;
   cache_statistics: Record<string, unknown>;
   timing_breakdown: Record<string, unknown>;
+  performance_summary: Record<string, unknown>;
   artifact_urls: Record<string, unknown>;
   debug_artifacts: Record<string, unknown>;
   output_video_id: number | null;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
+}
+
+export interface RenderReadinessEstimate {
+  target_seconds: number;
+  estimated_seconds_low: number;
+  estimated_seconds_high: number;
+  draft_ready: boolean;
+  blocking_reasons: string[];
+  optimization_hints: string[];
+  recommended_mode: string;
+  max_recommended_lines: number;
+  max_recommended_speakers: number;
+  max_recommended_words_per_line: number;
+  expected_cache_dependency: string;
+  cache_warmth: Record<string, unknown>;
 }
 
 export interface OutputVideo {
@@ -420,6 +502,18 @@ export interface OutputVideo {
   is_preview: boolean;
   duration_ms: number | null;
   asset: Asset;
+  created_at: string;
+}
+
+export interface GeneratedMediaItem {
+  id: number;
+  project_id: number;
+  project_name: string;
+  project_status: string;
+  generation_job: GenerationJob | null;
+  output: OutputVideo;
+  artifact_urls: Record<string, unknown>;
+  provider_state: Record<string, unknown>;
   created_at: string;
 }
 
@@ -531,4 +625,5 @@ export interface Project {
   latest_notifications: NotificationSummary[];
   speaker_bindings: SpeakerBinding[];
   preview_settings: ProjectPreviewSettings;
+  script_generation_settings: ProjectScriptGenerationSettings;
 }

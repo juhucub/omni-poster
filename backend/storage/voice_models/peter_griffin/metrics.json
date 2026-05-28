@@ -1,9 +1,0 @@
-{
-  "accepted_clip_count": 12,
-  "average_snr_db_estimate": 61.015,
-  "clean_speech_duration_seconds": 76.408,
-  "clipping_ratio": 0.0,
-  "rejected_clip_count": 0,
-  "silence_ratio": 0.0241,
-  "total_duration_seconds": 80.343
-}

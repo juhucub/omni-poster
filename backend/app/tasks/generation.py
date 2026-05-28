@@ -11,6 +11,7 @@ from app.db import SessionLocal
 from app.models import Asset, GenerationJob, OutputVideo, Project
 from app.services.notifications import create_notification
 from app.services.project_state import sync_project_state
+from app.services.render_performance import build_performance_summary
 from app.services.rendering import ProjectRenderService
 from app.services.storage import guess_mime_type, project_media_dir, store_generated_file
 from app.services.tts import TTSProviderError
@@ -189,12 +190,16 @@ def process_generation_job(job_id: int) -> dict:
             job_tts_result = dict(job.tts_result_json or {})
             job_tts_result["generation_job_duration_seconds"] = generation_job_duration_seconds
             job.tts_result_json = job_tts_result
+            job_tts_result["performance_summary"] = build_performance_summary(job)
+            job.tts_result_json = job_tts_result
             output_metadata = dict(output_asset.metadata_json or {})
             output_metadata["generation_job_duration_seconds"] = generation_job_duration_seconds
+            output_metadata["performance_summary"] = job_tts_result["performance_summary"]
             if isinstance(output_metadata.get("tts_result"), dict):
                 output_metadata["tts_result"] = {
                     **dict(output_metadata["tts_result"]),
                     "generation_job_duration_seconds": generation_job_duration_seconds,
+                    "performance_summary": job_tts_result["performance_summary"],
                 }
             output_asset.metadata_json = output_metadata
         sync_project_state(project)

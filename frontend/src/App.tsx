@@ -6,6 +6,8 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { useAuth } from './context/AuthContext';
 import AccountManager from './pages/AccountManager';
 import AuthPage from './pages/AuthPage';
+import CharacterLibraryPage from './pages/CharacterLibraryPage';
+import GeneratedMediaPage from './pages/GeneratedMediaPage';
 import ProjectEditorPage from './pages/ProjectEditorPage';
 import ProjectsPage from './pages/ProjectsPage';
 import PublishHistoryPage from './pages/PublishHistoryPage';
@@ -40,6 +42,22 @@ const AppRoutes: React.FC = () => {
         element={
           <ProtectedRoute>
             <AccountManager />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/characters"
+        element={
+          <ProtectedRoute>
+            <CharacterLibraryPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/generated-media"
+        element={
+          <ProtectedRoute>
+            <GeneratedMediaPage />
           </ProtectedRoute>
         }
       />

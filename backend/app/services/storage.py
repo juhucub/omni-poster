@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import mimetypes
 import logging
-import shutil
 import uuid
 from pathlib import Path
 from urllib.parse import quote
@@ -10,71 +8,73 @@ from urllib.parse import quote
 from fastapi import HTTPException, UploadFile, status
 
 from app.core.config import settings
+from app.infra.ffmpeg.probe import get_media_duration_seconds
+from app.infra.storage import (
+    LocalStorageAdapter,
+    StoragePathTraversalError,
+    bundled_media_root_path,
+    generated_job_artifact_path,
+    generated_job_segment_path,
+    media_root_path,
+    preset_media_path,
+    project_media_path,
+    relative_to_root,
+    resolve_safe_relative_path,
+)
 
 logger = logging.getLogger(__name__)
 
 ALLOWED_BACKGROUND_VIDEO_TYPES = {"video/mp4", "video/webm", "video/mpeg"}
 ALLOWED_BACKGROUND_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
 ALLOWED_BACKGROUND_TYPES = ALLOWED_BACKGROUND_VIDEO_TYPES | ALLOWED_BACKGROUND_IMAGE_TYPES
-MAX_BACKGROUND_VIDEO_SIZE = 100 * 1024 * 1024
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+_storage = LocalStorageAdapter()
 
 
 def media_root() -> Path:
-    root = Path(settings.MEDIA_DIR)
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return _storage.ensure_directory(media_root_path())
 
 
 def bundled_media_root() -> Path:
-    root = Path(settings.BUNDLED_MEDIA_DIR)
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return _storage.ensure_directory(bundled_media_root_path())
 
 
 def preset_media_dir() -> Path:
-    path = bundled_media_root() / "presets"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _storage.ensure_directory(preset_media_path())
 
 
 def project_media_dir(project_id: int) -> Path:
-    path = media_root() / f"project_{project_id}"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _storage.ensure_directory(project_media_path(project_id))
+
+
+def project_storage_usage_bytes(project_id: int) -> int:
+    return _storage.directory_usage_bytes(project_media_dir(project_id))
 
 
 def generated_job_artifact_dir(job_id: int) -> Path:
-    path = media_root() / "generated" / str(job_id)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _storage.ensure_directory(generated_job_artifact_path(job_id))
 
 
 def generated_job_segment_dir(job_id: int) -> Path:
-    path = generated_job_artifact_dir(job_id) / "segments"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _storage.ensure_directory(generated_job_segment_path(job_id))
 
 
 def generated_job_artifact_url(job_id: int, artifact_path: Path) -> str:
-    root = generated_job_artifact_dir(job_id).resolve()
-    resolved = artifact_path.resolve()
+    root = generated_job_artifact_dir(job_id)
     # Keep debug artifact links job-scoped so metadata never exposes arbitrary filesystem paths.
-    relative = resolved.relative_to(root)
+    relative = relative_to_root(root, artifact_path)
     return f"/generation-jobs/{job_id}/artifacts/{quote(relative.as_posix())}"
 
 
 def resolve_generated_job_artifact(job_id: int, artifact_path: str) -> Path:
-    relative = Path(artifact_path)
-    # Reject traversal before resolving against generated storage; callers only get job-local artifacts.
-    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
-    root = generated_job_artifact_dir(job_id).resolve()
-    resolved = (root / relative).resolve()
+    root = generated_job_artifact_dir(job_id)
     try:
-        resolved.relative_to(root)
-    except ValueError as exc:
+        # Reject traversal before resolving against generated storage; callers only get job-local artifacts.
+        resolved = resolve_safe_relative_path(root, artifact_path)
+    except StoragePathTraversalError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found") from exc
-    if not resolved.exists() or not resolved.is_file():
+    if not _storage.is_file(resolved):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
     return resolved
 
@@ -107,10 +107,49 @@ def resolve_background_preset(preset_key: str) -> dict:
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Background preset not found")
 
 
+def _declared_upload_mime_type(file: UploadFile) -> str:
+    return (file.content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _detect_background_mime_type(header: bytes) -> str | None:
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "image/webp"
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        return "video/mp4"
+    if header.startswith(b"\x1aE\xdf\xa3"):
+        return "video/webm"
+    if header.startswith(b"\x00\x00\x01\xba") or header.startswith(b"\x00\x00\x01\xb3"):
+        return "video/mpeg"
+    return None
+
+
+def _verify_background_duration(path: Path, mime_type: str) -> None:
+    max_duration = float(settings.BACKGROUND_VIDEO_MAX_DURATION_SECONDS or 0)
+    if max_duration <= 0 or mime_type not in ALLOWED_BACKGROUND_VIDEO_TYPES:
+        return
+    try:
+        duration = get_media_duration_seconds(path, timeout=10)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded background video duration could not be verified",
+        ) from exc
+    if duration > max_duration:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Background video exceeds {max_duration:g}s duration limit",
+        )
+
+
 async def save_background_asset(project_id: int, file: UploadFile) -> tuple[Path, int, str]:
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
-    if file.content_type not in ALLOWED_BACKGROUND_TYPES:
+    declared_mime_type = _declared_upload_mime_type(file)
+    if declared_mime_type not in ALLOWED_BACKGROUND_TYPES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Unsupported background media type",
@@ -118,18 +157,40 @@ async def save_background_asset(project_id: int, file: UploadFile) -> tuple[Path
 
     destination = project_media_dir(project_id) / f"{uuid.uuid4().hex}_{Path(file.filename).name}"
     size = 0
+    detected_mime_type: str | None = None
+    existing_usage = project_storage_usage_bytes(project_id)
+    quota_bytes = int(settings.PROJECT_STORAGE_QUOTA_BYTES or 0)
+    max_upload_bytes = int(settings.BACKGROUND_UPLOAD_MAX_SIZE_BYTES or 0)
 
     try:
         await file.seek(0)
         with open(destination, "wb") as out_file:
-            while chunk := await file.read(1024 * 1024):
+            while chunk := await file.read(UPLOAD_CHUNK_SIZE):
+                if detected_mime_type is None:
+                    detected_mime_type = _detect_background_mime_type(chunk[:4096])
+                    if detected_mime_type not in ALLOWED_BACKGROUND_TYPES or detected_mime_type != declared_mime_type:
+                        raise HTTPException(
+                            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                            detail="Uploaded background media does not match its declared type",
+                        )
                 size += len(chunk)
-                if size > MAX_BACKGROUND_VIDEO_SIZE:
+                if max_upload_bytes > 0 and size > max_upload_bytes:
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail="Background video exceeds 100MB limit",
+                        detail="Background media exceeds upload size limit",
+                    )
+                if quota_bytes > 0 and existing_usage + size > quota_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="Project storage quota exceeded",
                     )
                 out_file.write(chunk)
+        if not detected_mime_type:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="Uploaded background media type could not be verified",
+            )
+        _verify_background_duration(destination, detected_mime_type)
     except HTTPException:
         if destination.exists():
             destination.unlink()
@@ -137,7 +198,7 @@ async def save_background_asset(project_id: int, file: UploadFile) -> tuple[Path
     finally:
         await file.close()
 
-    return destination, size, file.content_type or mimetypes.guess_type(destination.name)[0] or "video/mp4"
+    return destination, size, detected_mime_type or guess_mime_type(str(destination))
 
 
 def copy_preset_to_project(project_id: int, preset_key: str) -> tuple[Path, int, str]:
@@ -145,24 +206,20 @@ def copy_preset_to_project(project_id: int, preset_key: str) -> tuple[Path, int,
     source_path: Path = preset["path"]
     # Persist the selected preset into project storage so later renders do not depend on mutable bundled files.
     destination = project_media_dir(project_id) / f"{uuid.uuid4().hex}_{source_path.name}"
-    shutil.copy2(source_path, destination)
-    return destination, destination.stat().st_size, guess_mime_type(str(destination))
+    _storage.copy_file(source_path, destination)
+    return destination, _storage.file_size(destination), guess_mime_type(str(destination))
 
 
 def store_generated_file(project_id: int, source_path: str, filename: str | None = None) -> Path:
     output_name = filename or f"{uuid.uuid4().hex}.mp4"
     destination = project_media_dir(project_id) / output_name
     source = Path(source_path)
-    if source.resolve() != destination.resolve():
-        shutil.copy2(source, destination)
-    return destination
+    return _storage.copy_file(source, destination)
 
 
 def delete_storage_key(storage_key: str) -> None:
-    path = Path(storage_key)
-    if path.exists() and path.is_file():
-        path.unlink()
+    _storage.delete_file(storage_key)
 
 
 def guess_mime_type(storage_key: str) -> str:
-    return mimetypes.guess_type(storage_key)[0] or "application/octet-stream"
+    return _storage.guess_mime_type(storage_key)

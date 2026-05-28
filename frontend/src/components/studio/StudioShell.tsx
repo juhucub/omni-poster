@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
-import { Boxes, Film, History, Link as LinkIcon, LayoutDashboard, Mic2 } from 'lucide-react';
+import { Boxes, Film, History, Images, Link as LinkIcon, LayoutDashboard, Mic2, UserRound } from 'lucide-react';
 
 import type { Project } from '../../api/models';
 import { useAuth } from '../../context/AuthContext';
@@ -28,7 +28,9 @@ const navItems = [
   { icon: LayoutDashboard, label: 'Command Room', href: '/', match: (pathname: string, hash: string) => pathname === '/' && (!hash || hash === '#command-room') },
   { icon: Film, label: 'Productions', href: '/projects', match: (pathname: string, hash: string) => pathname.startsWith('/projects') || hash === '#active-productions' },
   { icon: Boxes, label: 'Content Formats', href: '/#start-production', match: (pathname: string, hash: string) => pathname === '/' && hash === '#start-production' },
+  { icon: UserRound, label: 'Characters', href: '/characters', match: (pathname: string) => pathname.startsWith('/characters') },
   { icon: Mic2, label: 'Voice Lab', href: '/voice-lab', match: (pathname: string) => pathname.startsWith('/voice-lab') },
+  { icon: Images, label: 'Generated Media', href: '/generated-media', match: (pathname: string) => pathname.startsWith('/generated-media') },
   { icon: LayoutDashboard, label: 'Scene Library', href: '/#scene-library', match: (pathname: string, hash: string) => pathname === '/' && hash === '#scene-library' },
   { icon: LinkIcon, label: 'Channels', href: '/accounts', match: (pathname: string, hash: string) => pathname.startsWith('/accounts') || hash === '#channels' },
   { icon: History, label: 'Release History', href: '/history', match: (pathname: string) => pathname.startsWith('/history') },

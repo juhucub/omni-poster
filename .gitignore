@@ -79,6 +79,12 @@ coverage/
 *.lcov
 .nyc_output/
 
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/build/
+frontend/dist/
+
 *.tgz
 .yarn-integrity
 
@@ -176,7 +182,9 @@ backend/app/uploads.db
 # =========================================================
 
 celerybeat-schedule
+celerybeat-schedule.*
 celerybeat.pid
+backend/celerybeat-schedule*
 
 # =========================================================
 # Docker / local volumes
@@ -192,21 +200,30 @@ pgdata/
 # App uploads / generated artifacts
 # =========================================================
 
+runtime/
+backend/backend/
 uploads/
 backend/uploads/
 backend/app/uploads/
 backend/storage/uploads/
+backend/storage/characters/*
+!backend/storage/characters/.gitkeep
+!backend/storage/characters/README.md
 backend/storage/generated/
 backend/storage/renders/
 backend/storage/jobs/
 backend/storage/tmp/
 backend/storage/temp/
+backend/storage/render_cache/
+backend/storage/voice_cache/
 
 data/
 tmp/
 temp/
 
 # Generated media artifacts
+generated_videos/
+backend/generated_videos/
 *.mp4
 *.mov
 *.avi
@@ -260,6 +277,8 @@ backend/storage/voice_models/**/dataset/*
 backend/storage/voice_models/**/processed/*
 backend/storage/voice_models/**/xtts/*
 backend/storage/voice_models/**/rvc/*
+backend/storage/voice_models/**/*.json
+backend/storage/voice_models/**/.gitattributes
 backend/storage/voice_models/**/*.pth
 backend/storage/voice_models/**/*.ckpt
 backend/storage/voice_models/**/*.pt
@@ -269,6 +288,9 @@ backend/storage/voice_models/**/*.index
 backend/storage/voice_models/**/*.safetensors
 !backend/storage/voice_models/**/.gitkeep
 !backend/storage/voice_models/**/README.md
+backend/storage/voice_models/**
+!backend/storage/voice_models/**/
+!backend/storage/voice_models/**/.gitkeep
 
 # =========================================================
 # Test / cache artifacts
