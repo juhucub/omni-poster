@@ -2,6 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.domains.projects.aliases import asset_content_url  # noqa: F401 — re-export
+from app.domains.publishing.lifecycle import publish_job_public_status
+from app.domains.projects.diagnostics import latest_preview_asset, latest_review  # noqa: F401 — re-export
+from app.domains.projects.preview_settings import (  # noqa: F401 — re-export
+    DEFAULT_CHARACTER_SCALE,
+    DEFAULT_CHAT_FONT_SIZE_PX,
+    normalize_preview_layout,
+)
+from app.domains.projects.speaker_bindings import extract_script_speaker_samples
+from app.domains.projects.workflow import sync_project_state  # noqa: F401 — compatibility shim
 from app.models import (
     Asset,
     GenerationJob,
@@ -19,7 +29,6 @@ from app.schemas import (
     NotificationSummary,
     OutputVideoSummary,
     ProjectSummary,
-    ProjectPreviewLayout,
     ProjectScriptGenerationSettings,
     ProjectPreviewSettings,
     ProjectPreviewSpeakerMapping,
@@ -32,35 +41,6 @@ from app.schemas import (
     ScriptRevisionSummary,
 )
 from app.services.voice_profiles import character_preset_portrait_url
-
-
-DEFAULT_CHARACTER_SCALE = 1.0
-DEFAULT_CHAT_FONT_SIZE_PX = 18
-
-
-def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> float:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        numeric = default
-    return min(max(numeric, minimum), maximum)
-
-
-def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
-    try:
-        numeric = int(value)
-    except (TypeError, ValueError):
-        numeric = default
-    return min(max(numeric, minimum), maximum)
-
-
-def normalize_preview_layout(payload: dict | None) -> ProjectPreviewLayout:
-    layout = dict(payload or {})
-    # These bounds mirror the renderer so UI state cannot request off-canvas portraits or unreadable captions.
-    return ProjectPreviewLayout(
-        character_scale=_clamp_float(layout.get("character_scale"), 0.75, 1.5, DEFAULT_CHARACTER_SCALE),
-        chat_font_size_px=_clamp_int(layout.get("chat_font_size_px"), 12, 32, DEFAULT_CHAT_FONT_SIZE_PX),
-    )
 
 
 def _background_asset_for_project(project: Project) -> Asset | None:
@@ -93,7 +73,6 @@ def _preview_settings_from_stored(project: Project) -> ProjectPreviewSettings:
         render_preset=str(stored.get("render_preset") or "shorts_1080x1920"),
     )
 
-
 def to_project_preview_settings(project: Project) -> ProjectPreviewSettings:
     stored = _preview_settings_from_stored(project)
     background_asset = _background_asset_for_project(project)
@@ -112,12 +91,9 @@ def to_project_preview_settings(project: Project) -> ProjectPreviewSettings:
             **dict(background_asset.metadata_json or {}),
         }
 
-    sample_by_speaker: dict[str, str] = {}
-    for line in project.current_script_revision.parsed_lines_json if project.current_script_revision else []:
-        speaker = str(line.get("speaker") or "").strip()
-        text = str(line.get("text") or "").strip()
-        if speaker and text and speaker not in sample_by_speaker:
-            sample_by_speaker[speaker] = text
+    sample_by_speaker = extract_script_speaker_samples(
+        project.current_script_revision.parsed_lines_json if project.current_script_revision else []
+    )
 
     binding_by_speaker = {binding.speaker_name: binding for binding in project.speaker_bindings}
     speaker_names = list(sample_by_speaker) or list(binding_by_speaker)
@@ -203,10 +179,6 @@ def sync_project_preview_background(project: Project, asset: Asset) -> ProjectPr
     }
     project.preview_settings_json = current.model_dump()
     return current
-
-
-def asset_content_url(asset_id: int) -> str:
-    return f"/assets/{asset_id}/content"
 
 
 def to_asset_summary(asset: Asset) -> AssetSummary:
@@ -355,7 +327,7 @@ def to_notification_summary(notification: NotificationEvent) -> NotificationSumm
 
 
 def to_publish_job_summary(job: PublishJob) -> PublishJobSummary:
-    public_status = "queued" if job.status == "publish_queued" else job.status
+    public_status = publish_job_public_status(job.status)
     return PublishJobSummary(
         id=job.id,
         project_id=job.project_id,
@@ -389,17 +361,6 @@ def to_speaker_binding_summary(binding) -> SpeakerBindingSummary:
     )
 
 
-def latest_preview_asset(project: Project) -> Asset | None:
-    if not project.current_output_video or not project.current_output_video.asset:
-        return None
-    return project.current_output_video.asset
-
-
-def latest_review(project: Project) -> ReviewQueueItem | None:
-    reviews = sorted(project.review_queue_items, key=lambda item: item.created_at, reverse=True)
-    return reviews[0] if reviews else None
-
-
 def to_project_summary(project: Project) -> ProjectSummary:
     recent_notifications = sorted(
         project.notifications, key=lambda item: item.created_at, reverse=True
@@ -431,40 +392,3 @@ def to_project_summary(project: Project) -> ProjectSummary:
         preview_settings=to_project_preview_settings(project),
         script_generation_settings=to_project_script_generation_settings(project),
     )
-
-
-def sync_project_state(project: Project) -> None:
-    has_background = project.background_asset_id is not None or any(
-        asset.kind in {"background_video", "background_preset"} for asset in project.assets
-    )
-    has_script = project.current_script_revision_id is not None
-    has_output = project.current_output_video_id is not None
-    current_review = latest_review(project)
-
-    if project.archived_at:
-        project.status = "archived"
-        return
-    if project.status in {"render_queued", "rendering", "publish_queued", "scheduled", "publishing", "published"}:
-        return
-    if current_review and current_review.status == "pending":
-        project.status = "in_review"
-        return
-    if current_review and current_review.status == "changes_requested":
-        project.status = "changes_requested"
-        return
-    if current_review and current_review.status == "approved" and has_output:
-        project.status = "approved"
-        return
-    if project.approved_at and has_output:
-        project.status = "approved"
-        return
-    if has_output:
-        project.status = "preview_ready"
-        return
-    if has_background and has_script:
-        project.status = "assets_ready"
-        return
-    if has_script:
-        project.status = "script_ready"
-        return
-    project.status = "draft"

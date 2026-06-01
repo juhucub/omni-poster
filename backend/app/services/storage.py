@@ -3,11 +3,21 @@ from __future__ import annotations
 import logging
 import uuid
 from pathlib import Path
-from urllib.parse import quote
 
 from fastapi import HTTPException, UploadFile, status
 
 from app.core.config import settings
+from app.domains.media.artifacts import artifact_url_path
+from app.domains.media.assets import BACKGROUND_PRESET_EXTENSIONS
+from app.domains.media.quotas import project_storage_quota_exceeded, upload_exceeds_size_limit
+from app.domains.media.uploads import declared_upload_mime_type, mime_types_match
+from app.domains.media.validators import (
+    ALLOWED_BACKGROUND_IMAGE_TYPES,  # noqa: F401 — re-export for callers
+    ALLOWED_BACKGROUND_TYPES,  # noqa: F401 — re-export for callers
+    ALLOWED_BACKGROUND_VIDEO_TYPES,  # noqa: F401 — re-export for callers
+    background_duration_exceeds_limit,
+    detect_background_mime_type,
+)
 from app.infra.ffmpeg.probe import get_media_duration_seconds
 from app.infra.storage import (
     LocalStorageAdapter,
@@ -24,9 +34,6 @@ from app.infra.storage import (
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_BACKGROUND_VIDEO_TYPES = {"video/mp4", "video/webm", "video/mpeg"}
-ALLOWED_BACKGROUND_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
-ALLOWED_BACKGROUND_TYPES = ALLOWED_BACKGROUND_VIDEO_TYPES | ALLOWED_BACKGROUND_IMAGE_TYPES
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 _storage = LocalStorageAdapter()
@@ -64,7 +71,7 @@ def generated_job_artifact_url(job_id: int, artifact_path: Path) -> str:
     root = generated_job_artifact_dir(job_id)
     # Keep debug artifact links job-scoped so metadata never exposes arbitrary filesystem paths.
     relative = relative_to_root(root, artifact_path)
-    return f"/generation-jobs/{job_id}/artifacts/{quote(relative.as_posix())}"
+    return artifact_url_path(job_id, relative.as_posix())
 
 
 def resolve_generated_job_artifact(job_id: int, artifact_path: str) -> Path:
@@ -83,7 +90,7 @@ def list_background_presets() -> list[dict]:
     presets: list[dict] = []
     preset_dir = preset_media_dir()
     for path in sorted(preset_dir.glob("*")):
-        if path.suffix.lower() not in {".mp4", ".webm", ".mpeg", ".png", ".jpg", ".jpeg", ".webp"}:
+        if path.suffix.lower() not in BACKGROUND_PRESET_EXTENSIONS:
             continue
         mime_type = guess_mime_type(str(path))
         presets.append(
@@ -107,26 +114,6 @@ def resolve_background_preset(preset_key: str) -> dict:
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Background preset not found")
 
 
-def _declared_upload_mime_type(file: UploadFile) -> str:
-    return (file.content_type or "").split(";", 1)[0].strip().lower()
-
-
-def _detect_background_mime_type(header: bytes) -> str | None:
-    if header.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if header.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
-        return "image/webp"
-    if len(header) >= 12 and header[4:8] == b"ftyp":
-        return "video/mp4"
-    if header.startswith(b"\x1aE\xdf\xa3"):
-        return "video/webm"
-    if header.startswith(b"\x00\x00\x01\xba") or header.startswith(b"\x00\x00\x01\xb3"):
-        return "video/mpeg"
-    return None
-
-
 def _verify_background_duration(path: Path, mime_type: str) -> None:
     max_duration = float(settings.BACKGROUND_VIDEO_MAX_DURATION_SECONDS or 0)
     if max_duration <= 0 or mime_type not in ALLOWED_BACKGROUND_VIDEO_TYPES:
@@ -138,7 +125,7 @@ def _verify_background_duration(path: Path, mime_type: str) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Uploaded background video duration could not be verified",
         ) from exc
-    if duration > max_duration:
+    if background_duration_exceeds_limit(duration, max_duration, mime_type):
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"Background video exceeds {max_duration:g}s duration limit",
@@ -148,7 +135,7 @@ def _verify_background_duration(path: Path, mime_type: str) -> None:
 async def save_background_asset(project_id: int, file: UploadFile) -> tuple[Path, int, str]:
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
-    declared_mime_type = _declared_upload_mime_type(file)
+    declared_mime_type = declared_upload_mime_type(file.content_type or "")
     if declared_mime_type not in ALLOWED_BACKGROUND_TYPES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -167,19 +154,19 @@ async def save_background_asset(project_id: int, file: UploadFile) -> tuple[Path
         with open(destination, "wb") as out_file:
             while chunk := await file.read(UPLOAD_CHUNK_SIZE):
                 if detected_mime_type is None:
-                    detected_mime_type = _detect_background_mime_type(chunk[:4096])
-                    if detected_mime_type not in ALLOWED_BACKGROUND_TYPES or detected_mime_type != declared_mime_type:
+                    detected_mime_type = detect_background_mime_type(chunk[:4096])
+                    if detected_mime_type not in ALLOWED_BACKGROUND_TYPES or not mime_types_match(declared_mime_type, detected_mime_type):
                         raise HTTPException(
                             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
                             detail="Uploaded background media does not match its declared type",
                         )
                 size += len(chunk)
-                if max_upload_bytes > 0 and size > max_upload_bytes:
+                if upload_exceeds_size_limit(size, max_upload_bytes):
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                         detail="Background media exceeds upload size limit",
                     )
-                if quota_bytes > 0 and existing_usage + size > quota_bytes:
+                if project_storage_quota_exceeded(existing_usage, size, quota_bytes):
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                         detail="Project storage quota exceeded",

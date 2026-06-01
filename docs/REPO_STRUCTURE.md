@@ -1,17 +1,25 @@
 # Omniposter Repo Structure
 
-Last updated: 2026-05-26
+Last updated: 2026-06-01
 
 Omniposter is moving toward a lean modular monorepo layout. Keep source code, seed assets, deployment config, local scripts, docs, and runtime outputs in separate homes.
 
 ## Source Directories
 
-- `backend/app/api/` - future home for thin FastAPI route modules. Existing public routes remain under `backend/app/routers/` until migrated safely.
+- `backend/app/api/` - thin FastAPI route modules — canonical home for all API route files. `backend/app/routers/` is a compatibility shim layer (`from app.api.X import *`).
 - `backend/app/core/` - shared configuration and process-wide app utilities.
 - `backend/app/db/` - future database/session helpers. Current DB entrypoint remains `backend/app/db.py` until migrated.
-- `backend/app/domains/` - product-domain logic. Domains should own business behavior such as script generation, voice, render, media, jobs, projects, and publishing. `backend/app/domains/render/` currently owns TTS and non-TTS render cache keys, render preset/layout decisions, pure render geometry helpers, pure audio timeline and mixdown payload helpers, background/video concat and command payload helpers, render planning metadata, readiness estimates, artifact metadata shaping, cache report summaries, and diagnostics summaries. `backend/app/domains/voice/` now owns the first compatibility-safe voice/TTS boundaries: provider contracts/results/errors, provider registry/capability selection helpers, provider capability/health metadata payload helpers, Docker-safe espeak fallback provider behavior, Voice Lab override payload helpers, TTS synthesis orchestration, pure audio metadata helpers, pure Voice Lab preview provider-selection, manifest profile normalization, ephemeral profile payload decisions, DB voice-profile-to-preview payload projection, pure TTS cache-key and provider failure/result metadata payload helpers, provider artifact path/hash helpers, voice runtime path helpers, and selected character recipe validation. Phase 5 render extraction is stopped; full video composition, cache materialization/stores, concrete OpenVoice/XTTS/RVC provider bodies, PIL drawing/saving, generated artifact writes, and final file-stat assembly remain in services until later domain migrations.
+- `backend/app/domains/` - product-domain logic. Seven domain packages now exist:
+  - `domains/script_generation/` — script generation formats, prompts, providers, normalizers, validators, platform helpers, and caption utilities.
+  - `domains/render/` — render cache keys, preset/layout decisions, pure geometry helpers, audio timeline and mixdown payload helpers, background/video concat and command payload helpers, render planning metadata, readiness estimates, artifact metadata shaping, cache report summaries, and diagnostics summaries.
+  - `domains/voice/` — voice/TTS provider contracts, provider registry and capability selection, Docker-safe espeak fallback, Voice Lab override payloads, TTS synthesis orchestration, pure audio metadata helpers, Voice Lab preview provider selection, manifest profile normalization, ephemeral profile payload decisions, DB voice-profile-to-preview payload projection, pure TTS cache-key and provider failure/result metadata helpers, provider artifact path/hash helpers, voice runtime path helpers, and selected character recipe validation.
+  - `domains/jobs/` — generation job status constants, transition predicates, stale job recovery, queue quota rules, polling helpers, and diagnostics.
+  - `domains/media/` — background media MIME validators, upload helpers, size/storage quota predicates, asset kind classification, artifact URL building, and storage file diagnostics.
+  - `domains/projects/` — project readiness predicates, diagnostic helpers (latest preview, latest review), workflow state machine (sync_project_state), preview settings normalization, asset URL aliases, ownership queries, and speaker-binding sample extraction.
+  - `domains/publishing/` — platform capability rules, publish job lifecycle status predicates, schedule-due helpers, account routing logic (is_account_routing_eligible, choose_social_account, suggest_destination), history projections (to_post_summary), metadata helpers, and account/project publishing diagnostics.
+  Full video composition, cache materialization, concrete renderer orchestration, and generated artifact writes remain in `backend/app/services/rendering.py`.
 - `backend/app/infra/` - low-level adapters for storage, FFmpeg, Redis, Ollama, and similar runtime dependencies. Storage path/filesystem helpers belong under `backend/app/infra/storage/`; Redis client/rate-limit primitives belong under `backend/app/infra/redis/`; generic Ollama HTTP transport belongs under `backend/app/infra/ollama/`.
-- `backend/app/workers/` - future thin Celery worker wrappers that call domain services.
+- `backend/app/workers/` - thin Celery worker wrappers — canonical home for all Celery task implementations. `backend/app/tasks/` is a compatibility shim layer (`from app.workers.X import *`). Task name strings (`app.tasks.*`) are preserved in `@celery.task(name=...)` decorators for wire-protocol backward compat.
 - `frontend/src/features/` - future feature-oriented frontend modules. Existing frontend pages/components remain in place until moved safely.
 - `deploy/` - Docker and deployment configuration.
 - `docs/` - project memory, product docs, architecture decisions, and repo structure docs.

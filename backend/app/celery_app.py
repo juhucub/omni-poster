@@ -8,16 +8,21 @@ celery = Celery(
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
     include=[
-        "app.tasks.generation",
-        "app.tasks.publish",
-        "app.tasks.scheduler",
-        "app.tasks.voice_preview",
-        "app.tasks.voice_operations",
+        "app.workers.generation",
+        "app.workers.publish",
+        "app.workers.scheduler",
+        "app.workers.voice_preview",
+        "app.workers.voice_operations",
     ],
 )
 
 celery.conf.update(
     task_default_queue="default",
+    # NOTE: include= lists app.workers.* modules (where task implementations live), but the
+    # name= strings on @celery.task decorators intentionally retain the original app.tasks.*
+    # namespace for wire-protocol backward compatibility — any tasks already in production
+    # queues reference the old names.  task_routes, task_annotations, and beat_schedule all
+    # use the registered task name strings, not module paths.
     task_routes={
         "app.tasks.generation.process_generation_job": {"queue": "generation"},
         "app.tasks.generation.reconcile_stale_generation_jobs": {"queue": "generation"},

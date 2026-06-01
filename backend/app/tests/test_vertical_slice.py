@@ -3294,7 +3294,7 @@ def test_local_speech_service_discovers_espeak_provider(monkeypatch):
     service = LocalSpeechService()
 
     monkeypatch.setattr(
-        "app.services.tts.shutil.which",
+        "app.domains.voice.providers.espeak.shutil.which",
         lambda binary: {
             "espeak-ng": "/usr/bin/espeak-ng",
         }.get(binary),
@@ -3306,7 +3306,7 @@ def test_local_speech_service_discovers_espeak_provider(monkeypatch):
 def test_local_speech_service_returns_empty_provider_set_when_no_binary_exists(monkeypatch):
     service = LocalSpeechService()
 
-    monkeypatch.setattr("app.services.tts.shutil.which", lambda binary: None)
+    monkeypatch.setattr("app.domains.voice.providers.espeak.shutil.which", lambda binary: None)
 
     assert service._available_providers() == set()
 
@@ -5448,7 +5448,7 @@ def test_publish_job_lifecycle_and_history(auth_client: TestClient, monkeypatch)
     monkeypatch.setattr(process_generation_job, "delay", lambda job_id: process_generation_job(job_id))
     monkeypatch.setattr(process_publish_job, "delay", lambda job_id: process_publish_job(job_id))
     monkeypatch.setattr(
-        "app.tasks.publish.upload_short",
+        "app.workers.publish.upload_short",
         lambda **kwargs: {
             "external_post_id": "video-123",
             "external_url": "https://www.youtube.com/watch?v=video-123",
@@ -5511,7 +5511,7 @@ def test_scheduled_publish_dispatch_runs_once(auth_client: TestClient, monkeypat
     monkeypatch.setattr(process_generation_job, "delay", lambda job_id: process_generation_job(job_id))
     monkeypatch.setattr(process_publish_job, "delay", lambda job_id: process_publish_job(job_id))
     monkeypatch.setattr(
-        "app.tasks.publish.upload_short",
+        "app.workers.publish.upload_short",
         lambda **kwargs: {
             "external_post_id": "scheduled-video",
             "external_url": "https://www.youtube.com/watch?v=scheduled-video",
@@ -5606,7 +5606,7 @@ def test_review_queue_routing_and_auto_publish(auth_client: TestClient, monkeypa
     monkeypatch.setattr(process_generation_job, "delay", lambda job_id: process_generation_job(job_id))
     monkeypatch.setattr(process_publish_job, "delay", lambda job_id: process_publish_job(job_id))
     monkeypatch.setattr(
-        "app.tasks.publish.upload_short",
+        "app.workers.publish.upload_short",
         lambda **kwargs: {
             "external_post_id": "review-auto-video",
             "external_url": "https://www.youtube.com/watch?v=review-auto-video",
@@ -5694,7 +5694,7 @@ def test_end_to_end_happy_path(auth_client: TestClient, monkeypatch):
     monkeypatch.setattr(process_generation_job, "delay", lambda job_id: process_generation_job(job_id))
     monkeypatch.setattr(process_publish_job, "delay", lambda job_id: process_publish_job(job_id))
     monkeypatch.setattr(
-        "app.tasks.publish.upload_short",
+        "app.workers.publish.upload_short",
         lambda **kwargs: {
             "external_post_id": "happy-video",
             "external_url": "https://www.youtube.com/watch?v=happy-video",

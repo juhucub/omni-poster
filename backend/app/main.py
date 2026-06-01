@@ -16,20 +16,20 @@ from app.celery_app import celery
 from app.core.config import settings
 from app.db import engine
 from app.infra.redis import redis_package_available, redis_ping, safe_redis_url
-from app.routers.assets import router as assets_router
-from app.routers.auth import router as auth_router
-from app.routers.character_presets import router as character_presets_router
-from app.routers.generation import router as generation_router
-from app.routers.history import router as history_router
-from app.routers.metadata import router as metadata_router
-from app.routers.productions import router as productions_router
-from app.routers.projects import router as projects_router
-from app.routers.publish import router as publish_router
-from app.routers.reviews import router as reviews_router
-from app.routers.routing import router as routing_router
-from app.routers.script_generation import router as script_generation_router
-from app.routers.scripts import router as scripts_router
-from app.routers.social_accounts import router as social_accounts_router
+from app.api.assets import router as assets_router
+from app.api.auth import router as auth_router
+from app.api.character_presets import router as character_presets_router
+from app.api.generation import router as generation_router
+from app.api.history import router as history_router
+from app.api.metadata import router as metadata_router
+from app.api.productions import router as productions_router
+from app.api.projects import router as projects_router
+from app.api.publish import router as publish_router
+from app.api.reviews import router as reviews_router
+from app.api.routing import router as routing_router
+from app.api.script_generation import router as script_generation_router
+from app.api.scripts import router as scripts_router
+from app.api.social_accounts import router as social_accounts_router
 from app.services.tts import TTSOrchestrator
 
 logging.basicConfig(level=logging.INFO)

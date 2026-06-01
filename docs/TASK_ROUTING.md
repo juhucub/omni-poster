@@ -1,6 +1,6 @@
 # Omniposter Task Routing
 
-Last updated: 2026-05-06
+Last updated: 2026-06-01
 
 Use this file after the always-read docs. Read only the relevant full docs and inspect the smallest code area that can answer the task.
 
@@ -19,8 +19,8 @@ Inspect:
 - `backend/app/services/voice_profiles.py`
 - `backend/app/services/voice_replication.py`
 - `backend/app/services/voice_preview_jobs.py`
-- `backend/app/routers/generation.py`
-- `backend/app/tasks/voice_preview.py`
+- `backend/app/api/generation.py`
+- `backend/app/workers/voice_preview.py`
 - `backend/app/tests/test_vertical_slice.py`
 - `frontend/src/pages/VoiceLabPage.tsx`
 - `frontend/src/pages/ProjectEditorPage.tsx`
@@ -41,8 +41,8 @@ Inspect:
 - `backend/app/services/rendering.py`
 - `backend/app/services/tts.py`
 - `backend/app/services/scripts.py`
-- `backend/app/tasks/generation.py`
-- `backend/app/routers/generation.py`
+- `backend/app/workers/generation.py`
+- `backend/app/api/generation.py`
 - `backend/app/tests/test_vertical_slice.py`
 - `frontend/src/pages/ProjectEditorPage.tsx`
 
@@ -58,8 +58,8 @@ Read:
 Inspect:
 
 - `backend/app/services/storage.py`
-- `backend/app/routers/assets.py`
-- `backend/app/routers/generation.py`
+- `backend/app/api/assets.py`
+- `backend/app/api/generation.py`
 - `backend/app/services/vid_gen.py`
 - `frontend/src/pages/ProjectEditorPage.tsx`
 - Tests that mention background, preset, assets, or generation
@@ -79,9 +79,9 @@ Inspect:
 - `backend/app/services/character_presets.py`
 - `backend/app/services/rendering.py`
 - `backend/app/services/tts.py`
-- `backend/app/routers/character_presets.py`
-- `backend/app/routers/scripts.py`
-- `backend/app/routers/generation.py`
+- `backend/app/api/character_presets.py`
+- `backend/app/api/scripts.py`
+- `backend/app/api/generation.py`
 - `backend/app/tests/test_vertical_slice.py`
 - `frontend/src/pages/ProjectEditorPage.tsx`
 
@@ -98,8 +98,8 @@ Inspect:
 
 - `backend/app/models.py`
 - `backend/app/schemas.py`
-- `backend/app/routers/generation.py`
-- `backend/app/tasks/generation.py`
+- `backend/app/api/generation.py`
+- `backend/app/workers/generation.py`
 - `backend/app/services/rendering.py`
 - `backend/app/services/storage.py`
 - `backend/app/tests/test_vertical_slice.py`
@@ -124,7 +124,7 @@ Inspect:
 - `backend/app/celery_app.py`
 - `backend/app/services/tts.py`
 - `backend/app/services/storage.py`
-- Health route implementation in `backend/app/routers/` or `backend/app/main.py`
+- Health route implementation in `backend/app/main.py` (health endpoints live directly in main, not in api/)
 - `scripts/voice/`
 
 ## MVP Audit / Full Verification
