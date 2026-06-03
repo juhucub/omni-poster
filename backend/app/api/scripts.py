@@ -100,16 +100,16 @@ def restore_script_revision(
     )
     if not revision:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Script revision not found")
-    restored_generated_lines = (
+    restored_lines = (
         generated_script_to_dialogue_lines(revision.generated_script_json)
         if revision.generated_script_json
-        else None
+        else revision.parsed_lines_json
     )
     restored = save_script_revision(
         db,
         project_id=project.id,
-        raw_text=None if restored_generated_lines else revision.raw_text,
-        parsed_lines=restored_generated_lines,
+        raw_text=None,
+        parsed_lines=restored_lines,
         source="restore",
         parent_revision_id=revision.id,
         generation_provider=revision.generation_provider,

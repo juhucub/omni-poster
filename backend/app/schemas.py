@@ -624,6 +624,9 @@ class DialogueScriptLine(BaseModel):
     speaker: str
     text: str
     order: int
+    caption_text: str | None = None
+    section: str | None = None
+    line_id: str | None = None
 
 
 ContentFormatId = Literal[

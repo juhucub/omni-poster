@@ -204,12 +204,13 @@ def to_script_summary(revision: ScriptRevision | None) -> ScriptRevisionSummary 
     if not revision:
         return None
 
-    line_items = [
-        DialogueScriptLine(id=line.id, speaker=line.speaker, text=line.text, order=line.line_order)
-        for line in revision.line_items
-    ]
-    if not line_items:
+    if revision.parsed_lines_json:
         line_items = [DialogueScriptLine(**line) for line in revision.parsed_lines_json]
+    else:
+        line_items = [
+            DialogueScriptLine(id=line.id, speaker=line.speaker, text=line.text, order=line.line_order)
+            for line in revision.line_items
+        ]
     generated_script = None
     if revision.generated_script_json:
         try:

@@ -90,9 +90,9 @@ def parse_script_lines(lines: Iterable[DialogueScriptLine | dict]) -> tuple[list
             text,
             index,
             line_id=line_id,
-            caption_text=None if isinstance(line, DialogueScriptLine) else line.get("caption_text"),
-            section=None if isinstance(line, DialogueScriptLine) else line.get("section"),
-            generated_line_id=None if isinstance(line, DialogueScriptLine) else line.get("line_id"),
+            caption_text=line.caption_text if isinstance(line, DialogueScriptLine) else line.get("caption_text"),
+            section=line.section if isinstance(line, DialogueScriptLine) else line.get("section"),
+            generated_line_id=line.line_id if isinstance(line, DialogueScriptLine) else line.get("line_id"),
         )
         normalized.append(normalized_line)
         if normalized_line["speaker"] not in characters:
