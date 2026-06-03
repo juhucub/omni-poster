@@ -5,8 +5,6 @@ import {
   CircleDashed,
   MessageSquarePlus,
   PlayCircle,
-  RefreshCw,
-  Sparkles,
   Upload,
   Wand2,
 } from 'lucide-react';
@@ -38,23 +36,38 @@ import type {
   ScriptGenerationResponse,
 } from '../api/models';
 import StudioShell from '../components/studio/StudioShell';
+import {
+  StudioButton,
+  StudioDiagnosticsPanel,
+  StudioEmptyState,
+  StudioLoadingState,
+  StudioStatusBadge,
+} from '../components/studio/StudioPrimitives';
 import RenderDiagnosticsPanel from '../components/RenderDiagnosticsPanel';
-import FormatBrowser from '../components/script-generation/FormatBrowser';
 import ProductionReadinessPanel, {
   computeProductionReadiness,
 } from '../components/production/ProductionReadinessPanel';
 import ProductionPreviewFrame from '../components/production/ProductionPreviewFrame';
+import ProductionScriptSection from '../components/production/ProductionScriptSection';
+import ProductionCastSection from '../components/production/ProductionCastSection';
 import {
   FALLBACK_CONTENT_FORMATS,
   durationLabel,
   findFormat,
-  speakerCountLabel,
 } from '../components/script-generation/formatBrowserData';
 
-const STAGES = ['Idea', 'Script', 'Cast & Voices', 'Scene', 'Preview', 'Render', 'Release'] as const;
-type Stage = (typeof STAGES)[number];
+const STAGES = ['Idea', 'Script', 'Cast & Voices', 'Preview', 'Render', 'Generated Media', 'Release'] as const;
+type VisibleStage = (typeof STAGES)[number];
+type Stage = VisibleStage | 'Scene';
 
-const defaultScript = '<Host> Welcome to Omni-poster.\n<Guest> We can keep revising this conversation before it ships.';
+const stageToTab = (stage: VisibleStage) => {
+  if (stage === 'Cast & Voices') return 'cast';
+  if (stage === 'Generated Media') return 'media';
+  if (stage === 'Release') return 'release';
+  return stage.toLowerCase();
+};
+
+const defaultScript = '';
 
 const platformTargets: Array<{ id: PlatformTarget; label: string }> = [
   { id: 'tiktok', label: 'TikTok' },
@@ -72,23 +85,61 @@ const titleCase = (value: string | null | undefined) =>
     .replace(/[_-]+/g, ' ')
     .replace(/\b\w/g, (char) => char.toUpperCase());
 
-const parseDraftToLines = (value: string): ScriptLine[] =>
+const initials = (value: string | null | undefined) =>
+  String(value || 'OP')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join('') || 'OP';
+
+const estimateDurationSec = (text: string) => {
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  return words ? Math.max(1.4, words / 2.45) : 0;
+};
+
+const parseDraftToLines = (value: string, previousLines: ScriptLine[] = []): ScriptLine[] =>
   value
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line, index) => {
-      const match = line.match(/^<([^>]+)>\s*(.+)$/);
+      // New format: [line_id | Speaker | Section | Xs] Text
+      const structured = line.match(/^\[([^|]+)\|([^|]+)\|([^|]+)\|([^\]]+)\]\s*(.+)$/);
+      if (structured) {
+        return {
+          id: undefined,
+          line_id: structured[1].trim(),
+          speaker: structured[2].trim(),
+          section: structured[3].trim(),
+          text: structured[5].trim(),
+          caption_text: previousLines[index]?.caption_text || null,
+          order: index,
+        };
+      }
+      // Legacy format: <Speaker> Text
+      const legacy = line.match(/^<([^>]+)>\s*(.+)$/);
       return {
         id: undefined,
-        speaker: match?.[1]?.trim() || `Speaker ${index + 1}`,
-        text: match?.[2]?.trim() || line,
+        speaker: legacy?.[1]?.trim() || `Speaker ${index + 1}`,
+        text: legacy?.[2]?.trim() || line,
+        caption_text: previousLines[index]?.caption_text || null,
+        section: previousLines[index]?.section || null,
+        line_id: previousLines[index]?.line_id || null,
         order: index,
       };
     });
 
 const linesToDraft = (lines: ScriptLine[]) =>
-  lines.map((line) => `<${line.speaker}> ${line.text}`).join('\n');
+  lines
+    .map((line, index) => {
+      const id = line.line_id || `line_${String(index + 1).padStart(3, '0')}`;
+      const speaker = line.speaker || 'Speaker';
+      const section = line.section || 'Body';
+      const duration = `${estimateDurationSec(line.caption_text || line.text).toFixed(1)}s`;
+      return `[${id} | ${speaker} | ${section} | ${duration}] ${line.text}`;
+    })
+    .join('\n\n');
 
 const normalizeDraft = (value: string) => value.trim().replace(/\r\n/g, '\n');
 const hardScriptWarnings = ['Hard quality failure', 'has no spoken lines', 'references missing speaker', 'has no caption text', 'Speaker count'];
@@ -294,7 +345,7 @@ const ProjectEditorPage: React.FC = () => {
   const [generatedScript, setGeneratedScript] = useState<GeneratedScript | null>(null);
   const [scriptProviderStatus, setScriptProviderStatus] = useState<ScriptGenerationProviderMetadata | null>(null);
   const [scriptGenerationWarnings, setScriptGenerationWarnings] = useState<string[]>([]);
-  const [showScriptDebug, setShowScriptDebug] = useState(false);
+  const [scriptFailure, setScriptFailure] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<PlatformMetadata | null>(null);
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [outputs, setOutputs] = useState<OutputVideo[]>([]);
@@ -320,15 +371,18 @@ const ProjectEditorPage: React.FC = () => {
     const tab = searchParams.get('tab');
     const tabToStage: Record<string, Stage> = {
       idea: 'Idea',
-      assets: 'Scene',
-      scenes: 'Scene',
-      scene: 'Scene',
+      assets: 'Preview',
+      scenes: 'Preview',
+      scene: 'Preview',
       script: 'Script',
       cast: 'Cast & Voices',
       voices: 'Cast & Voices',
       generate: 'Render',
       preview: 'Preview',
       render: 'Render',
+      media: 'Generated Media',
+      generated: 'Generated Media',
+      'generated-media': 'Generated Media',
       review: 'Preview',
       metadata: 'Release',
       routing: 'Release',
@@ -369,7 +423,13 @@ const ProjectEditorPage: React.FC = () => {
     [generationJob?.tts_result]
   );
   const generationTtsError = (generationJob?.tts_result as any)?.error || null;
-  const savedDraft = useMemo(() => normalizeDraft(script?.raw_text || defaultScript), [script?.raw_text]);
+  const savedDraft = useMemo(
+    () => script?.parsed_lines?.length
+      ? normalizeDraft(linesToDraft(script.parsed_lines))
+      : normalizeDraft(script?.raw_text || defaultScript),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [script]
+  );
   const scriptIsDirty = useMemo(() => normalizeDraft(scriptDraft) !== savedDraft, [scriptDraft, savedDraft]);
   const selectedFormat = useMemo(() => findFormat(contentFormats, scriptFormatId), [contentFormats, scriptFormatId]);
   const detectedSpeakers = useMemo(() => {
@@ -398,24 +458,6 @@ const ProjectEditorPage: React.FC = () => {
     }
     return scriptProviderStatus.provider_name === 'ollama' ? 'Ollama' : scriptProviderStatus.provider_name;
   }, [scriptProviderStatus]);
-  const scriptDiagnostics = useMemo(() => {
-    const diagnostics = (scriptProviderStatus?.diagnostics || {}) as Record<string, unknown>;
-    const targetDuration = Number(generatedScript?.target_duration_sec || diagnostics.target_duration_sec || scriptTargetDuration || 0);
-    const estimatedDuration = Number(generatedScript?.total_estimated_duration_sec || diagnostics.estimated_duration_sec || 0);
-    const speakerCount = Number(generatedScript?.speakers.length || diagnostics.speaker_count || 0);
-    const fallbackReason = scriptProviderStatus?.fallback_reason || scriptProviderStatus?.failure_type || null;
-    const ready = Boolean(generatedScript && !generatedScriptHasHardWarnings && generatedScript.lines.length > 0);
-    return {
-      targetDuration,
-      estimatedDuration,
-      speakerCount,
-      fallbackReason,
-      ready,
-      repaired: Boolean(scriptProviderStatus?.repair_attempted),
-      normalized: scriptGenerationWarnings.length > 0,
-      cacheHit: Boolean((diagnostics.cache as any)?.hit),
-    };
-  }, [generatedScript, generatedScriptHasHardWarnings, scriptGenerationWarnings.length, scriptProviderStatus, scriptTargetDuration]);
   const readinessProject = useMemo(
     () => project ? { ...project, latest_output: latestOutput } : null,
     [project, latestOutput]
@@ -460,9 +502,10 @@ const ProjectEditorPage: React.FC = () => {
       Scene: readyLike(rowById.get('scene')?.state) ? 'Ready' : 'Missing',
       Preview: rowById.get('preview')?.state === 'verified' ? 'Verified' : rowById.get('preview')?.state === 'warning' ? 'Warning' : 'Missing',
       Render: generationJob?.status === 'failed' ? 'Failed' : generationJob?.status ? titleCase(generationJob.status) : latestOutput ? 'Ready' : 'Missing',
+      'Generated Media': outputs.length ? `${outputs.length} output${outputs.length === 1 ? '' : 's'}` : 'No outputs',
       Release: readyLike(rowById.get('release')?.state) ? 'Ready' : 'Missing',
     } as Record<Stage, string>;
-  }, [generationJob?.status, latestOutput, productionReadiness, project, scriptLines.length]);
+  }, [generationJob?.status, latestOutput, outputs.length, productionReadiness, project, scriptLines.length]);
 
   const toUtcIso = (value: string) => (value ? new Date(value).toISOString() : null);
   const apiBase = apiBaseUrl;
@@ -475,6 +518,25 @@ const ProjectEditorPage: React.FC = () => {
     }
     return `${apiBase}${path.startsWith('/') ? path : `/${path}`}`;
   };
+  const previewFrameMappings = previewSettings.speaker_mappings.length
+    ? previewSettings.speaker_mappings
+    : scriptLines.slice(0, 2).map((line) => ({
+        speaker_name: line.speaker,
+        voice_profile_id: null,
+        character_preset_id: null,
+        character_display_name: line.speaker,
+        character_portrait_filename: null,
+        character_portrait_url: null,
+        display_label: line.speaker,
+        sample_text: line.caption_text || line.text,
+      }));
+  const previewFrameCaption =
+    previewFrameMappings[0]?.sample_text ||
+    scriptLines[0]?.caption_text ||
+    scriptLines[0]?.text ||
+    'Preview captions follow the speaker timeline.';
+  const previewFrameBackgroundUrl = previewSettings.background_url ? toApiHref(previewSettings.background_url) : '';
+
   const persistPreviewLayout = async (nextSettings: ProjectPreviewSettings) => {
     const normalized = clampPreviewLayout(nextSettings);
     setPreviewSettings(normalized);
@@ -513,11 +575,16 @@ const ProjectEditorPage: React.FC = () => {
 
   const hydrateScriptState = (revision: ScriptRevision | null) => {
     setScript(revision);
-    const nextDraft = revision?.raw_text || defaultScript;
-    const nextLines = revision?.parsed_lines?.length ? revision.parsed_lines : parseDraftToLines(nextDraft);
+    const nextLines = revision?.parsed_lines?.length
+      ? revision.parsed_lines
+      : parseDraftToLines(revision?.raw_text || defaultScript);
+    const nextDraft = nextLines.length
+      ? linesToDraft(nextLines)
+      : (revision?.raw_text || defaultScript);
     setScriptDraft(nextDraft);
     setScriptLines(nextLines);
     setGeneratedScript(revision?.generated_script || null);
+    setScriptFailure(null);
   };
 
   const hydrateScriptGenerationSettings = (settings: ProjectScriptGenerationSettings | null | undefined) => {
@@ -567,6 +634,15 @@ const ProjectEditorPage: React.FC = () => {
       audience: scriptAudience,
       speaker_names: format.default_speaker_roles,
     });
+  };
+
+  const selectScriptFormatById = (formatId: string) => {
+    const format = findFormat(contentFormats, formatId);
+    if (format) {
+      selectScriptFormat(format);
+      return;
+    }
+    setScriptFormatId(formatId);
   };
 
   const loadAll = async () => {
@@ -777,6 +853,11 @@ const ProjectEditorPage: React.FC = () => {
     setScriptDraft(linesToDraft(normalized));
   };
 
+  const updateScriptDraft = (nextDraft: string) => {
+    setScriptDraft(nextDraft);
+    setScriptLines((currentLines) => parseDraftToLines(nextDraft, currentLines));
+  };
+
   const persistScriptRevision = async () => {
     const response = await apiClient.put<{ current_revision: ScriptRevision }>(`/projects/${id}/script`, {
       parsed_lines: scriptLines.map((line, index) => ({ ...line, order: index })),
@@ -791,9 +872,12 @@ const ProjectEditorPage: React.FC = () => {
     try {
       setBusy('script');
       await persistScriptRevision();
+      setScriptFailure(null);
       await loadAll();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Script validation failed.');
+      const message = err.response?.data?.detail || 'Script validation failed.';
+      setScriptFailure(message);
+      setError(message);
     } finally {
       setBusy(null);
     }
@@ -802,6 +886,8 @@ const ProjectEditorPage: React.FC = () => {
   const generateScript = async () => {
     try {
       setBusy('script-generate');
+      setScriptFailure(null);
+      setScriptGenerationWarnings([]);
       const requestedSpeakerNames = scriptSpeakerNames
         .split(',')
         .map((name) => name.trim())
@@ -832,7 +918,7 @@ const ProjectEditorPage: React.FC = () => {
           specificity: 'specific',
           retention_style: selectedFormat?.pacing_rules?.[0] || 'hook-driven',
         },
-        debug: showScriptDebug,
+        debug: false,
       });
       setGeneratedScript(response.data.generated_script);
       setScriptProviderStatus(response.data.provider_metadata);
@@ -841,11 +927,27 @@ const ProjectEditorPage: React.FC = () => {
         id: undefined,
         speaker: line.speaker_label,
         text: line.text,
+        caption_text: line.caption_text,
+        section: line.section,
+        line_id: line.id,
         order: index,
       }));
-      syncDraftFromLines(nextLines);
+      setScriptLines(nextLines);
+      setScriptDraft(
+        response.data.generated_script.lines
+          .map((line, index) => {
+            const id = line.id || `line_${String(index + 1).padStart(3, '0')}`;
+            const dur = Number.isFinite(line.estimated_duration_sec)
+              ? `${Number(line.estimated_duration_sec).toFixed(1)}s`
+              : `${estimateDurationSec(line.caption_text || line.text).toFixed(1)}s`;
+            return `[${id} | ${line.speaker_label} | ${line.section} | ${dur}] ${line.text}`;
+          })
+          .join('\n\n')
+      );
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Script generation failed.');
+      const message = err.response?.data?.detail || 'Script generation failed.';
+      setScriptFailure(message);
+      setError(message);
     } finally {
       setBusy(null);
     }
@@ -853,7 +955,7 @@ const ProjectEditorPage: React.FC = () => {
 
   const acceptGeneratedScript = async () => {
     if (!generatedScript || generatedScriptHasHardWarnings) {
-      return;
+      return false;
     }
     try {
       setBusy('script');
@@ -873,8 +975,58 @@ const ProjectEditorPage: React.FC = () => {
       });
       hydrateScriptState(response.data.current_revision);
       await loadAll();
+      return true;
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to accept generated script.');
+      const message = err.response?.data?.detail || 'Failed to accept generated script.';
+      setScriptFailure(message);
+      setError(message);
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const acceptGeneratedScriptAndContinue = async () => {
+    const accepted = await acceptGeneratedScript();
+    if (accepted) {
+      setStage('Cast & Voices');
+      setSearchParams({ tab: 'cast' });
+    }
+  };
+
+  const continueToCastAndVoices = async () => {
+    try {
+      if (scriptIsDirty) {
+        setBusy('script');
+        await persistScriptRevision();
+      }
+      setScriptFailure(null);
+      setStage('Cast & Voices');
+      setSearchParams({ tab: 'cast' });
+    } catch (err: any) {
+      const message = err.response?.data?.detail || 'Script validation failed.';
+      setScriptFailure(message);
+      setError(message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const importScriptFile = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      setBusy('script-import');
+      setScriptFailure(null);
+      const response = await apiClient.post<{ current_revision: ScriptRevision }>(`/projects/${id}/script/import`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      hydrateScriptState(response.data.current_revision);
+      await loadAll();
+    } catch (err: any) {
+      const message = err.response?.data?.detail || 'Script import failed.';
+      setScriptFailure(message);
+      setError(message);
     } finally {
       setBusy(null);
     }
@@ -887,7 +1039,9 @@ const ProjectEditorPage: React.FC = () => {
       hydrateScriptState(response.data.current_revision);
       await loadAll();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to restore revision.');
+      const message = err.response?.data?.detail || 'Failed to restore revision.';
+      setScriptFailure(message);
+      setError(message);
     } finally {
       setBusy(null);
     }
@@ -1133,7 +1287,7 @@ const ProjectEditorPage: React.FC = () => {
     return (
       <StudioShell mainClassName="studio-detail-surface">
         <div className="mx-auto w-full max-w-7xl">
-          <div className="studio-page-hero">Loading production...</div>
+          <StudioLoadingState label="Loading production builder..." />
         </div>
       </StudioShell>
     );
@@ -1142,28 +1296,6 @@ const ProjectEditorPage: React.FC = () => {
   return (
     <StudioShell currentProject={project} mainClassName="studio-detail-surface">
       <div className="max-w-7xl mx-auto w-full space-y-6">
-          <div className="studio-page-hero flex items-center justify-between gap-4">
-            <div>
-              <div className="studio-page-kicker">Production Lab · {project?.status}</div>
-              <h1 className="mt-2">{project?.name}</h1>
-              <p className="mt-3 max-w-3xl text-slate-400">
-                Stage the asset, refine the dialogue, render a preview, move it through human review, then publish in assisted or automatic mode.
-              </p>
-              <div className="studio-quick-links mt-4">
-                <Link className="studio-link-pill" to="/">Command Room</Link>
-                <Link className="studio-link-pill" to={`/voice-lab?productionId=${id}`}>Voice Lab</Link>
-                <a className="studio-link-pill" href="#pre-render-preview">Preview Settings</a>
-              </div>
-            </div>
-            <button
-              onClick={loadAll}
-              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"
-            >
-              <RefreshCw size={16} />
-              Refresh
-            </button>
-          </div>
-
           {error && <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-rose-200">{error}</div>}
 
           {stage !== 'Render' && generationJob && (
@@ -1184,27 +1316,43 @@ const ProjectEditorPage: React.FC = () => {
             </section>
           )}
 
-          <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
-            <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-7">
-              {STAGES.map((item) => (
+          <section className="stage-strip" aria-label="Production builder stages">
+            {STAGES.map((item, index) => {
+              const activeIndex = STAGES.indexOf(stage as VisibleStage);
+              const stateClass =
+                item === stage
+                  ? 'now'
+                  : index < activeIndex
+                    ? 'done'
+                    : item === 'Preview' && stepSummaries.Preview === 'Missing'
+                      ? 'locked'
+                      : item === 'Render' && stepSummaries.Render === 'Failed'
+                        ? 'fail'
+                        : item === 'Render' && ['Queued', 'Processing', 'Running', 'Started'].includes(stepSummaries.Render)
+                          ? 'now'
+                          : '';
+              const ordinal = String(index + 1).padStart(2, '0');
+              return (
                 <button
                   key={item}
                   onClick={() => {
                     setStage(item);
-                    setSearchParams({ tab: item === 'Cast & Voices' ? 'cast' : item.toLowerCase() });
+                    setSearchParams({ tab: stageToTab(item) });
                   }}
-                  className={`rounded-2xl px-4 py-3 text-left text-sm font-medium transition ${
-                    stage === item ? 'bg-cyan-300 text-slate-950' : 'bg-slate-950/50 text-slate-300 hover:bg-white/10'
-                  }`}
+                  className={`stage ${stateClass}`}
+                  aria-current={stage === item ? 'step' : undefined}
                 >
-                  <span className="block">{item}</span>
-                  <span className={`mt-1 block text-xs ${stage === item ? 'text-slate-800' : 'text-slate-500'}`}>{stepSummaries[item]}</span>
+                  <span className="dot">{stateClass === 'done' ? '✓' : ordinal}</span>
+                  <span className="stage-copy">
+                    <span className="k">{item}</span>
+                    <span className="v">{stepSummaries[item]}</span>
+                  </span>
                 </button>
-              ))}
-            </div>
+              );
+            })}
           </section>
 
-          <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+          <div className={`grid gap-6 ${stage === 'Preview' || stage === 'Script' ? '' : 'xl:grid-cols-[1.15fr_0.85fr]'}`}>
             <section className="space-y-6">
               {stage === 'Idea' && (
                 <div id="step-idea" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
@@ -1279,360 +1427,64 @@ const ProjectEditorPage: React.FC = () => {
               )}
 
               {stage === 'Script' && (
-                <div id="step-script" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <h2 className="text-xl font-semibold">Dialogue Script</h2>
-                      <p className="mt-2 text-sm text-slate-400">Generate a structured, speaker-separated script, then accept it into the render-ready project script.</p>
-                    </div>
-                    <button
-                      onClick={generateScript}
-                      disabled={busy === 'script-generate'}
-                      className="inline-flex items-center gap-2 rounded-2xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-cyan-200 disabled:opacity-60"
-                    >
-                      <Sparkles size={16} />
-                      {busy === 'script-generate' ? 'Generating...' : generatedScript ? 'Regenerate' : 'Generate Script'}
-                    </button>
-                  </div>
-
-                  {scriptIsDirty && (
-                    <div className="mt-4 rounded-2xl border border-amber-300/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
-                      The dialogue has unsaved changes. Rendering will now save the latest speaker names and lines automatically before queueing a job.
-                    </div>
-                  )}
-
-                  <div className="mt-4 space-y-3 rounded-2xl border border-white/10 bg-slate-950/30 p-4">
-                    <FormatBrowser formats={contentFormats} selectedFormatId={scriptFormatId} onSelect={selectScriptFormat} />
-                    <textarea
-                      value={scriptPrompt}
-                      onChange={(event) => setScriptPrompt(event.target.value)}
-                      placeholder={selectedFormat ? `Idea for a ${selectedFormat.display_name.toLowerCase()}...` : 'Idea for structured script generation'}
-                      rows={3}
-                      className="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                    />
-                    {selectedFormat && (
-                      <div className="rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-3 text-sm text-cyan-50">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-medium text-slate-950">{selectedFormat.display_name}</span>
-                          <span>Ideal {durationLabel(selectedFormat)}</span>
-                          <span>· {speakerCountLabel(selectedFormat)}</span>
-                          <span>· {selectedFormat.section_structure.join(' -> ')}</span>
-                        </div>
-                        <div className="mt-2 text-xs text-cyan-100/80">{selectedFormat.best_use_case}</div>
-                      </div>
-                    )}
-                    <div className="grid gap-3 lg:grid-cols-[0.9fr_0.8fr_1fr]">
-                    <select
-                      value={scriptFormatId}
-                      onChange={(event) => {
-                        const format = findFormat(contentFormats, event.target.value);
-                        if (format) {
-                          selectScriptFormat(format);
-                        }
-                      }}
-                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                    >
-                      {contentFormats.map((format) => (
-                        <option key={format.id} value={format.id}>{format.display_name}</option>
-                      ))}
-                    </select>
-                    <select
-                      value={scriptPlatform}
-                      onChange={(event) => setScriptPlatform(event.target.value as PlatformTarget)}
-                      className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                    >
-                      {platformTargets.map((platform) => (
-                        <option key={platform.id} value={platform.id}>{platform.label}</option>
-                      ))}
-                    </select>
-                      <div className="grid grid-cols-4 gap-2">
-                        {[15, 30, 45, 60].map((duration) => (
-                          <button
-                            key={duration}
-                            onClick={() => setScriptTargetDuration(duration)}
-                            className={`rounded-2xl border px-3 py-3 text-sm ${
-                              scriptTargetDuration === duration
-                                ? 'border-cyan-300 bg-cyan-300/15 text-cyan-100'
-                                : 'border-white/10 bg-slate-950/60 text-slate-300 hover:bg-white/10'
-                            }`}
-                          >
-                            {duration}s
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="grid gap-3 md:grid-cols-3">
-                      <input
-                        value={scriptTone}
-                        onChange={(event) => setScriptTone(event.target.value)}
-                        placeholder="Tone"
-                        className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                      />
-                      <input
-                        value={scriptAudience}
-                        onChange={(event) => setScriptAudience(event.target.value)}
-                        placeholder="Audience"
-                        className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                      />
-                      <input
-                        value={scriptSpeakerNames}
-                        onChange={(event) => setScriptSpeakerNames(event.target.value)}
-                        placeholder={selectedFormat ? `${selectedFormat.default_speaker_roles.join(', ')}` : 'Optional speakers, comma-separated'}
-                        className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                      />
-                    </div>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <button
-                        onClick={generateScript}
-                        disabled={busy === 'script-generate' || !scriptPrompt.trim()}
-                        className="inline-flex items-center gap-2 rounded-2xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-cyan-200 disabled:opacity-60"
-                      >
-                        <Sparkles size={16} />
-                        {busy === 'script-generate' ? 'Generating...' : generatedScript ? 'Regenerate Script' : 'Generate Script'}
-                      </button>
-                      <label className="inline-flex items-center gap-2 text-sm text-slate-300">
-                        <input
-                          type="checkbox"
-                          checked={showScriptDebug}
-                          onChange={(event) => setShowScriptDebug(event.target.checked)}
-                        />
-                        Debug details
-                      </label>
-                    </div>
-                  </div>
-
-                  {(generatedScript || scriptProviderStatus) && (
-                    <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-4 text-sm text-cyan-50">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className={`rounded-full px-3 py-1 text-xs font-medium ${
-                            scriptProviderStatus?.fallback_used
-                              ? 'bg-amber-300 text-slate-950'
-                              : 'bg-emerald-300 text-slate-950'
-                          }`}>
-                            {scriptProviderLabel || 'Unknown'}
-                          </span>
-                          <span>
-                            {scriptProviderStatus?.fallback_used
-                              ? `Fallback script generated${scriptDiagnostics.fallbackReason ? `: ${scriptDiagnostics.fallbackReason}` : ''}`
-                              : 'Generated with Ollama'}
-                          </span>
-                          {generatedScript ? <span>· {titleCase(generatedScript.format_id || generatedScript.content_format_id)}</span> : null}
-                          {generatedScript ? <span>· {scriptDiagnostics.estimatedDuration.toFixed(1)}s / {scriptDiagnostics.targetDuration}s</span> : null}
-                          {generatedScript ? <span>· {scriptDiagnostics.speakerCount} speaker{scriptDiagnostics.speakerCount === 1 ? '' : 's'}</span> : null}
-                          {scriptDiagnostics.cacheHit ? <span>· cache hit</span> : null}
-                          {scriptDiagnostics.repaired ? <span>· repaired</span> : null}
-                          {scriptDiagnostics.normalized ? <span>· normalized</span> : null}
-                          {generatedScript ? (
-                            <span className={scriptDiagnostics.ready ? 'text-emerald-100' : 'text-amber-100'}>
-                              · {scriptDiagnostics.ready ? 'ready to accept' : 'needs review'}
-                            </span>
-                          ) : null}
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {generatedScript && (
-                            <button
-                              onClick={() => navigator.clipboard?.writeText(JSON.stringify(generatedScript, null, 2))}
-                              className="rounded-2xl border border-white/10 px-4 py-2 font-medium text-cyan-50 hover:bg-white/10"
-                            >
-                              Copy JSON
-                            </button>
-                          )}
-                          {generatedScript && (
-                          <button
-                            onClick={acceptGeneratedScript}
-                            disabled={busy === 'script' || generatedScriptHasHardWarnings}
-                            className="rounded-2xl bg-cyan-100 px-4 py-2 font-medium text-slate-950 disabled:opacity-60"
-                          >
-                            Accept Script
-                          </button>
-                          )}
-                        </div>
-                      </div>
-                      {scriptGenerationWarnings.length > 0 && (
-                        <div className="mt-2 text-xs text-amber-100">
-                          {scriptGenerationWarnings.slice(0, 6).join(' · ')}
-                        </div>
-                      )}
-                      {showScriptDebug && scriptProviderStatus && (
-                        <pre className="mt-3 max-h-56 overflow-auto rounded-xl bg-slate-950/80 p-3 text-xs text-slate-300">
-                          {JSON.stringify(scriptProviderStatus, null, 2)}
-                        </pre>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="mt-6 grid gap-4 xl:grid-cols-[1fr_0.8fr]">
-                    <div className="space-y-3">
-                      {scriptLines.map((line, index) => (
-                        <div key={`${line.speaker}-${index}`} className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/40 p-4 md:grid-cols-[0.35fr_1fr]">
-                          <input
-                            value={line.speaker}
-                            onChange={(event) => {
-                              const nextLines = [...scriptLines];
-                              nextLines[index] = { ...nextLines[index], speaker: event.target.value };
-                              syncDraftFromLines(nextLines);
-                            }}
-                            className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm"
-                          />
-                          <textarea
-                            value={line.text}
-                            onChange={(event) => {
-                              const nextLines = [...scriptLines];
-                              nextLines[index] = { ...nextLines[index], text: event.target.value };
-                              syncDraftFromLines(nextLines);
-                            }}
-                            rows={2}
-                            className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm"
-                          />
-                        </div>
-                      ))}
-                      <button
-                        onClick={() => syncDraftFromLines([...scriptLines, { speaker: 'Host', text: '', order: scriptLines.length }])}
-                        className="rounded-2xl border border-dashed border-white/15 px-4 py-3 text-sm hover:bg-white/10"
-                      >
-                        Add Dialogue Line
-                      </button>
-                      {generatedScript && (
-                        <div className="space-y-2 rounded-2xl border border-white/10 bg-slate-950/30 p-4">
-                          <div className="text-sm font-medium text-slate-200">Structured Lines</div>
-                          {generatedScript.lines.slice(0, 8).map((line) => (
-                            <div key={line.id} className="rounded-xl border border-white/10 bg-black/20 p-3 text-sm">
-                              <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-wide text-cyan-200">
-                                <span>{line.section}</span>
-                                <span>·</span>
-                                <span>{line.speaker_label}</span>
-                                <span>·</span>
-                                <span>{line.estimated_duration_sec.toFixed(1)}s</span>
-                              </div>
-                              <div className="mt-1 text-slate-100">{line.text}</div>
-                              <div className="mt-1 text-xs text-slate-400">{line.caption_text}</div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="space-y-4">
-                      <textarea
-                        value={scriptDraft}
-                        onChange={(event) => {
-                          const nextDraft = event.target.value;
-                          setScriptDraft(nextDraft);
-                          setScriptLines(parseDraftToLines(nextDraft));
-                        }}
-                        rows={16}
-                        className="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 font-mono text-sm"
-                      />
-                      <button
-                        onClick={saveScript}
-                        disabled={busy === 'script'}
-                        className="rounded-2xl bg-white px-4 py-3 font-medium text-slate-950 disabled:opacity-60"
-                      >
-                        {busy === 'script' ? 'Saving...' : 'Save Revision'}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="mt-6 grid gap-3 md:grid-cols-2">
-                    {scriptRevisions.slice(0, 6).map((revision) => (
-                      <button
-                        key={revision.id}
-                        onClick={() => restoreRevision(revision.id)}
-                        disabled={busy === `restore-${revision.id}`}
-                        className="rounded-2xl border border-white/10 bg-slate-950/40 p-4 text-left hover:border-cyan-300/40"
-                      >
-                        <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">
-                          {revision.source} {revision.generation_provider ? `· ${revision.generation_provider}` : ''}
-                        </div>
-                        <div className="mt-2 font-medium">Revision #{revision.id}</div>
-                        <div className="mt-2 text-sm text-slate-400">{revision.raw_text.slice(0, 100)}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <ProductionScriptSection
+                  projectName={project?.name}
+                  script={script}
+                  scriptRevisions={scriptRevisions}
+                  scriptDraft={scriptDraft}
+                  scriptLines={scriptLines}
+                  generatedScript={generatedScript}
+                  contentFormats={contentFormats}
+                  selectedFormat={selectedFormat}
+                  platformTargets={platformTargets}
+                  scriptFormatId={scriptFormatId}
+                  scriptPlatform={scriptPlatform}
+                  scriptTargetDuration={scriptTargetDuration}
+                  scriptTone={scriptTone}
+                  scriptAudience={scriptAudience}
+                  scriptSpeakerNames={scriptSpeakerNames}
+                  scriptPrompt={scriptPrompt}
+                  providerMetadata={scriptProviderStatus}
+                  providerLabel={scriptProviderLabel}
+                  generationWarnings={scriptGenerationWarnings}
+                  generatedScriptHasHardWarnings={generatedScriptHasHardWarnings}
+                  scriptIsDirty={scriptIsDirty}
+                  scriptFailure={scriptFailure}
+                  renderReadiness={renderReadiness}
+                  busy={busy}
+                  onPromptChange={setScriptPrompt}
+                  onFormatChange={selectScriptFormatById}
+                  onPlatformChange={setScriptPlatform}
+                  onDurationChange={setScriptTargetDuration}
+                  onToneChange={setScriptTone}
+                  onAudienceChange={setScriptAudience}
+                  onSpeakerNamesChange={setScriptSpeakerNames}
+                  onDraftChange={updateScriptDraft}
+                  onGenerate={generateScript}
+                  onSaveScript={saveScript}
+                  onAcceptGeneratedScript={acceptGeneratedScript}
+                  onAcceptAndContinue={acceptGeneratedScriptAndContinue}
+                  onContinue={continueToCastAndVoices}
+                  onImportFile={importScriptFile}
+                  onRestoreRevision={restoreRevision}
+                />
               )}
 
               {stage === 'Cast & Voices' && (
-                <div id="step-cast" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-                  <h2 className="text-xl font-semibold">Cast & Voices</h2>
-                  <p className="mt-2 text-sm text-slate-400">Assign each script speaker to a reusable character image and voice profile before rendering.</p>
-                  <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-4 text-sm text-cyan-100">
-                    Detected cast: {(script?.characters || scriptLines.map((line) => line.speaker)).slice(0, 2).join(' vs ') || 'Add two dialogue speakers first'}.
-                    The renderer uses these assignments to keep voices, captions, and active character images aligned.
-                  </div>
-                  <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-medium text-slate-100">Speaker assignments</div>
-                        <div className="mt-1 text-sm text-slate-400">
-                          Final generation uses these explicit preset bindings so Voice Lab previews and renders stay consistent.
-                        </div>
-                      </div>
-                    </div>
-                    <div className="mt-4 space-y-3">
-                      {detectedSpeakers.map((speakerName) => {
-                        const binding = speakerBindings.find((item) => item.speaker_name === speakerName);
-                        return (
-                          <div key={speakerName} className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                            <div>
-                              <div className="text-sm font-medium text-slate-200">{speakerName}</div>
-                              <div className="mt-1 text-xs text-slate-500">
-                                {binding ? `${binding.character_display_name} · ${binding.provider}` : 'No preset selected yet'}
-                              </div>
-                              {binding?.voice_profile_id && (
-                                <Link
-                                  to={`/voice-lab?profileId=${encodeURIComponent(binding.voice_profile_id)}&productionId=${id}&speakerId=${encodeURIComponent(speakerName)}`}
-                                  className="mt-2 inline-flex text-xs text-cyan-200 hover:text-cyan-100"
-                                >
-                                  Edit selected voice in Voice Lab
-                                </Link>
-                              )}
-                            </div>
-                            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                              {characterPresets.map((preset) => {
-                                const selected = binding?.character_preset_id === preset.id;
-                                return (
-                                  <button
-                                    key={preset.id}
-                                    onClick={() => updateSpeakerBinding(speakerName, preset.id)}
-                                    disabled={busy === `binding-${speakerName}`}
-                                    className={`flex items-center gap-3 rounded-xl border p-3 text-left text-sm transition ${
-                                      selected
-                                        ? 'border-cyan-300/60 bg-cyan-300/10 text-cyan-100'
-                                        : 'border-white/10 bg-slate-950/50 text-slate-300 hover:bg-white/10'
-                                    } disabled:opacity-60`}
-                                  >
-                                    <div className="grid h-14 w-12 shrink-0 place-items-center overflow-hidden rounded-lg border border-white/10 bg-black/30 text-[10px] text-slate-500">
-                                      {preset.portrait_url ? (
-                                        <img
-                                          src={toApiHref(preset.portrait_url)}
-                                          alt={preset.display_name}
-                                          className="h-full w-full object-cover"
-                                        />
-                                      ) : (
-                                        <span>Image</span>
-                                      )}
-                                    </div>
-                                    <span className="min-w-0">
-                                      <span className="block truncate font-medium">{preset.display_name}</span>
-                                      <span className="mt-1 block truncate text-xs text-slate-500">{preset.tts_provider}</span>
-                                    </span>
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })}
-                      {detectedSpeakers.length === 0 && (
-                        <div className="rounded-2xl border border-dashed border-white/10 px-3 py-4 text-sm text-slate-500">
-                          Add named dialogue lines first so OmniPoster can bind each speaker to a saved preset.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
+                <ProductionCastSection
+                  detectedSpeakers={detectedSpeakers}
+                  scriptLines={scriptLines}
+                  speakerBindings={speakerBindings}
+                  characterPresets={characterPresets}
+                  renderReadiness={renderReadiness}
+                  generationJob={generationJob}
+                  busy={busy}
+                  onUpdateBinding={updateSpeakerBinding}
+                  onRunPreflight={refreshRenderState}
+                  onContinue={() => setStage('Preview')}
+                  projectId={id}
+                  toApiHref={toApiHref}
+                />
               )}
 
               {stage === 'Render' && (
@@ -1770,111 +1622,248 @@ const ProjectEditorPage: React.FC = () => {
 
               {stage === 'Preview' && (
                 <div id="step-preview" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-                  <h2 className="text-xl font-semibold">Preview</h2>
-                  <p className="mt-2 text-sm text-slate-400">Review the 9:16 production frame, then approve the preview before final render and release.</p>
-
-                  <div className="op-lab-preview-layout mt-5">
-                    <ProductionPreviewFrame
-                      previewSettings={previewSettings}
-                      scriptLines={scriptLines}
-                      outputUrl={latestOutput?.asset.content_url || null}
-                      outputKind={latestOutput?.output_kind || null}
-                      ariaLabel="approved production preview frame"
-                    />
+                  <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <ProductionReadinessPanel readiness={productionReadiness} compact />
-                      <div className="mt-4 flex flex-wrap gap-3">
-                        <button
-                          onClick={() => setStage('Render')}
-                          className="rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10"
-                        >
-                          Open Render
-                        </button>
-                        <button
-                          onClick={approveReview}
-                          disabled={!latestReview || busy === 'review-approve'}
-                          className="inline-flex items-center gap-2 rounded-2xl bg-emerald-300 px-4 py-3 font-medium text-slate-950 disabled:opacity-60"
-                        >
-                          <CheckCircle2 size={18} />
-                          Approve preview
-                        </button>
-                      </div>
+                      <h2 className="text-xl font-semibold">Preview</h2>
+                      <p className="mt-2 text-sm text-slate-400">
+                        Preview reflects current script, cast, background, captions, and layout settings before any final render is trusted.
+                      </p>
                     </div>
+                    <StudioStatusBadge tone={productionReadiness.renderPrerequisitesReady ? 'ready' : 'warning'}>
+                      {productionReadiness.renderPrerequisitesReady ? 'Tuning' : 'Locked / missing requirements'}
+                    </StudioStatusBadge>
                   </div>
 
-                  <div className="mt-4 flex flex-wrap gap-3">
-                    <button
-                      onClick={submitForReview}
-                      disabled={!latestOutput || busy === 'review-submit'}
-                      className="inline-flex items-center gap-2 rounded-2xl bg-cyan-300 px-4 py-3 font-medium text-slate-950 disabled:opacity-60"
-                    >
-                      <MessageSquarePlus size={18} />
-                      {busy === 'review-submit' ? 'Submitting...' : 'Submit For Review'}
-                    </button>
-                  </div>
-
-                  <textarea
-                    value={reviewNote}
-                    onChange={(event) => setReviewNote(event.target.value)}
-                    rows={3}
-                    placeholder="Optional reviewer note"
-                    className="mt-4 w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
-                  />
-
-                  {latestReview && (
-                    <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
-                      <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">{latestReview.status}</div>
-                      <div className="mt-2 text-sm text-slate-300">{latestReview.decision_summary || latestReview.rejection_reason || 'Awaiting a review decision.'}</div>
-
-                      <div className="mt-4 space-y-3">
-                        {latestReview.comments.map((comment) => (
-                          <div key={comment.id} className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm">
-                            <div className="text-xs uppercase tracking-[0.2em] text-slate-400">{comment.kind}</div>
-                            <div className="mt-2">{comment.body}</div>
-                          </div>
-                        ))}
+                  {!productionReadiness.renderPrerequisitesReady && (
+                    <div className="studio-stage-notice mt-4">
+                      <div>
+                        <strong>Assign voices and required speaker assets to unlock an accurate preview.</strong>
+                        <span>{productionReadiness.nextAction.label}</span>
                       </div>
-
-                      <textarea
-                        value={reviewComment}
-                        onChange={(event) => setReviewComment(event.target.value)}
-                        rows={3}
-                        placeholder="Add a comment to this review thread"
-                        className="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
-                      />
-                      <div className="mt-3 flex flex-wrap gap-3">
-                        <button
-                          onClick={addReviewComment}
-                          disabled={busy === 'review-comment' || !reviewComment.trim()}
-                          className="rounded-2xl border border-white/10 px-4 py-3 text-sm hover:bg-white/10 disabled:opacity-60"
-                        >
-                          Add Comment
-                        </button>
-                        <button
-                          onClick={approveReview}
-                          disabled={busy === 'review-approve'}
-                          className="inline-flex items-center gap-2 rounded-2xl bg-emerald-300 px-4 py-3 font-medium text-slate-950 disabled:opacity-60"
-                        >
-                          <CheckCircle2 size={18} />
-                          Approve
-                        </button>
-                        <button
-                          onClick={requestChanges}
-                          disabled={busy === 'review-changes'}
-                          className="inline-flex items-center gap-2 rounded-2xl border border-amber-300/30 bg-amber-400/10 px-4 py-3 text-amber-100 disabled:opacity-60"
-                        >
-                          <CircleDashed size={18} />
-                          Request Changes
-                        </button>
-                      </div>
-                      <textarea
-                        value={decisionNote}
-                        onChange={(event) => setDecisionNote(event.target.value)}
-                        rows={3}
-                        className="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
-                      />
+                      <a className="studio-link-pill" href={productionReadiness.nextAction.href}>Open blocker</a>
                     </div>
                   )}
+
+                  <div className="studio-preview-three-col mt-5">
+                    <section aria-label="Approved production preview">
+                      <div className="op-preview-frame-shell">
+                        <div className="op-video-frame op-video-frame-large" aria-label="approved production preview frame">
+                          {previewFrameBackgroundUrl ? (
+                            <img className="op-scene-bg" src={previewFrameBackgroundUrl} alt="" />
+                          ) : (
+                            <div className="op-scene-bg" />
+                          )}
+                          <div className="op-scene-label">
+                            {String(previewSettings.background_metadata?.original_filename || previewSettings.background_preset_id || 'Select a Scene')}
+                          </div>
+                          <div className="op-frame-badge-top">9:16 PREVIEW</div>
+                          {previewFrameMappings.slice(0, 2).map((mapping, index) => (
+                            <div key={mapping.speaker_name || index} className={`op-speaker-zone ${index === 0 ? 'left' : 'right'}`}>
+                              <div className={`op-speaker-avatar ${mapping.character_portrait_url ? '' : 'needs-asset'}`}>
+                                {mapping.character_portrait_url ? (
+                                  <img src={toApiHref(mapping.character_portrait_url)} alt={mapping.character_display_name || mapping.speaker_name} />
+                                ) : (
+                                  <span className="op-speaker-initials">{initials(mapping.character_display_name || mapping.speaker_name)}</span>
+                                )}
+                              </div>
+                              <div className="op-speaker-label-tag">
+                                {String(mapping.speaker_name || `Speaker ${index + 1}`).toUpperCase()} · {mapping.voice_profile_id ? 'VOICE READY' : 'VOICE NEEDS ASSIGNMENT'}
+                              </div>
+                            </div>
+                          ))}
+                          <div className={`op-caption-overlay ${previewSettings.caption_style}`}>
+                            <div className="op-caption-speaker-tag">
+                              {String(previewFrameMappings[0]?.display_label || previewFrameMappings[0]?.speaker_name || 'Caption').toUpperCase()}
+                            </div>
+                            <div className="op-caption-text" style={{ fontSize: `${Math.max(9, Math.round(previewSettings.layout.chat_font_size_px / 1.85))}px` }}>
+                              {previewFrameCaption}
+                            </div>
+                          </div>
+                          <div className="op-preview-missing-stack">
+                            {!scriptLines.length && <span>Script Missing</span>}
+                            {!previewFrameBackgroundUrl && <span>Scene Missing</span>}
+                            {previewFrameMappings.some((mapping) => !mapping.voice_profile_id) && <span>Voice Missing</span>}
+                            {previewFrameMappings.some((mapping) => !mapping.character_portrait_url && !mapping.character_portrait_filename) && <span>Character Image Missing</span>}
+                          </div>
+                          <div className="op-frame-timecode">00:00:08:04 · PREVIEW DRAFT</div>
+                        </div>
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        <StudioButton onClick={submitForReview} disabled={!latestOutput || busy === 'review-submit'} variant="primary">
+                          <MessageSquarePlus size={18} />
+                          {busy === 'review-submit' ? 'Submitting...' : 'Submit For Review'}
+                        </StudioButton>
+                        <StudioButton onClick={() => setStage('Render')}>Open Render</StudioButton>
+                        <StudioButton onClick={approveReview} disabled={!latestReview || busy === 'review-approve'} variant="primary">
+                          <CheckCircle2 size={18} />
+                          Approve preview
+                        </StudioButton>
+                      </div>
+                    </section>
+
+                    <section className="studio-preview-control-stack" aria-label="Scene and layout controls">
+                      <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                        <div className="text-sm font-medium text-slate-100">Scene & Background</div>
+                        <p className="mt-1 text-sm text-slate-400">Select a reusable scene asset. Uploads stay attached to this production.</p>
+                        <div className="mt-3 flex flex-col gap-3">
+                          <input
+                            type="file"
+                            accept="video/mp4,video/webm,video/mpeg,image/png,image/jpeg,image/webp"
+                            onChange={(event) => setSelectedFile(event.target.files?.[0] || null)}
+                            className="block w-full rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 text-sm"
+                          />
+                          <StudioButton onClick={uploadBackground} disabled={!selectedFile || busy === 'upload'} variant="primary">
+                            <Upload size={16} />
+                            {busy === 'upload' ? 'Uploading...' : 'Upload Scene'}
+                          </StudioButton>
+                        </div>
+                        <div className="mt-4 grid gap-2">
+                          {presets.slice(0, 4).map((preset) => (
+                            <button
+                              key={preset.key}
+                              type="button"
+                              onClick={() => choosePreset(preset.key)}
+                              disabled={busy === `preset-${preset.key}`}
+                              className={`rounded-xl border p-3 text-left text-sm transition ${
+                                previewSettings.background_preset_id === preset.key
+                                  ? 'border-cyan-300/60 bg-cyan-300/10 text-cyan-100'
+                                  : 'border-white/10 bg-slate-950/50 text-slate-300 hover:bg-white/10'
+                              }`}
+                            >
+                              <span className="block font-medium">{preset.name}</span>
+                              <span className="mt-1 block text-xs text-slate-500">{preset.description || 'Reusable scene asset'}</span>
+                            </button>
+                          ))}
+                          {!presets.length && <div className="text-sm text-slate-500">No bundled background presets are available from the backend.</div>}
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                        <div className="text-sm font-medium text-slate-100">Layout</div>
+                        <div className="mt-3 grid gap-3">
+                          <label className="text-xs uppercase tracking-[0.2em] text-slate-500" htmlFor="preview-layout-preset">Layout preset</label>
+                          <select
+                            id="preview-layout-preset"
+                            value={previewSettings.layout_preset}
+                            onChange={(event) => void persistPreviewLayout({ ...previewSettings, layout_preset: event.target.value })}
+                            className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                          >
+                            <option value="left_right_locked">Left / Right speakers locked</option>
+                            <option value="stacked_reaction">Stacked reaction</option>
+                            <option value="narrator_only">Narrator only</option>
+                          </select>
+                          <label className="text-xs uppercase tracking-[0.2em] text-slate-500" htmlFor="preview-caption-style">Caption style</label>
+                          <select
+                            id="preview-caption-style"
+                            value={previewSettings.caption_style}
+                            onChange={(event) => void persistPreviewLayout({ ...previewSettings, caption_style: event.target.value })}
+                            className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                          >
+                            <option value="bold_bubble">Bold bubble captions</option>
+                            <option value="clean_lower_third">Clean lower-third</option>
+                            <option value="large_karaoke">Large karaoke captions</option>
+                          </select>
+                        </div>
+                        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                          <StudioButton onClick={() => adjustCharacterScale(-0.05)} disabled={previewSettings.layout.character_scale <= 0.75}>Smaller PNG</StudioButton>
+                          <StudioButton onClick={() => adjustCharacterScale(0.05)} disabled={previewSettings.layout.character_scale >= 1.5}>Larger PNG</StudioButton>
+                          <StudioButton onClick={() => adjustChatFontSize(-1)} disabled={previewSettings.layout.chat_font_size_px <= 12}>Smaller captions</StudioButton>
+                          <StudioButton onClick={() => adjustChatFontSize(1)} disabled={previewSettings.layout.chat_font_size_px >= 32}>Larger captions</StudioButton>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section className="studio-preview-control-stack" aria-label="Preview readiness and diagnostics">
+                      <ProductionReadinessPanel readiness={productionReadiness} compact />
+                      <textarea
+                        value={reviewNote}
+                        onChange={(event) => setReviewNote(event.target.value)}
+                        rows={3}
+                        placeholder="Optional reviewer note"
+                        className="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3"
+                      />
+                      {latestReview && (
+                        <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                          <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">{latestReview.status}</div>
+                          <div className="mt-2 text-sm text-slate-300">{latestReview.decision_summary || latestReview.rejection_reason || 'Awaiting a review decision.'}</div>
+                          <div className="mt-3 flex flex-wrap gap-3">
+                            <StudioButton onClick={addReviewComment} disabled={busy === 'review-comment' || !reviewComment.trim()}>Add Comment</StudioButton>
+                            <StudioButton onClick={approveReview} disabled={busy === 'review-approve'} variant="primary">Approve</StudioButton>
+                            <StudioButton onClick={requestChanges} disabled={busy === 'review-changes'} variant="warning">
+                              <CircleDashed size={18} />
+                              Request Changes
+                            </StudioButton>
+                          </div>
+                          <textarea
+                            value={reviewComment}
+                            onChange={(event) => setReviewComment(event.target.value)}
+                            rows={3}
+                            placeholder="Add a comment to this review thread"
+                            className="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                          />
+                          <textarea
+                            value={decisionNote}
+                            onChange={(event) => setDecisionNote(event.target.value)}
+                            rows={3}
+                            className="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                          />
+                        </div>
+                      )}
+                      <StudioDiagnosticsPanel title="Advanced preview diagnostics">
+                        <pre className="max-h-64 overflow-auto rounded-xl border border-white/10 bg-slate-950/70 p-3 text-xs text-slate-400">
+                          {JSON.stringify(
+                            {
+                              background: previewSettings.background_metadata,
+                              speaker_mappings: previewSettings.speaker_mappings,
+                              layout: previewSettings.layout,
+                              missing_voice_speakers: productionReadiness.missingVoiceSpeakers,
+                              missing_character_images: productionReadiness.missingCharacterImageSpeakers,
+                            },
+                            null,
+                            2
+                          )}
+                        </pre>
+                      </StudioDiagnosticsPanel>
+                    </section>
+                  </div>
+                </div>
+              )}
+
+              {stage === 'Generated Media' && (
+                <div id="step-generated-media" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h2 className="text-xl font-semibold">Generated Media</h2>
+                      <p className="mt-2 text-sm text-slate-400">Review outputs created by this production before release prep. Segment WAVs remain visible in render diagnostics.</p>
+                    </div>
+                    <Link className="studio-link-pill" to="/generated-media">Open full library</Link>
+                  </div>
+                  <div className="mt-4 grid gap-3">
+                    {outputs.map((output) => (
+                      <div key={output.id} className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">{titleCase(output.output_kind)}</div>
+                            <div className="mt-2 font-medium">{output.asset.original_filename}</div>
+                            <div className="mt-1 text-sm text-slate-400">
+                              {output.provider_name} · {output.duration_ms ? `${Math.round(output.duration_ms / 1000)}s` : 'Duration pending'}
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <a className="studio-link-pill" href={`${apiBase}${output.asset.content_url}`}>Download</a>
+                            <button type="button" className="studio-link-pill" onClick={() => setStage('Release')}>Release prep</button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                    {!outputs.length && (
+                      <StudioEmptyState
+                        title="No generated media for this production yet."
+                        description="Start a Fast Draft or Final Render to create MP4 output and audio artifacts."
+                        action={<StudioButton variant="primary" onClick={() => setStage('Render')}>Open Render</StudioButton>}
+                      />
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -2121,6 +2110,7 @@ const ProjectEditorPage: React.FC = () => {
               )}
             </section>
 
+            {stage !== 'Preview' && stage !== 'Script' && (
             <section className="space-y-6">
               <div id="pre-render-preview" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
                 <div className="flex items-center justify-between gap-4">
@@ -2248,6 +2238,7 @@ const ProjectEditorPage: React.FC = () => {
                 </div>
               </div>
             </section>
+            )}
           </div>
         </div>
     </StudioShell>
