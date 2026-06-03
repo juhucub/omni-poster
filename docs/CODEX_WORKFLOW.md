@@ -1,6 +1,6 @@
 # Omniposter Codex Workflow
 
-Last updated: 2026-05-06
+Last updated: 2026-06-02
 
 This is the required workflow for Codex tasks in Omniposter.
 
@@ -98,6 +98,24 @@ npm run build
 pnpm test
 pnpm build
 ```
+
+Playwright/browser verification:
+
+- When Codex runs local Playwright checks for a user-observable browser review, prefer headed mode so the user can watch the Chromium window:
+
+```bash
+cd frontend && npm run test:e2e:headed
+cd frontend && npx playwright test --headed
+```
+
+- For focused debugging where the browser should pause and stay visible, use:
+
+```bash
+cd frontend && PWDEBUG=1 npx playwright test --headed
+```
+
+- Use headless Playwright only when running CI-style verification, when the user explicitly asks for headless mode, or when a GUI browser cannot be launched in the current environment.
+- Headed/browser UI commands may require GUI escalation approval in Codex; request it rather than silently falling back to headless if the user wants to see the open browser tab.
 
 Docker/runtime examples:
 
