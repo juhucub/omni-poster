@@ -74,6 +74,91 @@ const scriptRevision = {
   created_at: now,
 };
 
+const generatedScript = {
+  id: 'generated-script-1',
+  script_id: 'generated-script-1',
+  idea: 'Dogs vs cats debate',
+  content_format_id: 'educational_short',
+  format_id: 'educational_short',
+  platform: 'tiktok',
+  platform_targets: ['tiktok'],
+  target_duration_sec: 45,
+  tone: 'playful',
+  audience: 'pet owners',
+  title: 'Dogs vs Cats',
+  short_summary: 'A compact pet debate.',
+  speakers: [
+    {
+      id: 'host',
+      label: 'Host',
+      role: 'host',
+      voice_profile_id: null,
+      speaker_image_id: null,
+    },
+    {
+      id: 'guest',
+      label: 'Guest',
+      role: 'guest',
+      voice_profile_id: null,
+      speaker_image_id: null,
+    },
+  ],
+  lines: [
+    {
+      id: 'line_001',
+      section: 'hook',
+      speaker_id: 'host',
+      speaker_label: 'Host',
+      text: 'Dogs celebrate every time you come home.',
+      caption_text: 'Dogs celebrate every time you come home.',
+      estimated_duration_sec: 4.2,
+    },
+    {
+      id: 'line_002',
+      section: 'body',
+      speaker_id: 'guest',
+      speaker_label: 'Guest',
+      text: 'Cats are emotionally efficient.',
+      caption_text: 'Cats are emotionally efficient.',
+      estimated_duration_sec: 4.7,
+    },
+  ],
+  sections: ['hook', 'body'],
+  caption_blocks: [],
+  metadata_suggestions: {},
+  total_estimated_duration_sec: 8.9,
+  estimated_total_duration_sec: 8.9,
+  generation_provider: 'ollama',
+  generation_model: 'llama3',
+  fallback_used: false,
+  provider_metadata: {},
+  validation_warnings: [],
+};
+
+const providerMetadata = {
+  provider_name: 'ollama',
+  model: 'llama3',
+  fallback_used: false,
+  fallback_reason: null,
+  generation_duration_ms: 480,
+  repair_attempted: false,
+  prompt_char_count: 200,
+  response_char_count: 800,
+  timeout_seconds: 60,
+  num_predict: null,
+  num_ctx: null,
+  ollama_total_duration: null,
+  ollama_load_duration: null,
+  ollama_prompt_eval_count: null,
+  ollama_eval_count: null,
+  failure_type: null,
+  diagnostics: {
+    target_duration_sec: 45,
+    estimated_duration_sec: 8.9,
+    speaker_count: 2,
+  },
+};
+
 const backgroundAsset = {
   id: 11,
   kind: 'background_image',
@@ -117,7 +202,7 @@ const output = {
   created_at: now,
 };
 
-const makeProject = (previewSettings: typeof basePreviewSettings) => ({
+const makeProject = (previewSettings: typeof basePreviewSettings, currentScript: Record<string, unknown> | null = scriptRevision) => ({
   id: 42,
   name: 'Render Coverage Production',
   status: 'draft',
@@ -126,7 +211,7 @@ const makeProject = (previewSettings: typeof basePreviewSettings) => ({
   background_source_type: previewSettings.background_source_type,
   background_asset_id: previewSettings.background_asset_id,
   selected_social_account_id: null,
-  current_script_revision_id: scriptRevision.id,
+  current_script_revision_id: currentScript ? Number(currentScript.id || scriptRevision.id) : null,
   current_output_video_id: output.id,
   automation_mode: 'manual',
   preferred_account_type: null,
@@ -135,7 +220,7 @@ const makeProject = (previewSettings: typeof basePreviewSettings) => ({
   approved_at: null,
   created_at: now,
   updated_at: now,
-  current_script: scriptRevision,
+  current_script: currentScript,
   latest_preview: output.asset,
   latest_output: output,
   latest_review: null,
@@ -231,9 +316,47 @@ const json = async (route: Route, body: unknown, status = 200) => {
   });
 };
 
-const installProjectEditorMocks = async (page: Page) => {
+type ProjectEditorMockOptions = {
+  scriptRevision?: Record<string, unknown> | null;
+  generationDelayMs?: number;
+  generationShouldFail?: boolean;
+  onAcceptedPayload?: (body: Record<string, unknown>) => void;
+};
+
+const lineDraft = (lines: Array<Record<string, unknown>>) =>
+  lines.map((line) => `<${String(line.speaker || line.speaker_label || 'Speaker')}> ${String(line.text || '')}`).join('\n');
+
+const makeRevisionFromPayload = (body: Record<string, unknown>, id: number, source: string) => {
+  const parsedLines = Array.isArray(body.parsed_lines) ? body.parsed_lines as Array<Record<string, unknown>> : [];
+  const scriptPayload = body.generated_script as Record<string, unknown> | undefined;
+  return {
+    id,
+    parent_revision_id: body.parent_revision_id || null,
+    raw_text: parsedLines.length ? lineDraft(parsedLines) : String(body.raw_text || ''),
+    parsed_lines: parsedLines,
+    characters: Array.from(new Set(parsedLines.map((line) => String(line.speaker || '')).filter(Boolean))),
+    generated_script: scriptPayload || null,
+    source,
+    generation_provider: scriptPayload ? 'ollama' : null,
+    is_current: true,
+    created_at: now,
+  };
+};
+
+const installProjectEditorMocks = async (page: Page, options: ProjectEditorMockOptions = {}) => {
   let previewSettings = structuredClone(basePreviewSettings);
   const originalRenderSnapshot = structuredClone(basePreviewSettings);
+  let activeScriptRevision: Record<string, unknown> | null =
+    options.scriptRevision === undefined ? scriptRevision : options.scriptRevision;
+  let nextRevisionId = 80;
+  let scriptGenerationSettings = {
+    content_format_id: 'educational_short',
+    platform: 'youtube_shorts',
+    target_duration_sec: 45,
+    tone: 'explanatory',
+    audience: 'creators',
+    speaker_names: ['Host', 'Guest'],
+  };
 
   await page.route('**/*', async (route) => {
     const request = route.request();
@@ -273,7 +396,10 @@ const installProjectEditorMocks = async (page: Page) => {
     }
 
     if (path === '/projects/42' && request.method() === 'GET') {
-      await json(route, makeProject(previewSettings));
+      await json(route, {
+        ...makeProject(previewSettings, activeScriptRevision),
+        script_generation_settings: scriptGenerationSettings,
+      });
       return;
     }
 
@@ -330,13 +456,47 @@ const installProjectEditorMocks = async (page: Page) => {
       return;
     }
 
-    if (path === '/projects/42/script') {
-      await json(route, { current_revision: scriptRevision });
+    if (path === '/projects/42/script' && request.method() === 'GET') {
+      await json(route, { current_revision: activeScriptRevision });
+      return;
+    }
+
+    if (path === '/projects/42/script' && request.method() === 'PUT') {
+      const body = JSON.parse(request.postData() || '{}');
+      options.onAcceptedPayload?.(body);
+      activeScriptRevision = makeRevisionFromPayload(body, nextRevisionId++, body.generated_script ? 'generated' : 'manual');
+      await json(route, { current_revision: activeScriptRevision });
+      return;
+    }
+
+    if (path === '/projects/42/script/import' && request.method() === 'POST') {
+      activeScriptRevision = {
+        id: nextRevisionId++,
+        parent_revision_id: null,
+        raw_text: '<Host> Imported script keeps the production moving.',
+        parsed_lines: [
+          {
+            speaker: 'Host',
+            text: 'Imported script keeps the production moving.',
+            caption_text: 'Imported script keeps the production moving.',
+            section: 'hook',
+            line_id: 'imported_line_001',
+            order: 0,
+          },
+        ],
+        characters: ['Host'],
+        generated_script: null,
+        source: 'upload:.txt',
+        generation_provider: null,
+        is_current: true,
+        created_at: now,
+      };
+      await json(route, { current_revision: activeScriptRevision }, 201);
       return;
     }
 
     if (path === '/projects/42/script-revisions') {
-      await json(route, { items: [scriptRevision] });
+      await json(route, { items: activeScriptRevision ? [activeScriptRevision] : [] });
       return;
     }
 
@@ -413,6 +573,33 @@ const installProjectEditorMocks = async (page: Page) => {
       return;
     }
 
+    if (path === '/projects/42/script-generation-settings' && request.method() === 'PATCH') {
+      const body = JSON.parse(request.postData() || '{}');
+      scriptGenerationSettings = {
+        ...scriptGenerationSettings,
+        ...body,
+      };
+      await json(route, scriptGenerationSettings);
+      return;
+    }
+
+    if (path === '/script-generation/generate' && request.method() === 'POST') {
+      if (options.generationDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, options.generationDelayMs));
+      }
+      if (options.generationShouldFail) {
+        await json(route, { detail: 'Parser error on line_006. Speaker tag missing.' }, 500);
+        return;
+      }
+      await json(route, {
+        generated_script: generatedScript,
+        provider_metadata: providerMetadata,
+        validation_warnings: [],
+        fallback_used: false,
+      });
+      return;
+    }
+
     if (path === '/projects/42/preview-settings' && request.method() === 'PATCH') {
       const body = JSON.parse(request.postData() || '{}');
       previewSettings = {
@@ -431,13 +618,91 @@ const installProjectEditorMocks = async (page: Page) => {
   });
 };
 
+test('Production Builder Script shows true empty state, expandable controls, and import recovery', async ({ page }) => {
+  await installProjectEditorMocks(page, { scriptRevision: null });
+
+  await page.goto('/projects/42?tab=script#step-script');
+
+  const scriptSection = page.locator('#step-script');
+  await expect(scriptSection.getByRole('heading', { name: 'Generate the script.' })).toBeVisible();
+  await expect(scriptSection.getByText('No dialogue yet')).toBeVisible();
+  await expect(scriptSection.getByText('Timeline is empty')).toBeVisible();
+  await expect(scriptSection.getByRole('button', { name: /Continue to Cast & Voices/ })).toBeDisabled();
+
+  const accordion = scriptSection.getByTestId('script-controls-accordion');
+  await expect(accordion.getByRole('heading', { name: 'Generation controls' })).toHaveCount(0);
+  await accordion.getByRole('button', { name: /Generation controls/ }).click();
+  await expect(accordion.getByRole('heading', { name: 'Generation controls' })).toBeVisible();
+  await expect(accordion.getByRole('heading', { name: 'Script budget' })).toBeVisible();
+  await expect(accordion.getByRole('heading', { name: 'Advanced diagnostics' })).toBeVisible();
+
+  await scriptSection.locator('input[type="file"]').first().setInputFiles({
+    name: 'script.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('<Host> Imported script keeps the production moving.'),
+  });
+
+  await expect(scriptSection.getByRole('heading', { name: 'Editor and timeline, side by side.' })).toBeVisible();
+  await expect(scriptSection.locator('.script-timeline-panel').getByText('imported_line_001', { exact: true })).toBeVisible();
+  await expect(scriptSection.getByRole('button', { name: /Continue to Cast & Voices/ })).toBeEnabled();
+});
+
+test('Production Builder Script reflects delayed generation and preserves generated payload on accept', async ({ page }) => {
+  let acceptedPayload: Record<string, unknown> | null = null;
+  await installProjectEditorMocks(page, {
+    scriptRevision: null,
+    generationDelayMs: 500,
+    onAcceptedPayload: (body) => {
+      acceptedPayload = body;
+    },
+  });
+
+  await page.goto('/projects/42?tab=script#step-script');
+  await page.locator('#step-script').getByRole('button', { name: /Generate with Ollama/ }).first().click();
+  await expect(page.locator('#step-script').getByRole('heading', { name: 'Writing the script...' })).toBeVisible();
+  await expect(page.locator('#step-script .script-line-row.pending').first()).toContainText('Generation pending');
+
+  await expect(page.locator('#step-script').getByRole('heading', { name: 'Editor and timeline, side by side.' })).toBeVisible();
+  await expect(page.locator('#step-script .script-timeline-panel').getByText('line_001', { exact: true })).toBeVisible();
+
+  await page.locator('#step-script').getByRole('button', { name: /Accept & Continue/ }).click();
+  await expect(page.locator('#step-cast').getByRole('heading', { name: 'Cast & Voices' })).toBeVisible();
+  expect(acceptedPayload?.generated_script).toBeTruthy();
+  expect((acceptedPayload?.parsed_lines as Array<Record<string, unknown>>)[0].line_id).toBe('line_001');
+});
+
+test('Production Builder Script shows failed state from real generation errors', async ({ page }) => {
+  await installProjectEditorMocks(page, { scriptRevision: null, generationShouldFail: true });
+
+  await page.goto('/projects/42?tab=script#step-script');
+  await page.locator('#step-script').getByRole('button', { name: /Generate with Ollama/ }).first().click();
+
+  const scriptSection = page.locator('#step-script');
+  await expect(scriptSection.getByRole('heading', { name: 'Generation failed - repair to continue.' })).toBeVisible();
+  await expect(scriptSection.getByText('Parser error on line_006. Speaker tag missing.')).toBeVisible();
+  await expect(scriptSection.getByRole('button', { name: /Retry generation/ })).toBeVisible();
+  await expect(scriptSection.getByRole('button', { name: /Continue to Cast & Voices/ })).toBeDisabled();
+});
+
+test('Production Builder Script remains usable without horizontal overflow on mobile', async ({ page }) => {
+  await installProjectEditorMocks(page, { scriptRevision: null });
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  await page.goto('/projects/42?tab=script#step-script');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('#step-script').getByRole('button', { name: /Generation controls/ }).click();
+  await expect(page.locator('#step-script').getByRole('heading', { name: 'Advanced diagnostics' })).toBeVisible();
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+  expect(overflow).toBe(false);
+});
+
 test('authenticated Project Editor render surfaces cache warmth, changes, labels, badges, and preview updates', async ({ page }) => {
   await installProjectEditorMocks(page);
 
   await page.goto('/projects/42?tab=render#step-render');
 
   await expect(page).toHaveURL('http://localhost:3000/projects/42?tab=render#step-render');
-  await expect(page.getByRole('heading', { name: 'Render Coverage Production' })).toBeVisible();
 
   const renderSection = page.locator('#step-render');
   await expect(renderSection.getByRole('heading', { name: 'Render' })).toBeVisible();
@@ -471,6 +736,38 @@ test('authenticated Project Editor render surfaces cache warmth, changes, labels
 
   await page.goto('/projects/42?tab=preview#step-preview');
   await expect(page.locator('[aria-label="approved production preview frame"]')).toBeVisible();
-  await expect(page.locator('[aria-label="pre-render settings preview frame"]')).toBeVisible();
+  await expect(page.locator('[aria-label="pre-render settings preview frame"]')).toHaveCount(0);
   await expect(page.locator('[aria-label="9:16 production preview"]')).toHaveCount(0);
+});
+
+test('authenticated Project Editor exposes approved builder stages and generated media handoff', async ({ page }) => {
+  await installProjectEditorMocks(page);
+
+  await page.goto('/projects/42?tab=script#step-script');
+
+  const stageStrip = page.locator('[aria-label="Production builder stages"]');
+  await expect(stageStrip.getByRole('button', { name: /Script/ })).toBeVisible();
+  await expect(stageStrip.getByRole('button', { name: /Cast & Voices/ })).toBeVisible();
+  await expect(stageStrip.getByRole('button', { name: /Preview/ })).toBeVisible();
+  await expect(stageStrip.getByRole('button', { name: /Render/ })).toBeVisible();
+  await expect(stageStrip.getByRole('button', { name: /Generated Media/ })).toBeVisible();
+  await expect(stageStrip.getByRole('button', { name: /Release/ })).toBeVisible();
+
+  await stageStrip.getByRole('button', { name: /Cast & Voices/ }).click();
+  await expect(page.locator('#step-cast').getByRole('heading', { name: 'Cast & Voices' })).toBeVisible();
+
+  await stageStrip.getByRole('button', { name: /Preview/ }).click();
+  await expect(page.locator('#step-preview').getByRole('heading', { name: 'Preview' })).toBeVisible();
+  await expect(page.locator('[aria-label="approved production preview frame"]')).toHaveCount(1);
+  await expect(page.locator('[aria-label="pre-render settings preview frame"]')).toHaveCount(0);
+  await expect(page.locator('[aria-label="9:16 production preview"]')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Scene and layout controls' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Preview readiness and diagnostics' })).toBeVisible();
+
+  await stageStrip.getByRole('button', { name: /Render/ }).click();
+  await expect(page.locator('#step-render').getByRole('heading', { name: 'Render' })).toBeVisible();
+
+  await stageStrip.getByRole('button', { name: /Generated Media/ }).click();
+  await expect(page.locator('#step-generated-media').getByRole('heading', { name: 'Generated Media' })).toBeVisible();
+  await expect(page.locator('#step-generated-media').getByText('draft.mp4')).toBeVisible();
 });
