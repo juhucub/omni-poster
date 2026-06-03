@@ -734,6 +734,60 @@ def test_script_generation_endpoint_and_project_revision_persist_generated_scrip
     assert current["generated_script"]["id"] == generated_script["id"]
     assert current["parsed_lines"][0]["speaker"]
     assert current["parsed_lines"][0]["text"]
+    assert current["parsed_lines"][0]["caption_text"]
+    assert current["parsed_lines"][0]["section"]
+    assert current["parsed_lines"][0]["line_id"] == generated_script["lines"][0]["id"]
+
+
+def test_script_revision_line_metadata_survives_get_and_restore(auth_client: TestClient):
+    project = auth_client.post("/projects", json={"name": "Script Metadata Project", "target_platform": "youtube"})
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+
+    saved = auth_client.put(
+        f"/projects/{project_id}/script",
+        json={
+            "parsed_lines": [
+                {
+                    "speaker": "Host",
+                    "text": "Stable IDs keep voice cache reuse auditable.",
+                    "caption_text": "Stable IDs keep cache reuse auditable.",
+                    "section": "hook",
+                    "line_id": "line_host_001",
+                    "order": 0,
+                },
+                {
+                    "speaker": "Guest",
+                    "text": "Captions need to survive script editing too.",
+                    "caption_text": "Captions survive script editing too.",
+                    "section": "body",
+                    "line_id": "line_guest_002",
+                    "order": 1,
+                },
+            ],
+            "source": "manual",
+        },
+    )
+    assert saved.status_code == 200
+    revision_id = saved.json()["current_revision"]["id"]
+    first_line = saved.json()["current_revision"]["parsed_lines"][0]
+    assert first_line["caption_text"] == "Stable IDs keep cache reuse auditable."
+    assert first_line["section"] == "hook"
+    assert first_line["line_id"] == "line_host_001"
+
+    fetched = auth_client.get(f"/projects/{project_id}/script")
+    assert fetched.status_code == 200
+    fetched_line = fetched.json()["current_revision"]["parsed_lines"][1]
+    assert fetched_line["caption_text"] == "Captions survive script editing too."
+    assert fetched_line["section"] == "body"
+    assert fetched_line["line_id"] == "line_guest_002"
+
+    restored = auth_client.post(f"/projects/{project_id}/script-revisions/{revision_id}/restore")
+    assert restored.status_code == 200
+    restored_line = restored.json()["current_revision"]["parsed_lines"][0]
+    assert restored_line["caption_text"] == "Stable IDs keep cache reuse auditable."
+    assert restored_line["section"] == "hook"
+    assert restored_line["line_id"] == "line_host_001"
 
 
 def test_project_script_generation_settings_persist_and_reload(auth_client: TestClient):
