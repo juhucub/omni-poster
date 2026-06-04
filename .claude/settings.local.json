@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m pytest backend/app/tests/test_voice_domain.py -q)",
+      "Bash(python3 -m pytest backend/app/tests/test_script_generation.py -v)",
+      "Bash(python3 -m pytest backend/app/tests/test_vertical_slice.py -v)",
+      "Bash(git -C /Users/jacobgardner/Dev/omni-poster status --short)",
+      "Bash(python3 -m compileall backend/app)",
+      "Bash(python3 -m pytest backend/app/tests/test_render_domain.py backend/app/tests/test_script_generation.py backend/app/tests/test_vertical_slice.py -v)",
+      "Bash(bash scripts/dev/check_repo_hygiene.sh)",
+      "Bash(python3 -m pytest backend/app/tests/test_voice_domain.py backend/app/tests/test_render_domain.py backend/app/tests/test_script_generation.py backend/app/tests/test_vertical_slice.py -q)",
+      "Bash(python3 -m pytest backend/app/tests/test_voice_domain.py backend/app/tests/test_render_domain.py backend/app/tests/test_script_generation.py backend/app/tests/test_vertical_slice.py)",
+      "Bash(python3 -m pytest backend/app/tests/test_vertical_slice.py)",
+      "Bash(python3 -m pytest app/tests/)",
+      "Bash(npm test *)",
+      "Bash(npm run *)",
+      "Bash(npx playwright *)",
+      "Bash(python3 -m pytest backend/app/tests/test_script_generation.py -q)"
+    ]
+  }
+}

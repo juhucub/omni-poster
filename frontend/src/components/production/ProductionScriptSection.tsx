@@ -90,12 +90,6 @@ const hardWarningMarkers = [
   'invalid',
 ];
 
-const platformLabel = (value: PlatformTarget) => {
-  if (value === 'youtube_shorts') return 'YouTube Shorts';
-  if (value === 'instagram_reels') return 'Instagram Reels';
-  return 'TikTok / Reels';
-};
-
 const compactDuration = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds <= 0) {
     return '0s';
@@ -754,6 +748,22 @@ const ProductionScriptSection: React.FC<ProductionScriptSectionProps> = ({
     ]
   );
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [timelineExpanded, setTimelineExpanded] = useState(false);
+  const TIMELINE_COLLAPSED_COUNT = 5;
+
+  const cacheSegmentMap = useMemo(() => {
+    const warmth = (renderReadiness?.cache_warmth || {}) as any;
+    const rawSegments: any[] = Array.isArray(warmth.tts_segments) ? warmth.tts_segments : [];
+    const map = new Map<string, { status: 'cached' | 'regen' | 'check'; provider: string }>();
+    for (const seg of rawSegments) {
+      if (!seg.line_id) continue;
+      let status: 'cached' | 'regen' | 'check' = 'check';
+      if (seg.cached === true) status = 'cached';
+      else if (seg.cached === false && seg.provider) status = 'regen';
+      map.set(seg.line_id, { status, provider: seg.provider || '' });
+    }
+    return map;
+  }, [renderReadiness]);
   const canUseGeneratedActions = viewModel.canAccept && busy !== 'script' && busy !== 'script-generate';
   const canProceed = viewModel.canProceed && busy !== 'script' && busy !== 'script-generate';
   const editorStatusChip =
@@ -989,34 +999,74 @@ const ProductionScriptSection: React.FC<ProductionScriptSectionProps> = ({
             </div>
           ) : (
             <div className="script-timeline-scroll">
-              {viewModel.timelineLines.map((line) => (
-                <article key={line.key} className={`script-line-row ${line.status}`}>
-                  <div className="script-line-id">
-                    <span>{line.idLabel}</span>
-                    <em>{line.section}</em>
-                  </div>
-                  <span className="script-speaker-pill">{line.speaker}</span>
-                  <div className="script-line-copy">
-                    <p>{line.text}</p>
-                    {line.captionText && <small>{line.captionText}</small>}
-                  </div>
-                  <span className="script-line-duration">
-                    {line.status === 'pending' ? '--' : line.durationSeconds ? `${line.durationSeconds.toFixed(1)}s` : 'est'}
-                  </span>
-                  <button
-                    type="button"
-                    className="btn ghost sm script-line-edit"
-                    onClick={() => {
-                      const editor = document.querySelector<HTMLTextAreaElement>('.script-draft-textarea');
-                      editor?.focus();
-                    }}
-                    disabled={line.status === 'pending'}
-                  >
-                    <PencilLine size={13} />
-                    Edit
-                  </button>
-                </article>
-              ))}
+              {(timelineExpanded
+                ? viewModel.timelineLines
+                : viewModel.timelineLines.slice(0, TIMELINE_COLLAPSED_COUNT)
+              ).map((line) => {
+                const cacheEntry = cacheSegmentMap.get(line.idLabel);
+                const badgeStatus = cacheEntry
+                  ? cacheEntry.status
+                  : (line.status as string);
+                const badgeLabel: Record<string, string> = {
+                  cached: 'Cached', regen: 'Regen', check: 'Check',
+                  ready: 'Ready', pending: 'Pending', warning: 'Warning', failed: 'Failed',
+                };
+                const provider = cacheEntry?.provider;
+                return (
+                  <article key={line.key} className={`script-line-row ${line.status}`}>
+                    <span className={`script-line-badge is-${badgeStatus}`}>
+                      {badgeLabel[badgeStatus] ?? badgeStatus}
+                    </span>
+                    <div className="script-line-body">
+                      <div className="script-line-meta">
+                        <span className="script-line-meta-id">{line.idLabel}</span>
+                        <span>·</span>
+                        <span>{line.section}</span>
+                        <span>·</span>
+                        <span>{line.speaker}</span>
+                        {provider && (
+                          <>
+                            <span>·</span>
+                            <span className="script-line-provider">{provider}</span>
+                          </>
+                        )}
+                      </div>
+                      <div className="script-line-text">{line.text}</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn ghost sm script-line-edit"
+                      onClick={() => {
+                        const editor = document.querySelector<HTMLTextAreaElement>('.script-draft-textarea');
+                        if (!editor) return;
+                        const idx = scriptDraft.indexOf(`[${line.idLabel}`);
+                        editor.focus();
+                        if (idx >= 0) {
+                          editor.setSelectionRange(idx, idx);
+                          const linesBefore = scriptDraft.slice(0, idx).split('\n').length - 1;
+                          const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 18;
+                          editor.scrollTop = linesBefore * lineHeight;
+                        }
+                      }}
+                      disabled={line.status === 'pending'}
+                    >
+                      <PencilLine size={13} />
+                      Edit
+                    </button>
+                  </article>
+                );
+              })}
+              {viewModel.timelineLines.length > TIMELINE_COLLAPSED_COUNT && (
+                <button
+                  type="button"
+                  className="script-timeline-expand-btn"
+                  onClick={() => setTimelineExpanded((v) => !v)}
+                >
+                  {timelineExpanded
+                    ? 'Show fewer'
+                    : `Show all ${viewModel.timelineLines.length} lines`}
+                </button>
+              )}
             </div>
           )}
         </section>

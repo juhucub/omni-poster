@@ -177,36 +177,6 @@ const clampPreviewLayout = (settings: ProjectPreviewSettings): ProjectPreviewSet
   },
 });
 
-const generationStageLabel = (job: GenerationJob | null) => {
-  if (!job) {
-    return null;
-  }
-  if (job.status === 'queued') {
-    return 'Queued';
-  }
-  if (job.status === 'completed') {
-    return 'Completed';
-  }
-  if (job.status === 'failed') {
-    return 'Failed';
-  }
-  if (job.progress >= 88) {
-    return 'Packaging output';
-  }
-  if (job.progress >= 80) {
-    return 'Encoding video';
-  }
-  if (job.progress >= 68) {
-    return 'Assembling timeline';
-  }
-  if (job.progress >= 58) {
-    return 'Preparing background';
-  }
-  if (job.progress >= 46) {
-    return 'Generating voices';
-  }
-  return 'Starting render';
-};
 
 type ProductionStageState = 'Missing' | 'Ready' | 'Warning' | 'Failed' | 'Verified';
 
@@ -409,20 +379,6 @@ const ProjectEditorPage: React.FC = () => {
     () => assets.find((asset) => asset.id === project?.background_asset_id) || assets.find((asset) => asset.kind.startsWith('background')) || null,
     [assets, project?.background_asset_id]
   );
-  const generationStage = useMemo(() => generationStageLabel(generationJob), [generationJob]);
-  const generationVoiceEntries = useMemo(
-    () => Object.values(((generationJob?.voice_manifest as any)?.speakers || {}) as Record<string, any>),
-    [generationJob?.voice_manifest]
-  );
-  const generationSegments = useMemo(
-    () => (((generationJob?.tts_result as any)?.segments || []) as any[]),
-    [generationJob?.tts_result]
-  );
-  const generationAssembly = useMemo(
-    () => (((generationJob?.tts_result as any)?.assembly || {}) as any),
-    [generationJob?.tts_result]
-  );
-  const generationTtsError = (generationJob?.tts_result as any)?.error || null;
   const savedDraft = useMemo(
     () => script?.parsed_lines?.length
       ? normalizeDraft(linesToDraft(script.parsed_lines))
@@ -845,12 +801,6 @@ const ProjectEditorPage: React.FC = () => {
     } finally {
       setBusy(null);
     }
-  };
-
-  const syncDraftFromLines = (nextLines: ScriptLine[]) => {
-    const normalized = nextLines.map((line, index) => ({ ...line, order: index }));
-    setScriptLines(normalized);
-    setScriptDraft(linesToDraft(normalized));
   };
 
   const updateScriptDraft = (nextDraft: string) => {
@@ -1299,7 +1249,7 @@ const ProjectEditorPage: React.FC = () => {
           {error && <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-rose-200">{error}</div>}
 
           {stage !== 'Render' && generationJob && (
-            <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
+            <section className="rounded-3xl border border-white/10 bg-white/4 p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Latest render job</div>
@@ -1352,10 +1302,10 @@ const ProjectEditorPage: React.FC = () => {
             })}
           </section>
 
-          <div className={`grid gap-6 ${stage === 'Preview' || stage === 'Script' ? '' : 'xl:grid-cols-[1.15fr_0.85fr]'}`}>
+          <div className={`grid gap-6 ${stage === 'Preview' || stage === 'Script' || stage === 'Cast & Voices' ? '' : 'xl:grid-cols-[1.15fr_0.85fr]'}`}>
             <section className="space-y-6">
               {stage === 'Idea' && (
-                <div id="step-idea" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div id="step-idea" className="rounded-3xl border border-white/10 bg-white/4 p-6">
                   <h2 className="text-xl font-semibold">Idea</h2>
                   <p className="mt-2 text-sm text-slate-400">Set the production direction before moving into script, cast, scene, preview, render, and release.</p>
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -1377,7 +1327,7 @@ const ProjectEditorPage: React.FC = () => {
               )}
 
               {stage === 'Scene' && (
-                <div id="step-scene" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div id="step-scene" className="rounded-3xl border border-white/10 bg-white/4 p-6">
                   <h2 className="text-xl font-semibold">Scene</h2>
                   <p className="mt-2 text-sm text-slate-400">Upload a scene video or image, or pick a curated scene for this production.</p>
                   <div className="mt-4 flex flex-col gap-3 md:flex-row">
@@ -1488,7 +1438,7 @@ const ProjectEditorPage: React.FC = () => {
               )}
 
               {stage === 'Render' && (
-                <div id="step-render" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div id="step-render" className="rounded-3xl border border-white/10 bg-white/4 p-6">
                   <h2 className="text-xl font-semibold">Render</h2>
                   <p className="mt-2 text-sm text-slate-400">Queue a draft, preview, final, or debug render after the script, cast, and scene are ready.</p>
                   {renderReadiness && (
@@ -1621,14 +1571,32 @@ const ProjectEditorPage: React.FC = () => {
               )}
 
               {stage === 'Preview' && (
-                <div id="step-preview" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <h2 className="text-xl font-semibold">Preview</h2>
-                      <p className="mt-2 text-sm text-slate-400">
-                        Preview reflects current script, cast, background, captions, and layout settings before any final render is trusted.
-                      </p>
+                <>
+                <section className="panel script-hero">
+                  <div className="script-hero-copy">
+                    <span className="eyebrow">Step 04 / Preview</span>
+                    <h1 className="hero-title">Preview-first. Controls dock around it.</h1>
+                    <p className="lede">
+                      The preview is the authoritative element — what you see is what renders. An oversized 9:16 frame
+                      holds the stage while the control dock and readiness chips support from the side.
+                    </p>
+                    <div className="script-hero-actions">
+                      <StudioButton variant="secondary" onClick={() => void refreshRenderState()} disabled={Boolean(busy)}>
+                        Cache Visual Layers
+                      </StudioButton>
+                      <StudioButton variant="primary" onClick={() => void persistPreviewLayout(previewSettings)} disabled={Boolean(busy)}>
+                        Save Snapshot
+                      </StudioButton>
                     </div>
+                  </div>
+                  <StudioStatusBadge tone={productionReadiness.renderPrerequisitesReady ? 'ready' : 'warning'}>
+                    Step 04
+                  </StudioStatusBadge>
+                </section>
+
+                <div id="step-preview" className="rounded-3xl border border-white/10 bg-white/4 p-6">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h2 className="text-sm font-semibold text-slate-400">Preview</h2>
                     <StudioStatusBadge tone={productionReadiness.renderPrerequisitesReady ? 'ready' : 'warning'}>
                       {productionReadiness.renderPrerequisitesReady ? 'Tuning' : 'Locked / missing requirements'}
                     </StudioStatusBadge>
@@ -1827,10 +1795,11 @@ const ProjectEditorPage: React.FC = () => {
                     </section>
                   </div>
                 </div>
+                </>
               )}
 
               {stage === 'Generated Media' && (
-                <div id="step-generated-media" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div id="step-generated-media" className="rounded-3xl border border-white/10 bg-white/4 p-6">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <h2 className="text-xl font-semibold">Generated Media</h2>
@@ -1868,7 +1837,7 @@ const ProjectEditorPage: React.FC = () => {
               )}
 
               {stage === 'Release' && (
-                <div id="step-release" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div id="step-release" className="rounded-3xl border border-white/10 bg-white/4 p-6">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <h2 className="text-xl font-semibold">Platform Metadata</h2>
@@ -1971,7 +1940,7 @@ const ProjectEditorPage: React.FC = () => {
               )}
 
               {stage === 'Release' && (
-                <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div className="rounded-3xl border border-white/10 bg-white/4 p-6">
                   <h2 className="text-xl font-semibold">Destination Routing</h2>
                   <p className="mt-2 text-sm text-slate-400">Recommend the best destination account from project policy, account health, and metadata readiness.</p>
                   <button
@@ -2006,7 +1975,7 @@ const ProjectEditorPage: React.FC = () => {
               )}
 
               {stage === 'Release' && (
-                <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div className="rounded-3xl border border-white/10 bg-white/4 p-6">
                   <h2 className="text-xl font-semibold">Publish</h2>
                   <p className="mt-2 text-sm text-slate-400">Choose assisted publish or let the platform auto-route using your saved project policy.</p>
 
@@ -2078,7 +2047,7 @@ const ProjectEditorPage: React.FC = () => {
               )}
 
               {stage === 'Release' && (
-                <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+                <div className="rounded-3xl border border-white/10 bg-white/4 p-6">
                   <h2 className="text-xl font-semibold">Project History</h2>
                   <div className="mt-6 grid gap-6 lg:grid-cols-2">
                     <div className="space-y-3">
@@ -2110,9 +2079,9 @@ const ProjectEditorPage: React.FC = () => {
               )}
             </section>
 
-            {stage !== 'Preview' && stage !== 'Script' && (
+            {stage !== 'Preview' && stage !== 'Script' && stage !== 'Cast & Voices' && (
             <section className="space-y-6">
-              <div id="pre-render-preview" className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+              <div id="pre-render-preview" className="rounded-3xl border border-white/10 bg-white/4 p-6">
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <h2 className="text-xl font-semibold">Preview Frame</h2>
@@ -2179,19 +2148,19 @@ const ProjectEditorPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+              <div className="rounded-3xl border border-white/10 bg-white/4 p-6">
                 <h2 className="text-xl font-semibold">Current Output</h2>
                 <p className="mt-2 text-sm text-slate-400">The latest render stays centered in a responsive phone-frame preview so review playback matches the rest of the workspace.</p>
-                <div className="mt-4 rounded-3xl border border-white/10 bg-[radial-gradient(circle_at_top,_rgba(103,232,249,0.12),_transparent_48%),linear-gradient(180deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-4 sm:p-5">
+                <div className="mt-4 rounded-3xl border border-white/10 bg-[radial-gradient(circle_at_top,rgba(103,232,249,0.12),transparent_48%),linear-gradient(180deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-4 sm:p-5">
                   {latestOutput ? (
-                    <div className="mx-auto w-full max-w-[22rem]">
-                      <div className="overflow-hidden rounded-[2rem] border border-white/10 bg-black shadow-[0_24px_70px_rgba(2,6,23,0.55)]">
+                    <div className="mx-auto w-full max-w-88">
+                      <div className="overflow-hidden rounded-4xl border border-white/10 bg-black shadow-[0_24px_70px_rgba(2,6,23,0.55)]">
                         <video
                           src={`${apiBase}${latestOutput.asset.content_url}`}
                           controls
                           playsInline
                           preload="metadata"
-                          className="aspect-[9/16] w-full bg-black object-contain"
+                          className="aspect-9/16 w-full bg-black object-contain"
                         />
                       </div>
                       <div className="mt-3 flex items-center justify-between gap-3 text-xs uppercase tracking-[0.24em] text-slate-400">
@@ -2200,7 +2169,7 @@ const ProjectEditorPage: React.FC = () => {
                       </div>
                     </div>
                   ) : (
-                    <div className="mx-auto grid aspect-[9/16] w-full max-w-[22rem] place-items-center rounded-[2rem] border border-dashed border-white/10 bg-slate-950/70 text-slate-500">
+                    <div className="mx-auto grid aspect-9/16 w-full max-w-88 place-items-center rounded-4xl border border-dashed border-white/10 bg-slate-950/70 text-slate-500">
                       No render output yet.
                     </div>
                   )}
@@ -2216,7 +2185,7 @@ const ProjectEditorPage: React.FC = () => {
                 ) : null}
               </div>
 
-              <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
+              <div className="rounded-3xl border border-white/10 bg-white/4 p-6">
                 <h2 className="text-xl font-semibold">Workflow Snapshot</h2>
                 <div className="mt-4 space-y-3 text-sm text-slate-300">
                   <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3">
