@@ -1,6 +1,6 @@
 # Omniposter Agent Handoff Protocol
 
-Last updated: 2026-05-28
+Last updated: 2026-06-04
 
 Use this protocol when switching work between Codex, Claude Code, or any other coding agent. The goal is a clean trade-off: one agent can stop, another can continue, and project memory, runtime safety, and verification evidence stay intact.
 
@@ -35,6 +35,7 @@ Every handoff between agents should include:
 - Tests run and exact result.
 - Known failures, skipped checks, or local-only assumptions.
 - Next recommended scoped task.
+- Recommended git commands for the user to run manually.
 
 Use this compact format:
 
@@ -48,6 +49,7 @@ Runtime paths protected:
 Tests run:
 Failures/skips:
 Next task:
+Recommended git commands:
 ```
 
 ## Checkpoint Rules
@@ -65,6 +67,18 @@ Before checkpointing:
 3. Run the targeted compile/tests for the changed area.
 4. Confirm no generated media, local DBs, model checkpoints, dependency caches, or runtime outputs are staged.
 5. Use a clear commit message that names the phase or boundary.
+
+Before checkpointing or ending a handoff, recommend exact commands for the user to run manually:
+
+```bash
+git status --short
+git add <changed files>
+git commit -m "<clear scoped message>"
+```
+
+If multiple unrelated areas changed, recommend multiple commits.
+
+Do not stage generated media, local DBs, model checkpoints, dependency caches, Docker volumes, runtime outputs, `.env`, `.claude/settings.local.json`, or machine-local settings.
 
 Do not checkpoint a failing or partially verified state unless the commit message clearly says it is an intentionally incomplete WIP checkpoint.
 

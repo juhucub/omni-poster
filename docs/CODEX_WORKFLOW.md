@@ -1,6 +1,6 @@
 # Omniposter Codex Workflow
 
-Last updated: 2026-06-02
+Last updated: 2026-06-04
 
 This is the required workflow for Codex tasks in Omniposter.
 
@@ -129,6 +129,23 @@ curl http://localhost:8000/health
 Use the commands that match the repo.
 
 If a command cannot be run, explain why.
+
+## Git Recommendation Rule
+
+At the end of every task, agents must recommend Git staging and commit commands for the user to run manually.
+
+Agents may use read-only Git inspection commands such as:
+
+```bash
+git status --short
+git diff --name-status
+git diff --stat
+git ls-files --others --exclude-standard
+```
+
+Agents must not run mutating Git commands unless the user explicitly asks.
+
+The recommendation should group files by logical product or engineering purpose, not by random file order.
 
 ## 7. Documentation Maintenance Decision
 
@@ -321,6 +338,19 @@ List anything still uncertain, incomplete, or not verified.
 
 ## Recommended Next Task
 Give the next best scoped Codex task.
+
+## Recommended Git Commands For User
+Provide exact recommended commands for the user to run manually.
+
+Rules:
+- The agent may inspect Git status with read-only commands, but must not stage, commit, push, reset, restore, clean, rebase, merge, or stash unless explicitly instructed.
+- Commands must use exact file paths from the changed files.
+- Prefer one commit per coherent task.
+- If the task changed unrelated areas, split the recommendations into multiple commits.
+- If a file should be staged partially, recommend `git add -p <file>` and explain which hunks belong.
+- Always warn about files that should not be committed, such as `.env`, `.claude/settings.local.json`, generated media, model checkpoints, local DBs, Docker volumes, dependency caches, Playwright reports, build outputs, runtime storage, generated MP4/WAV files, or other local artifacts.
+- If no files changed, say: “No git commands needed because no files were changed.”
+- Do not include `git push` unless the user specifically asked for push instructions or this was a release/checkpoint planning task.
 ```
 
 ## Reusable Codex Task Footer
@@ -375,6 +405,7 @@ Final response must include:
 ## Remaining Risks
 ## Recommended Next Task
 # User Flow To Follow For Testing Functionality (if necessary)
+## Recommended Git Commands For User
 ```
 
 ## Recommended Codex Prompt Pattern

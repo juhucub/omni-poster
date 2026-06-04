@@ -533,7 +533,7 @@ const ProjectEditorPage: React.FC = () => {
     setScript(revision);
     const nextLines = revision?.parsed_lines?.length
       ? revision.parsed_lines
-      : parseDraftToLines(revision?.raw_text || defaultScript);
+      : parseDraftToLines(revision?.raw_text || defaultScript, revision?.parsed_lines || []);
     const nextDraft = nextLines.length
       ? linesToDraft(nextLines)
       : (revision?.raw_text || defaultScript);

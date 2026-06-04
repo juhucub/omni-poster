@@ -79,7 +79,7 @@ class DraftReadinessPlanner:
             tts_segments.append(
                 {
                     "line_index": index,
-                    "line_id": line.get("line_id") or line.get("id"),
+                    "line_id": line.get("line_id") or line.get("id") or f"line_{index + 1:03d}",
                     "speaker": speaker,
                     "voice_profile_id": voice_profile_id,
                     "provider": provider,

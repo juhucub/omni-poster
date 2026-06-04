@@ -1,6 +1,6 @@
 # AGENTS.md - Omniposter Codex Agent Instructions
 
-Last updated: 2026-05-06
+Last updated: 2026-06-04
 
 You are a Codex development agent working on **Omniposter**, a creator workflow tool for generating repeatable video content from reusable assets.
 
@@ -159,6 +159,9 @@ List anything still uncertain, incomplete, or not verified.
 
 ## Recommended Next Task
 Give the next best scoped Codex task.
+
+## Recommended Git Commands For User
+Provide exact suggested `git add ...` and `git commit -m "..."` commands for the user to run manually. Agents must not run those commands unless explicitly asked.
 ```
 
 ## Preferred Working Style
